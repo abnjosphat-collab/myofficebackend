@@ -81,6 +81,14 @@ def convert_dates_to_iso(record):
                 record[key] = value.isoformat()
     return record
 
+# Columns confirmed to exist in the Supabase spares table.
+# Add more here once you run: ALTER TABLE spares ADD COLUMN IF NOT EXISTS ...
+_DB_COLUMNS = {
+    'stock_code', 'description', 'category', 'machine_type',
+    'current_quantity', 'min_quantity', 'max_quantity', 'unit_price',
+    'priority', 'storage_location', 'supplier', 'safety_stock',
+}
+
 # Helper function to clean data
 def clean_data(data: dict) -> dict:
     """Clean data by removing None values and empty strings"""
@@ -94,6 +102,10 @@ def clean_data(data: dict) -> dict:
             else:
                 cleaned[key] = value
     return cleaned
+
+def filter_for_db(data: dict) -> dict:
+    """Strip fields that are not yet in the DB schema to avoid PGRST204 errors."""
+    return {k: v for k, v in data.items() if k in _DB_COLUMNS}
 
 # GET all spares
 @router.get("")
@@ -202,8 +214,8 @@ async def create_spare(spare: SpareCreate):
         if existing.data:
             raise HTTPException(status_code=400, detail=f"Stock code '{spare.stock_code}' already exists")
         
-        # Insert new spare
-        response = supabase.table("spares").insert(spare.dict()).execute()
+        # Insert new spare (filter to known DB columns only)
+        response = supabase.table("spares").insert(filter_for_db(spare.dict())).execute()
         
         if not response.data:
             raise HTTPException(status_code=500, detail="Failed to create spare part")
@@ -242,24 +254,60 @@ async def update_spare(spare_id: int, spare_update: SpareUpdate):
             if conflict.data:
                 raise HTTPException(status_code=400, detail=f"Stock code '{spare_update.stock_code}' already exists")
         
-        # Clean update data
-        update_data = clean_data(spare_update.dict(exclude_unset=True))
+        # Clean and filter update data to known DB columns only
+        update_data = filter_for_db(clean_data(spare_update.dict(exclude_unset=True)))
         
         if not update_data:
             raise HTTPException(status_code=400, detail="No data provided for update")
         
         # Update in database
         response = supabase.table("spares").update(update_data).eq("id", spare_id).execute()
-        
+
         if not response.data:
             raise HTTPException(status_code=500, detail="Failed to update spare part")
-        
+
         logger.info(f"Updated spare part: {spare_id}")
-        
+
+        # Propagate price change into stock_issues JSONB items so historical
+        # records reflect the current catalogue price.
+        # Requires this function in Supabase (run once):
+        #
+        #   CREATE OR REPLACE FUNCTION sync_issue_item_prices(p_stock_code TEXT, p_new_price FLOAT8)
+        #   RETURNS INTEGER AS $$
+        #   DECLARE updated_count INTEGER := 0;
+        #   BEGIN
+        #     UPDATE stock_issues
+        #     SET items = (
+        #       SELECT jsonb_agg(
+        #         CASE WHEN item->>'stock_code' = p_stock_code
+        #              THEN jsonb_set(item, '{unit_price}', to_jsonb(p_new_price))
+        #              ELSE item END
+        #       )
+        #       FROM jsonb_array_elements(items) AS item
+        #     )
+        #     WHERE items @> jsonb_build_array(jsonb_build_object('stock_code', p_stock_code));
+        #     GET DIAGNOSTICS updated_count = ROW_COUNT;
+        #     RETURN updated_count;
+        #   END;
+        #   $$ LANGUAGE plpgsql SECURITY DEFINER;
+        if 'unit_price' in update_data:
+            old_stock_code = existing.data[0].get('stock_code')
+            try:
+                sync_result = supabase.rpc('sync_issue_item_prices', {
+                    'p_stock_code': old_stock_code,
+                    'p_new_price': float(update_data['unit_price']),
+                }).execute()
+                updated_issues = sync_result.data or 0
+                if updated_issues:
+                    logger.info(f"Synced price ${update_data['unit_price']} for {old_stock_code} into {updated_issues} issue record(s)")
+            except Exception as sync_err:
+                # Non-fatal — function may not exist yet (migration pending)
+                logger.warning(f"Price sync to stock_issues skipped: {sync_err}")
+
         result = response.data[0]
         convert_dates_to_iso(result)
         return result
-        
+
     except HTTPException:
         raise
     except Exception as e:
@@ -433,17 +481,96 @@ async def export_spares():
     """Export all spares as JSON"""
     try:
         response = supabase.table("spares").select("*").order("stock_code").execute()
-        
+
         spares = response.data or []
         for record in spares:
             convert_dates_to_iso(record)
-        
+
         return {
             "export_date": datetime.now().isoformat(),
             "count": len(spares),
             "spares": spares
         }
-        
+
     except Exception as e:
         logger.error(f"Error exporting spares: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Error exporting spares: {str(e)}")
+
+# ── Saved Spare Requisitions ──────────────────────────────────────────────────
+# Run this SQL in Supabase before using these endpoints:
+#
+#   CREATE TABLE spare_requisitions (
+#     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+#     name TEXT NOT NULL,
+#     saved_at TIMESTAMPTZ DEFAULT NOW(),
+#     updated_at TIMESTAMPTZ DEFAULT NOW(),
+#     requester TEXT,
+#     reason TEXT,
+#     urgency TEXT DEFAULT 'routine',
+#     priority TEXT DEFAULT 'medium',
+#     required_for TEXT,
+#     lines JSONB DEFAULT '[]',
+#     grand_total NUMERIC DEFAULT 0
+#   );
+
+class SavedSpareReqCreate(BaseModel):
+    name: str = Field(..., min_length=1)
+    requester: Optional[str] = None
+    reason: Optional[str] = None
+    urgency: str = 'routine'
+    priority: str = 'medium'
+    required_for: Optional[str] = None
+    lines: List[dict] = Field(default_factory=list)
+    grand_total: float = 0.0
+
+@router.get("/saved-requisitions")
+async def get_saved_spare_requisitions():
+    """Fetch all saved spare requisitions from Supabase"""
+    try:
+        response = supabase.table("spare_requisitions").select("*").order("updated_at", desc=True).execute()
+        return response.data or []
+    except Exception as e:
+        logger.warning(f"spare_requisitions table may not exist yet: {e}")
+        return []
+
+@router.post("/saved-requisitions", status_code=201)
+async def create_saved_spare_requisition(data: SavedSpareReqCreate):
+    """Save a spare requisition to Supabase"""
+    try:
+        now = datetime.utcnow().isoformat()
+        row = {**data.dict(), "saved_at": now, "updated_at": now}
+        response = supabase.table("spare_requisitions").insert(row).execute()
+        if not response.data:
+            raise HTTPException(status_code=500, detail="Failed to save requisition")
+        return response.data[0]
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error saving spare requisition: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.put("/saved-requisitions/{req_id}")
+async def update_saved_spare_requisition(req_id: str, data: SavedSpareReqCreate):
+    """Update a saved spare requisition"""
+    try:
+        now = datetime.utcnow().isoformat()
+        row = {**data.dict(), "updated_at": now}
+        response = supabase.table("spare_requisitions").update(row).eq("id", req_id).execute()
+        if not response.data:
+            raise HTTPException(status_code=404, detail="Saved requisition not found")
+        return response.data[0]
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error updating spare requisition: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.delete("/saved-requisitions/{req_id}")
+async def delete_saved_spare_requisition(req_id: str):
+    """Delete a saved spare requisition"""
+    try:
+        supabase.table("spare_requisitions").delete().eq("id", req_id).execute()
+        return {"message": "Deleted", "id": req_id}
+    except Exception as e:
+        logger.error(f"Error deleting spare requisition: {e}")
+        raise HTTPException(status_code=500, detail=str(e))

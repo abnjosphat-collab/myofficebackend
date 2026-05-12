@@ -595,6 +595,27 @@ except ImportError as e:
     logger.error(f"❌ Failed to import maintenance router: {e}")
     loaded_routers["maintenance"] = None
 
+# ===== STOCK ISSUES ROUTER =====
+logger.info("🔄 Loading stock issues router...")
+try:
+    from app.routers.issues import router as issues_router
+    app.include_router(issues_router, prefix="/api/issues", tags=["Stock Issues"])
+    loaded_routers["issues"] = issues_router
+    logger.info("✅ STOCK ISSUES ROUTER SUCCESSFULLY LOADED at /api/issues")
+except ImportError as e:
+    logger.error(f"❌ Failed to import issues router: {e}")
+    loaded_routers["issues"] = None
+
+logger.info("🔄 Loading drivers router...")
+try:
+    from app.routers.drivers import router as drivers_router
+    app.include_router(drivers_router, prefix="/api/drivers", tags=["Drivers"])
+    loaded_routers["drivers"] = drivers_router
+    logger.info("✅ DRIVERS ROUTER SUCCESSFULLY LOADED at /api/drivers")
+except ImportError as e:
+    logger.error(f"❌ Failed to import drivers router: {e}")
+    loaded_routers["drivers"] = None
+
 # ===== OTHER ROUTERS (unchanged) =====
 routers_to_import = [
     "reports", "inventory", "overtime", "ppe", "documents", 
