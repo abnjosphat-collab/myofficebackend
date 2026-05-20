@@ -77,7 +77,8 @@ async def root():
             "availability": "/api/availabilities",
             "timesheets": "/api/timesheets",
             "requisitions": "/api/requisitions",
-            "schedules": "/api/schedules"
+            "schedules": "/api/schedules",
+            "safety_complaints": "/api/safety-complaints"
         }
     }
 
@@ -281,6 +282,18 @@ except Exception as e:
     @app.get("/api/pachedu/{path:path}")
     async def pachedu_path_fallback(path: str):
         raise HTTPException(status_code=503, detail=f"Pachedu router not available: {path}")
+
+# ===== SAFETY COMPLAINTS ROUTER =====
+logger.info("🔄 Loading safety complaints router...")
+try:
+    from app.routers.safety_complaints import router as safety_complaints_router
+    app.include_router(safety_complaints_router)
+    logger.info("✅ SAFETY COMPLAINTS ROUTER LOADED at /api/safety-complaints")
+except Exception as e:
+    logger.error(f"❌ Error including safety complaints router: {e}")
+    @app.get("/api/safety-complaints")
+    async def safety_complaints_fallback():
+        return {"message": "Safety complaints router not loaded", "status": "fallback"}
 
 # ===== DIRECT AVAILABILITY ENDPOINTS (unchanged) =====
 class AvailabilityStats(BaseModel):

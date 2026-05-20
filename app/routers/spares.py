@@ -23,7 +23,8 @@ class DateTimeEncoder(json.JSONEncoder):
 class SpareCreate(BaseModel):
     stock_code: str = Field(..., min_length=1, description="Unique stock code")
     description: str = Field(..., min_length=1, description="Part description")
-    category: Optional[str] = Field(None, description="Category")
+    category: Optional[str] = Field(None, description="Primary category (legacy)")
+    categories: Optional[List[str]] = Field(default_factory=list, description="Multi-category tags")
     machine_type: Optional[str] = Field(None, description="Machine type")
     current_quantity: int = Field(0, ge=0, description="Current stock quantity")
     min_quantity: int = Field(1, ge=0, description="Minimum stock level")
@@ -48,6 +49,7 @@ class SpareUpdate(BaseModel):
     stock_code: Optional[str] = Field(None, min_length=1)
     description: Optional[str] = Field(None, min_length=1)
     category: Optional[str] = None
+    categories: Optional[List[str]] = None
     machine_type: Optional[str] = None
     current_quantity: Optional[int] = Field(None, ge=0)
     min_quantity: Optional[int] = Field(None, ge=0)
@@ -84,9 +86,10 @@ def convert_dates_to_iso(record):
 # Columns confirmed to exist in the Supabase spares table.
 # Add more here once you run: ALTER TABLE spares ADD COLUMN IF NOT EXISTS ...
 _DB_COLUMNS = {
-    'stock_code', 'description', 'category', 'machine_type',
+    'stock_code', 'description', 'category', 'categories', 'machine_type',
     'current_quantity', 'min_quantity', 'max_quantity', 'unit_price',
     'priority', 'storage_location', 'supplier', 'safety_stock',
+    'notes', 'unit_of_measure', 'lead_time_days', 'last_ordered_date',
 }
 
 # Helper function to clean data
@@ -110,8 +113,8 @@ def filter_for_db(data: dict) -> dict:
 # GET all spares
 @router.get("")
 async def get_spares(
-    search: Optional[str] = Query(None, description="Search in stock code or description"),
-    category: Optional[str] = Query(None, description="Filter by category"),
+    search: Optional[str] = Query(None, description="Search in stock code, description, or notes"),
+    category: Optional[str] = Query(None, description="Filter by category (checks both category and categories array)"),
     priority: Optional[str] = Query(None, description="Filter by priority"),
     limit: int = Query(5000, ge=1, le=10000, description="Limit results"),
     offset: int = Query(0, ge=0, description="Offset for pagination")
@@ -119,28 +122,40 @@ async def get_spares(
     """Get all spares with optional filtering"""
     try:
         query = supabase.table("spares").select("*")
-        
+
         if search:
-            query = query.or_(f"stock_code.ilike.%{search}%,description.ilike.%{search}%")
-        
+            # Search in stock_code, description, and notes
+            query = query.or_(
+                f"stock_code.ilike.%{search}%,"
+                f"description.ilike.%{search}%,"
+                f"notes.ilike.%{search}%"
+            )
+
         if category:
-            query = query.eq("category", category)
-        
+            # Filter: matches single category field OR is contained in categories array
+            query = query.or_(
+                f"category.eq.{category},"
+                f"categories.cs.{{\"{category}\"}}"
+            )
+
         if priority:
             query = query.eq("priority", priority)
-        
+
         # Apply ordering and pagination
         query = query.order("stock_code", desc=False).limit(limit).offset(offset)
-        
+
         response = query.execute()
-        
+
         # Convert dates to ISO format for JSON serialization
         records = response.data or []
         for record in records:
             convert_dates_to_iso(record)
-            
+            # Ensure categories is always a list
+            if 'categories' not in record or record['categories'] is None:
+                record['categories'] = []
+
         return records
-        
+
     except Exception as e:
         logger.error(f"Error fetching spares: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Error fetching spares: {str(e)}")
@@ -157,8 +172,10 @@ async def get_spare(spare_id: int):
         
         result = response.data[0]
         convert_dates_to_iso(result)
+        if 'categories' not in result or result['categories'] is None:
+            result['categories'] = []
         return result
-        
+
     except HTTPException:
         raise
     except Exception as e:
