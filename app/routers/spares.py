@@ -1,13 +1,15 @@
 """
 Spares Management Router - PostgreSQL/Supabase Version
 """
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, File, UploadFile
 from pydantic import BaseModel, Field, validator
-from typing import Optional, List
+from typing import Optional, List, Dict, Any
 from datetime import datetime, date
 from app.supabase_client import supabase
 import logging
 import json
+import io
+import polars as pl
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -73,6 +75,7 @@ class SpareUpdate(BaseModel):
 class BulkSpareCreate(BaseModel):
     items: List[SpareCreate]
     skip_existing: bool = Field(True, description="Skip items with existing stock codes")
+    upsert: bool = Field(False, description="Update existing records instead of skipping them")
 
 # Helper function to convert dates in records
 def convert_dates_to_iso(record):
@@ -110,51 +113,373 @@ def filter_for_db(data: dict) -> dict:
     """Strip fields that are not yet in the DB schema to avoid PGRST204 errors."""
     return {k: v for k, v in data.items() if k in _DB_COLUMNS}
 
+
+# ─── COLUMN INFERENCE ────────────────────────────────────────────────────────
+
+import re as _re
+
+# ─── Category-row detection helpers ──────────────────────────────────────────
+
+_CAT_PREFIX_RE = _re.compile(r'^(?:category|cat)\s*[:\-]\s*', _re.IGNORECASE)
+
+
+def _is_category_row(values: tuple, is_bold: bool) -> bool:
+    """Return True if this row is a category/group header, not a data row."""
+    non_empty = [str(v).strip() for v in values if v is not None and str(v).strip()]
+    if not non_empty:
+        return False
+    first = non_empty[0]
+    # Primary: "Category:" / "Cat:" prefix — always a header
+    if _CAT_PREFIX_RE.match(first):
+        return True
+    # Secondary: bold row with no numeric values anywhere.
+    # Data rows always have at least a price or qty (numeric); category headers are all text.
+    if is_bold:
+        def _is_numeric(s: str) -> bool:
+            try:
+                float(s.replace(',', '').replace('$', '').replace(' ', ''))
+                return True
+            except ValueError:
+                return False
+        if not any(_is_numeric(v) for v in non_empty):
+            return True
+    # Tertiary: exactly one non-numeric filled cell — standalone label even without bold
+    if len(non_empty) == 1:
+        try:
+            float(first.replace(',', '').replace('$', '').replace(' ', ''))
+            return False
+        except ValueError:
+            return True
+    return False
+
+
+def _extract_category_name(values: tuple) -> str:
+    """Pull the category label out of a detected category row."""
+    non_empty = [str(v).strip() for v in values if v is not None and str(v).strip()]
+    if not non_empty:
+        return ''
+    text = non_empty[0]
+    m = _CAT_PREFIX_RE.match(text)
+    return text[m.end():].strip() if m else text.strip()
+
+
+_STOCK_HINTS  = {'code', 'stock', 'sku', 'no', 'number', 'ref', 'part', 'item code',
+                 'stock code', 'part no', 'part number', 'item no', 'stockcode', 'partno',
+                 'catalogue', 'catalog', 'part#', 'item#'}
+_DESC_HINTS   = {'desc', 'description', 'name', 'item name', 'part name',
+                 'item description', 'product', 'detail', 'material', 'long desc',
+                 'full description', 'item description'}
+_PRICE_HINTS  = {'price', 'cost', 'rate', 'unit price', 'unit cost', 'amount', 'amt',
+                 'value', 'selling price', 'buy price', 'sell price', 'list price',
+                 'retail', 'nett', 'net price', 'gross', 'tariff', 'total', 'sum',
+                 'unit rate', 'each', 'per unit'}
+# Columns that look like quantities — should never win the unit_price role
+_QTY_HINTS    = {'qty', 'quantity', 'quant', 'count', 'balance', 'available',
+                 'on hand', 'onhand', 'in stock', 'stk qty', 'stock qty',
+                 'current qty', 'current stock', 'stock level', 'stock on hand'}
+
+
+def _score_column(col: str, series: pl.Series) -> Dict[str, float]:
+    """Return {'stock_code': s, 'description': s, 'unit_price': s} scores in [0, 1]."""
+    scores = {'stock_code': 0.0, 'description': 0.0, 'unit_price': 0.0}
+    col_lower = col.lower().strip()
+
+    # ── Header hint (40% weight) ──────────────────────────────────────────────
+    if any(h in col_lower for h in _STOCK_HINTS):
+        scores['stock_code'] += 0.40
+    if any(h in col_lower for h in _DESC_HINTS):
+        scores['description'] += 0.40
+    if any(h in col_lower for h in _PRICE_HINTS):
+        scores['unit_price'] += 0.40
+    # Hard penalty: quantity-named columns cannot be unit_price (e.g. "STK quantity")
+    if any(h in col_lower for h in _QTY_HINTS):
+        scores['unit_price'] = max(0.0, scores['unit_price'] - 0.70)
+
+    # ── Data inference (60% weight) ───────────────────────────────────────────
+    non_null = series.drop_nulls()
+    if len(non_null) == 0:
+        return scores
+
+    is_numeric = series.dtype in (
+        pl.Float32, pl.Float64,
+        pl.Int8, pl.Int16, pl.Int32, pl.Int64,
+        pl.UInt8, pl.UInt16, pl.UInt32, pl.UInt64,
+    )
+    numeric_vals: Optional[pl.Series] = None
+
+    if is_numeric:
+        numeric_vals = non_null.cast(pl.Float64, strict=False).drop_nulls()
+    else:
+        # Try to parse strings that look like numbers (handles "$1,250.00")
+        cleaned = (
+            non_null.cast(pl.Utf8, strict=False)
+            .str.replace_all(r'[\$,€£\s]', '')
+            .str.strip_chars()
+        )
+        parsed = cleaned.cast(pl.Float64, strict=False)
+        n_parsed = parsed.drop_nulls().len()
+        if n_parsed / max(len(non_null), 1) > 0.80:
+            numeric_vals = parsed.drop_nulls()
+            is_numeric = True
+
+    if is_numeric and numeric_vals is not None and len(numeric_vals) > 0:
+        non_neg   = float((numeric_vals >= 0).mean())
+        sensible  = float(((numeric_vals > 0) & (numeric_vals < 1_000_000)).mean())
+        # Decimal presence: prices usually have fractional parts; quantities rarely do.
+        # Cast to Int64 and compare — if the truncated value != original → it has decimals.
+        try:
+            has_dec = float((numeric_vals != numeric_vals.cast(pl.Int64, strict=False).cast(pl.Float64)).mean())
+        except Exception:
+            has_dec = 0.0
+        scores['unit_price'] += 0.60 * (non_neg * 0.20 + sensible * 0.40 + has_dec * 0.40)
+    else:
+        # String heuristics for stock_code / description
+        str_vals = (
+            non_null.cast(pl.Utf8, strict=False)
+            .str.strip_chars()
+        )
+        str_vals = str_vals.filter(str_vals.str.len_chars() > 0)
+        n = len(str_vals)
+        if n == 0:
+            return scores
+
+        avg_len       = float(str_vals.str.len_chars().mean() or 0)
+        unique_ratio  = str_vals.n_unique() / n
+        has_spaces    = float(str_vals.str.contains(r' ').mean())
+        no_spaces     = 1.0 - has_spaces
+        # Alphanumeric + separators, 2–30 chars (typical stock code pattern)
+        alnum_pattern = float(str_vals.str.contains(r'^[A-Za-z0-9][A-Za-z0-9\-_/\.]{1,29}$').mean())
+        short_ratio   = max(0.0, 1.0 - max(0.0, avg_len - 20) / 30.0)
+
+        stock_data = (
+            unique_ratio  * 0.35 +
+            short_ratio   * 0.30 +
+            no_spaces     * 0.15 +
+            alnum_pattern * 0.20
+        )
+        long_ratio = min(avg_len / 40.0, 1.0)
+        desc_data  = long_ratio * 0.40 + has_spaces * 0.40 + unique_ratio * 0.20
+
+        scores['stock_code']  += 0.60 * stock_data
+        scores['description'] += 0.60 * desc_data
+
+    return scores
+
+
+def _infer_column_roles(df: pl.DataFrame) -> Dict[str, Any]:
+    """
+    Score every column then greedily assign unit_price → stock_code → description.
+    Returns dict with keys: stock_code, description, unit_price and *_confidence.
+    """
+    all_scores = {col: _score_column(col, df[col]) for col in df.columns}
+    result: Dict[str, Any] = {}
+    used: set = set()
+
+    for role in ('unit_price', 'stock_code', 'description'):
+        candidates = [(col, all_scores[col][role]) for col in df.columns if col not in used]
+        if not candidates:
+            continue
+        best_col, best_score = max(candidates, key=lambda x: x[1])
+        result[role] = best_col
+        result[f'{role}_confidence'] = round(min(best_score, 1.0), 2)
+        used.add(best_col)
+
+    return result
+
+
+def _safe_val(v: Any) -> Any:
+    if v is None:
+        return None
+    if isinstance(v, (int, float, str, bool)):
+        return v
+    return str(v)
+
+
+@router.post("/infer")
+async def infer_spare_columns(file: UploadFile = File(...)):
+    """
+    Upload an Excel (.xlsx) or CSV file.
+    Polars reads it, inference engine scores every column,
+    returns column mapping + all raw rows for client-side preview & re-mapping.
+    """
+    try:
+        content = await file.read()
+        fname = (file.filename or "").lower()
+
+        if fname.endswith('.csv') or fname.endswith('.tsv'):
+            sep = '\t' if fname.endswith('.tsv') else ','
+            df = pl.read_csv(
+                io.BytesIO(content),
+                separator=sep,
+                infer_schema_length=500,
+                ignore_errors=True,
+                null_values=['', 'NULL', 'null', 'N/A', 'n/a'],
+            )
+            # Ensure all column names are strings (CSV may produce numeric names)
+            df = df.rename({c: str(c) for c in df.columns})
+        else:
+            # Load WITHOUT read_only so we can read cell.font.bold for category detection.
+            import openpyxl as _oxl
+            wb = _oxl.load_workbook(io.BytesIO(content), data_only=True)
+            ws = wb.active
+
+            # Collect (values_tuple, is_bold) for every row
+            raw_row_data: List[tuple] = []
+            for row_cells in ws.iter_rows():
+                values  = tuple(cell.value for cell in row_cells)
+                is_bold = any(
+                    cell.font and cell.font.bold and cell.value is not None
+                    for cell in row_cells
+                )
+                raw_row_data.append((values, is_bold))
+            wb.close()
+
+            if not raw_row_data:
+                raise HTTPException(status_code=400, detail="File appears to be empty")
+
+            # ── Build clean string headers from the first row ─────────────────
+            raw_hdrs = list(raw_row_data[0][0])
+            headers: List[str] = []
+            seen: dict = {}
+            for i, h in enumerate(raw_hdrs):
+                name = str(h).strip() if h is not None else ""
+                if not name or name.lower() == "none":
+                    name = f"Column_{i + 1}"
+                if name in seen:
+                    seen[name] += 1
+                    name = f"{name}_{seen[name]}"
+                else:
+                    seen[name] = 0
+                headers.append(name)
+
+            # ── Normalise a cell value to a Polars-safe scalar ────────────────
+            def _norm(v):
+                if v is None:           return None
+                if isinstance(v, bool): return int(v)
+                if isinstance(v, (int, float)): return v
+                if hasattr(v, 'isoformat'): return v.isoformat()
+                return str(v)
+
+            # ── Walk data rows, detect category headers, track current cat ────
+            n_cols          = len(headers)
+            current_cat     = ''
+            records         = []   # dicts for Polars (no _category)
+            row_categories  = []   # parallel list — one entry per record
+
+            for values, is_bold in raw_row_data[1:]:
+                non_empty = [str(v).strip() for v in values if v is not None and str(v).strip()]
+                if not non_empty:
+                    continue  # fully blank row — skip
+
+                if _is_category_row(values, is_bold):
+                    current_cat = _extract_category_name(values)
+                    continue  # category header — don't add to data records
+
+                d = {headers[i]: _norm(values[i] if i < len(values) else None)
+                     for i in range(n_cols)}
+                records.append(d)
+                row_categories.append(current_cat)
+
+            if not records:
+                raise HTTPException(status_code=400, detail="File contains no data rows")
+
+            df = pl.DataFrame(records, infer_schema_length=len(records))
+
+        if df.is_empty() or df.height == 0:
+            raise HTTPException(status_code=400, detail="File contains no data rows")
+
+        # Drop columns that are entirely null
+        df = df[[c for c in df.columns if df[c].drop_nulls().len() > 0]]
+
+        inferred = _infer_column_roles(df)
+
+        # Build raw_rows — merge _category back in (it was kept out of the DataFrame
+        # so it doesn't pollute the inference scoring).
+        # `row_categories` only exists for xlsx paths; CSV paths have no category rows.
+        cats: List[str] = locals().get('row_categories', [])
+        raw_rows = []
+        for idx, row in enumerate(df.to_dicts()):
+            record: Dict[str, Any] = {k: _safe_val(v) for k, v in row.items()}
+            cat = cats[idx] if idx < len(cats) else ''
+            if cat:
+                record['_category'] = cat
+            raw_rows.append(record)
+
+        has_categories = any(r.get('_category') for r in raw_rows)
+
+        return {
+            "inferred": {
+                "stock_code":  inferred.get("stock_code"),
+                "description": inferred.get("description"),
+                "unit_price":  inferred.get("unit_price"),
+            },
+            "confidence": {
+                "stock_code":  inferred.get("stock_code_confidence", 0),
+                "description": inferred.get("description_confidence", 0),
+                "unit_price":  inferred.get("unit_price_confidence", 0),
+            },
+            "all_columns": df.columns,
+            "raw_rows": raw_rows,
+            "total_rows": df.height,
+            "has_categories": has_categories,
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Column inference error: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 # GET all spares
 @router.get("")
 async def get_spares(
     search: Optional[str] = Query(None, description="Search in stock code, description, or notes"),
     category: Optional[str] = Query(None, description="Filter by category (checks both category and categories array)"),
     priority: Optional[str] = Query(None, description="Filter by priority"),
-    limit: int = Query(5000, ge=1, le=10000, description="Limit results"),
-    offset: int = Query(0, ge=0, description="Offset for pagination")
+    limit: int = Query(100_000, ge=1, le=200_000, description="Max records to return"),
+    offset: int = Query(0, ge=0, description="Starting offset"),
 ):
-    """Get all spares with optional filtering"""
+    """Get all spares with optional filtering, paginating through Supabase's 1000-row cap."""
     try:
-        query = supabase.table("spares").select("*")
+        def _build_query():
+            q = supabase.table("spares").select("*")
+            if search:
+                q = q.or_(
+                    f"stock_code.ilike.%{search}%,"
+                    f"description.ilike.%{search}%,"
+                    f"notes.ilike.%{search}%"
+                )
+            if category:
+                q = q.or_(
+                    f"category.eq.{category},"
+                    f"categories.cs.{{\"{category}\"}}"
+                )
+            if priority:
+                q = q.eq("priority", priority)
+            return q.order("stock_code", desc=False)
 
-        if search:
-            # Search in stock_code, description, and notes
-            query = query.or_(
-                f"stock_code.ilike.%{search}%,"
-                f"description.ilike.%{search}%,"
-                f"notes.ilike.%{search}%"
-            )
+        # Supabase PostgREST caps each request at 1000 rows.
+        # Loop with .range() until we have everything.
+        PAGE          = 1000
+        all_records: List[Dict[str, Any]] = []
+        current_start = offset
 
-        if category:
-            # Filter: matches single category field OR is contained in categories array
-            query = query.or_(
-                f"category.eq.{category},"
-                f"categories.cs.{{\"{category}\"}}"
-            )
+        while len(all_records) < limit:
+            fetch_n = min(PAGE, limit - len(all_records))
+            res   = _build_query().range(current_start, current_start + fetch_n - 1).execute()
+            batch = res.data or []
+            all_records.extend(batch)
+            if len(batch) < fetch_n:
+                break                   # last page — no more rows
+            current_start += fetch_n
 
-        if priority:
-            query = query.eq("priority", priority)
-
-        # Apply ordering and pagination
-        query = query.order("stock_code", desc=False).limit(limit).offset(offset)
-
-        response = query.execute()
-
-        # Convert dates to ISO format for JSON serialization
-        records = response.data or []
-        for record in records:
+        for record in all_records:
             convert_dates_to_iso(record)
-            # Ensure categories is always a list
             if 'categories' not in record or record['categories'] is None:
                 record['categories'] = []
 
-        return records
+        return all_records
 
     except Exception as e:
         logger.error(f"Error fetching spares: {str(e)}")
@@ -185,35 +510,98 @@ async def get_spare(spare_id: int):
 # POST bulk create spares
 @router.post("/bulk", status_code=201)
 async def bulk_create_spares(payload: BulkSpareCreate):
-    """Bulk create spare parts, skipping existing stock codes by default"""
+    """
+    Bulk-insert spare parts efficiently:
+    - One batched IN() query to find already-existing stock codes (no N+1)
+    - Batch inserts of 100 rows per Supabase call instead of one-at-a-time
+    This keeps 4 000+ row imports well within timeout limits.
+    """
     try:
+        items = payload.items
+        if not items:
+            return {"created": 0, "skipped": 0, "errors": 0, "total": 0}
+
+        BATCH = 100
         created = 0
         skipped = 0
-        errors = 0
+        updated = 0
+        errors  = 0
 
-        items = payload.items
-        batch_size = 50
+        if payload.upsert:
+            # ── UPSERT: manual fallback — no UNIQUE constraint required ──────────
+            # Step 1: batched IN() to find which codes already exist
+            CHECK_BATCH  = 200
+            all_codes    = [item.stock_code for item in items]
+            existing_codes: set = set()
+            for i in range(0, len(all_codes), CHECK_BATCH):
+                res = supabase.table("spares").select("stock_code") \
+                              .in_("stock_code", all_codes[i:i + CHECK_BATCH]).execute()
+                existing_codes.update(r["stock_code"] for r in (res.data or []))
 
-        for i in range(0, len(items), batch_size):
-            batch = items[i:i + batch_size]
+            new_items = [item for item in items if item.stock_code not in existing_codes]
+            upd_items = [item for item in items if item.stock_code in existing_codes]
 
-            for spare in batch:
+            # Step 2: batch-insert brand-new rows
+            for i in range(0, len(new_items), BATCH):
+                batch = new_items[i:i + BATCH]
                 try:
-                    if payload.skip_existing:
-                        existing = supabase.table("spares").select("id").eq("stock_code", spare.stock_code).execute()
-                        if existing.data:
-                            skipped += 1
-                            continue
+                    supabase.table("spares").insert(
+                        [filter_for_db(item.dict()) for item in batch]
+                    ).execute()
+                    created += len(batch)
+                except Exception as ins_err:
+                    logger.warning(f"Insert batch {i // BATCH} failed, going row-by-row: {ins_err}")
+                    for item in batch:
+                        try:
+                            supabase.table("spares").insert(filter_for_db(item.dict())).execute()
+                            created += 1
+                        except Exception as row_err:
+                            logger.warning(f"Insert row error {item.stock_code}: {row_err}")
+                            errors += 1
 
-                    spare_data = spare.dict()
-                    supabase.table("spares").insert(spare_data).execute()
-                    created += 1
-                except Exception as item_err:
-                    logger.warning(f"Skipping {spare.stock_code}: {item_err}")
+            # Step 3: update existing rows one at a time (update by stock_code needs no UNIQUE index)
+            for item in upd_items:
+                try:
+                    upd_data = {k: v for k, v in filter_for_db(item.dict()).items()
+                                if k != 'stock_code'}
+                    supabase.table("spares").update(upd_data).eq("stock_code", item.stock_code).execute()
+                    updated += 1
+                except Exception as upd_err:
+                    logger.warning(f"Update error {item.stock_code}: {upd_err}")
                     errors += 1
 
-        logger.info(f"Bulk import complete: {created} created, {skipped} skipped, {errors} errors")
-        return {"created": created, "skipped": skipped, "errors": errors, "total": len(items)}
+        else:
+            # ── SKIP existing: one batched IN() check, then insert only new rows ─────
+            existing_codes: set = set()
+            if payload.skip_existing:
+                CHECK_BATCH = 200
+                all_codes   = [item.stock_code for item in items]
+                for i in range(0, len(all_codes), CHECK_BATCH):
+                    res = supabase.table("spares").select("stock_code") \
+                                  .in_("stock_code", all_codes[i:i + CHECK_BATCH]).execute()
+                    existing_codes.update(r["stock_code"] for r in (res.data or []))
+
+            new_items = [item for item in items if item.stock_code not in existing_codes]
+            skipped   = len(items) - len(new_items)
+
+            for i in range(0, len(new_items), BATCH):
+                batch   = new_items[i:i + BATCH]
+                records = [filter_for_db(item.dict()) for item in batch]
+                try:
+                    supabase.table("spares").insert(records).execute()
+                    created += len(batch)
+                except Exception as batch_err:
+                    logger.warning(f"Insert batch error (rows {i}–{i + len(batch)}): {batch_err}")
+                    for item in batch:
+                        try:
+                            supabase.table("spares").insert(filter_for_db(item.dict())).execute()
+                            created += 1
+                        except Exception as row_err:
+                            logger.warning(f"Row error {item.stock_code}: {row_err}")
+                            errors += 1
+
+        logger.info(f"Bulk import: {created} inserted, {updated} updated, {skipped} skipped, {errors} errors / {len(items)} total")
+        return {"created": created, "updated": updated, "skipped": skipped, "errors": errors, "total": len(items)}
 
     except Exception as e:
         logger.error(f"Bulk create error: {str(e)}")

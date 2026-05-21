@@ -178,10 +178,10 @@ async def create_complaint(payload: SafetyComplaintCreate):
             "location": payload.location or "",
             "action_plan": payload.action_plan or "",
             "by_who": payload.by_who or "",
-            "by_when": payload.by_when or "",
+            "by_when": payload.by_when or None,        # date column — must be None not ""
             "supervisor_name": payload.supervisor_name or "",
             "supervisor_signature": payload.supervisor_signature or "",
-            "date_closed": payload.date_closed,
+            "date_closed": payload.date_closed or None, # date column — must be None not ""
             "status": payload.status or "open",
             "submitted_at": datetime.utcnow().isoformat(),
         }
@@ -196,10 +196,14 @@ async def create_complaint(payload: SafetyComplaintCreate):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+_DATE_COLS = {"by_when", "date_closed", "date"}
+
 @router.patch("/{complaint_id}")
 async def update_complaint(complaint_id: str, payload: SafetyComplaintUpdate):
     try:
-        updates = {k: v for k, v in payload.dict(exclude_none=True).items()}
+        raw = payload.dict(exclude_none=True)
+        # Convert empty strings to None for date-typed columns so Postgres doesn't reject them
+        updates = {k: (None if k in _DATE_COLS and v == "" else v) for k, v in raw.items()}
         if not updates:
             raise HTTPException(status_code=400, detail="No fields to update")
         result = supabase.table("safety_complaints").update(updates).eq("id", complaint_id).execute()
