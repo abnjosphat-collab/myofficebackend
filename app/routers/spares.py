@@ -9,7 +9,12 @@ from app.supabase_client import supabase
 import logging
 import json
 import io
-import polars as pl
+try:
+    import polars as pl
+    _POLARS_AVAILABLE = True
+except ImportError:
+    pl = None  # type: ignore
+    _POLARS_AVAILABLE = False
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
