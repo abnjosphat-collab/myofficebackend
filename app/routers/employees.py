@@ -26,6 +26,7 @@ class Employee(BaseModel):
     date_of_engagement: date = Field(..., description="Date of employment")
     designation: str = Field(..., min_length=1, description="Job title / position")
     employee_class: Optional[str] = None  # Permanent, Contract, Internship, Part-Time
+    employment_type: Optional[str] = None  # NEC or SALARIED
     supervisor: Optional[str] = None
     section: Optional[str] = None
     department: Optional[str] = None
