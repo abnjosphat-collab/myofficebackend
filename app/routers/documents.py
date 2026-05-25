@@ -1,357 +1,152 @@
-# backend/app/routers/documents.py
-from fastapi import APIRouter, HTTPException, Depends, UploadFile, File, Query
-from pydantic import BaseModel, Field, validator
-from typing import Optional, List, Dict, Any
+# app/routers/documents.py — AMS Document Hub (CRUD + Supabase Storage)
+from fastapi import APIRouter, HTTPException, UploadFile, File, Form
+from pydantic import BaseModel
+from typing import Optional
 from datetime import datetime
-from uuid import UUID, uuid4
-import json
 from app.supabase_client import supabase
-from app.auth import get_current_user
-from app.utils import generate_slug, format_file_size
+import logging, uuid as uuid_module
 
-router = APIRouter(prefix="/documents", tags=["documents"])
+logger = logging.getLogger(__name__)
+router = APIRouter(prefix="/api/documents", tags=["documents"])
 
-# --- Pydantic Models ---
-class DocumentBase(BaseModel):
-    name: str = Field(..., min_length=1, max_length=255)
-    type: str = Field(..., description="'folder' or file type")
-    parent_id: Optional[UUID] = None
-    access_level: str = Field("restricted", pattern="^(public|restricted|admin)$")
-    tags: Optional[List[str]] = []
-    metadata: Optional[Dict[str, Any]] = {}
+BUCKET = "ams-documents"
 
-class DocumentCreate(DocumentBase):
-    @validator('type')
-    def validate_type(cls, v):
-        if v not in ['folder', 'pdf', 'doc', 'docx', 'xls', 'xlsx', 'jpg', 'png', 'zip']:
-            raise ValueError('Invalid document type')
-        return v
 
-class DocumentUpdate(BaseModel):
-    name: Optional[str] = None
-    parent_id: Optional[UUID] = None
-    access_level: Optional[str] = None
-    tags: Optional[List[str]] = None
-    metadata: Optional[Dict[str, Any]] = None
+def _file_type(filename: str) -> str:
+    ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
+    if ext in {"jpg", "jpeg", "png", "gif", "bmp", "webp", "svg"}: return "image"
+    if ext in {"mp4", "avi", "mov", "wmv", "mkv", "webm"}:         return "video"
+    if ext in {"mp3", "wav", "ogg", "m4a", "flac"}:                return "audio"
+    if ext in {"doc", "docx", "txt", "md", "rtf"}:                 return "document"
+    if ext in {"xls", "xlsx", "csv"}:                              return "spreadsheet"
+    if ext == "pdf":                                                return "pdf"
+    if ext in {"zip", "rar", "7z", "tar", "gz"}:                   return "archive"
+    return "file"
 
-class DocumentResponse(DocumentBase):
-    id: UUID
-    file_url: Optional[str] = None
-    file_size: Optional[int] = None
-    mime_type: Optional[str] = None
-    version: str
-    status: str
-    created_by: Optional[UUID] = None
-    created_at: datetime
-    updated_at: datetime
-    children_count: Optional[int] = 0
 
-class FolderTree(BaseModel):
-    id: UUID
-    name: str
-    type: str
-    children: List['FolderTree'] = []
+# ── List ──────────────────────────────────────────────────────────────────────
 
-# --- Helper Functions ---
-def get_folder_tree(folder_id: Optional[UUID] = None) -> List[FolderTree]:
-    """Recursively build folder tree"""
-    query = supabase.table("documents").select("*").eq("type", "folder")
-    
-    if folder_id:
-        query = query.eq("parent_id", folder_id)
-    else:
-        query = query.is_("parent_id", None)
-    
-    result = query.order("name").execute()
-    folders = result.data
-    
-    tree = []
-    for folder in folders:
-        children = get_folder_tree(folder['id'])
-        tree.append(FolderTree(
-            id=folder['id'],
-            name=folder['name'],
-            type='folder',
-            children=children
-        ))
-    
-    return tree
-
-def check_access(document_id: UUID, user_id: UUID) -> bool:
-    """Check if user has access to document"""
-    doc_result = supabase.table("documents").select("access_level").eq("id", document_id).execute()
-    
-    if not doc_result.data:
-        return False
-    
-    document = doc_result.data[0]
-    
-    # Public access
-    if document['access_level'] == 'public':
-        return True
-    
-    # Check permissions
-    perm_result = supabase.table("document_permissions").select("*").eq("document_id", document_id).eq("user_id", user_id).execute()
-    
-    return bool(perm_result.data)
-
-# --- API Routes ---
-
-@router.get("/tree", response_model=List[FolderTree])
-async def get_document_tree():
-    """Get complete folder tree"""
+@router.get("")
+@router.get("/")
+async def list_documents(category_id: str, folder_id: Optional[str] = None):
     try:
-        return get_folder_tree()
+        q = supabase.table("documents").select("*").eq("category_id", category_id)
+        if folder_id:
+            q = q.eq("folder_id", folder_id)
+        else:
+            q = q.is_("folder_id", "null")
+        r = q.order("created_at", desc=True).execute()
+        return r.data or []
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error fetching document tree: {str(e)}")
+        logger.error("list_documents error: %s", e)
+        raise HTTPException(500, str(e))
 
-@router.get("/folder/{folder_id}", response_model=List[DocumentResponse])
-async def get_folder_contents(
-    folder_id: UUID,
-    current_user: dict = Depends(get_current_user)
-):
-    """Get contents of a specific folder"""
-    try:
-        # Check access
-        if not check_access(folder_id, current_user['id']):
-            raise HTTPException(status_code=403, detail="Access denied")
-        
-        result = supabase.table("documents").select("*, children_count").eq("parent_id", folder_id).order("type").order("name").execute()
-        
-        if not result.data:
-            return []
-        
-        return result.data
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error fetching folder contents: {str(e)}")
 
-@router.post("/folder", response_model=DocumentResponse)
-async def create_folder(
-    folder: DocumentCreate,
-    current_user: dict = Depends(get_current_user)
-):
-    """Create a new folder"""
-    try:
-        if folder.type != 'folder':
-            raise HTTPException(status_code=400, detail="Document type must be 'folder'")
-        
-        # Check parent access if parent_id exists
-        if folder.parent_id and not check_access(folder.parent_id, current_user['id']):
-            raise HTTPException(status_code=403, detail="Access denied to parent folder")
-        
-        folder_data = folder.dict()
-        folder_data['created_by'] = current_user['id']
-        folder_data['id'] = str(uuid4())
-        
-        result = supabase.table("documents").insert(folder_data).execute()
-        
-        if not result.data:
-            raise HTTPException(status_code=500, detail="Failed to create folder")
-        
-        return result.data[0]
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error creating folder: {str(e)}")
+# ── Upload ────────────────────────────────────────────────────────────────────
 
-@router.post("/upload", response_model=DocumentResponse)
+@router.post("/upload")
 async def upload_document(
-    file: UploadFile = File(...),
-    name: str = Query(...),
-    parent_id: Optional[UUID] = None,
-    access_level: str = Query("restricted"),
-    tags: str = Query(""),
-    current_user: dict = Depends(get_current_user)
+    file: UploadFile  = File(...),
+    name: str         = Form(""),
+    description: str  = Form(""),
+    category_id: str  = Form(""),
+    category_name: str= Form(""),
+    folder_id: str    = Form(""),   # empty string = root
+    folder_path: str  = Form(""),
 ):
-    """Upload a new document"""
+    content = await file.read()
+    if len(content) > 100 * 1024 * 1024:
+        raise HTTPException(400, "File too large — maximum 100 MB")
+
+    original_name = file.filename or "upload"
+    display_name  = name.strip() or original_name
+    ext           = original_name.rsplit(".", 1)[-1] if "." in original_name else "bin"
+    real_folder   = folder_id.strip() or None
+    storage_path  = f"{category_id}/{real_folder or 'root'}/{uuid_module.uuid4()}.{ext}"
+
     try:
-        # Check parent access if parent_id exists
-        if parent_id and not check_access(parent_id, current_user['id']):
-            raise HTTPException(status_code=403, detail="Access denied to parent folder")
-        
-        # Get file extension and type
-        file_extension = file.filename.split('.')[-1].lower()
-        file_type = file_extension if file_extension in ['pdf', 'doc', 'docx', 'xls', 'xlsx', 'jpg', 'png', 'zip'] else 'file'
-        
-        # In production: Upload to storage (S3, Supabase Storage, etc.)
-        # For now, store metadata only
-        file_content = await file.read()
-        file_size = len(file_content)
-        
-        document_data = {
-            'id': str(uuid4()),
-            'name': name,
-            'type': file_type,
-            'parent_id': str(parent_id) if parent_id else None,
-            'access_level': access_level,
-            'tags': tags.split(',') if tags else [],
-            'file_size': file_size,
-            'mime_type': file.content_type,
-            'version': '1.0',
-            'created_by': current_user['id'],
-            'metadata': {
-                'original_filename': file.filename,
-                'uploaded_by': current_user['email']
-            }
-        }
-        
-        # Insert document
-        result = supabase.table("documents").insert(document_data).execute()
-        
-        if not result.data:
-            raise HTTPException(status_code=500, detail="Failed to upload document")
-        
-        # Create version record
-        version_data = {
-            'id': str(uuid4()),
-            'document_id': document_data['id'],
-            'version_number': '1.0',
-            'file_size': file_size,
-            'mime_type': file.content_type,
-            'change_notes': 'Initial upload',
-            'created_by': current_user['id']
-        }
-        
-        supabase.table("document_versions").insert(version_data).execute()
-        
-        # Log activity
-        activity_data = {
-            'id': str(uuid4()),
-            'document_id': document_data['id'],
-            'user_id': current_user['id'],
-            'action': 'upload',
-            'details': {
-                'filename': file.filename,
-                'size': format_file_size(file_size)
-            }
-        }
-        
-        supabase.table("document_activities").insert(activity_data).execute()
-        
-        return result.data[0]
+        supabase.storage.from_(BUCKET).upload(
+            storage_path,
+            content,
+            {"content-type": file.content_type or "application/octet-stream"},
+        )
+    except Exception as e:
+        raise HTTPException(500, f"Storage upload failed: {e}")
+
+    try:
+        file_url = supabase.storage.from_(BUCKET).get_public_url(storage_path)
+    except Exception:
+        file_url = ""
+
+    now = datetime.utcnow().isoformat()
+    row = {
+        "name":          display_name,
+        "original_name": original_name,
+        "storage_path":  storage_path,
+        "file_url":      file_url,
+        "file_size":     len(content),
+        "mime_type":     file.content_type or "application/octet-stream",
+        "file_type":     _file_type(original_name),
+        "category_id":   category_id,
+        "category_name": category_name,
+        "folder_id":     real_folder,
+        "folder_path":   folder_path,
+        "description":   description.strip(),
+        "starred":       False,
+        "created_at":    now,
+        "updated_at":    now,
+    }
+    try:
+        r = supabase.table("documents").insert(row).execute()
+        return r.data[0]
+    except Exception as e:
+        logger.error("documents insert error: %s", e)
+        raise HTTPException(500, str(e))
+
+
+# ── Update (rename / star / comment) ─────────────────────────────────────────
+
+class DocUpdate(BaseModel):
+    name:        Optional[str]  = None
+    description: Optional[str] = None
+    starred:     Optional[bool] = None
+
+
+@router.put("/{doc_id}")
+async def update_document(doc_id: str, body: DocUpdate):
+    updates: dict = {"updated_at": datetime.utcnow().isoformat()}
+    if body.name        is not None: updates["name"]        = body.name
+    if body.description is not None: updates["description"] = body.description
+    if body.starred     is not None: updates["starred"]     = body.starred
+    try:
+        r = supabase.table("documents").update(updates).eq("id", doc_id).execute()
+        if not r.data:
+            raise HTTPException(404, "Document not found")
+        return r.data[0]
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error uploading document: {str(e)}")
+        logger.error("update_document error: %s", e)
+        raise HTTPException(500, str(e))
 
-@router.get("/{document_id}", response_model=DocumentResponse)
-async def get_document(
-    document_id: UUID,
-    current_user: dict = Depends(get_current_user)
-):
-    """Get document details"""
-    try:
-        if not check_access(document_id, current_user['id']):
-            raise HTTPException(status_code=403, detail="Access denied")
-        
-        result = supabase.table("documents").select("*").eq("id", document_id).execute()
-        
-        if not result.data:
-            raise HTTPException(status_code=404, detail="Document not found")
-        
-        return result.data[0]
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error fetching document: {str(e)}")
 
-@router.patch("/{document_id}", response_model=DocumentResponse)
-async def update_document(
-    document_id: UUID,
-    update: DocumentUpdate,
-    current_user: dict = Depends(get_current_user)
-):
-    """Update document metadata"""
-    try:
-        if not check_access(document_id, current_user['id']):
-            raise HTTPException(status_code=403, detail="Access denied")
-        
-        update_data = update.dict(exclude_unset=True)
-        
-        result = supabase.table("documents").update(update_data).eq("id", document_id).execute()
-        
-        if not result.data:
-            raise HTTPException(status_code=404, detail="Document not found")
-        
-        # Log activity
-        activity_data = {
-            'id': str(uuid4()),
-            'document_id': str(document_id),
-            'user_id': current_user['id'],
-            'action': 'update',
-            'details': update_data
-        }
-        
-        supabase.table("document_activities").insert(activity_data).execute()
-        
-        return result.data[0]
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error updating document: {str(e)}")
+# ── Delete ────────────────────────────────────────────────────────────────────
 
-@router.delete("/{document_id}")
-async def delete_document(
-    document_id: UUID,
-    current_user: dict = Depends(get_current_user)
-):
-    """Soft delete a document"""
+@router.delete("/{doc_id}")
+async def delete_document(doc_id: str):
     try:
-        if not check_access(document_id, current_user['id']):
-            raise HTTPException(status_code=403, detail="Access denied")
-        
-        result = supabase.table("documents").update({
-            'deleted_at': datetime.utcnow().isoformat(),
-            'status': 'deleted'
-        }).eq("id", document_id).execute()
-        
-        if not result.data:
-            raise HTTPException(status_code=404, detail="Document not found")
-        
-        # Log activity
-        activity_data = {
-            'id': str(uuid4()),
-            'document_id': str(document_id),
-            'user_id': current_user['id'],
-            'action': 'delete'
-        }
-        
-        supabase.table("document_activities").insert(activity_data).execute()
-        
-        return {"message": "Document deleted successfully"}
-    except HTTPException:
-        raise
+        row = (supabase.table("documents")
+               .select("storage_path")
+               .eq("id", doc_id)
+               .maybe_single()
+               .execute())
+        if row.data and row.data.get("storage_path"):
+            try:
+                supabase.storage.from_(BUCKET).remove([row.data["storage_path"]])
+            except Exception as e:
+                logger.warning("Storage delete failed (continuing): %s", e)
+        supabase.table("documents").delete().eq("id", doc_id).execute()
+        return {"ok": True}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error deleting document: {str(e)}")
-
-@router.get("/search")
-async def search_documents(
-    query: str = Query(""),
-    type: Optional[str] = None,
-    tags: Optional[str] = None,
-    current_user: dict = Depends(get_current_user)
-):
-    """Search documents"""
-    try:
-        search_query = supabase.table("documents").select("*").ilike("name", f"%{query}%")
-        
-        if type:
-            search_query = search_query.eq("type", type)
-        
-        if tags:
-            tag_list = tags.split(',')
-            search_query = search_query.contains("tags", tag_list)
-        
-        result = search_query.order("updated_at", desc=True).execute()
-        
-        # Filter by access
-        accessible_docs = []
-        for doc in result.data or []:
-            if check_access(doc['id'], current_user['id']):
-                accessible_docs.append(doc)
-        
-        return accessible_docs
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error searching documents: {str(e)}")
+        logger.error("delete_document error: %s", e)
+        raise HTTPException(500, str(e))

@@ -307,6 +307,18 @@ except Exception as e:
     async def services_fallback():
         return {"message": "Services router not loaded", "status": "fallback"}
 
+# ===== DOCUMENTS ROUTER =====
+logger.info("🔄 Loading documents router...")
+try:
+    from app.routers.documents import router as documents_router
+    app.include_router(documents_router)
+    logger.info("✅ DOCUMENTS ROUTER LOADED at /api/documents")
+except Exception as e:
+    logger.error(f"❌ Error including documents router: {e}")
+    @app.get("/api/documents")
+    async def documents_fallback():
+        return {"message": "Documents router not loaded", "status": "fallback"}
+
 # ===== DIRECT AVAILABILITY ENDPOINTS (unchanged) =====
 class AvailabilityStats(BaseModel):
     totalEquipment: int = 0
