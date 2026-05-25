@@ -295,6 +295,18 @@ except Exception as e:
     async def safety_complaints_fallback():
         return {"message": "Safety complaints router not loaded", "status": "fallback"}
 
+# ===== SERVICES TRACKER ROUTER =====
+logger.info("🔄 Loading services router...")
+try:
+    from app.routers.services import router as services_router
+    app.include_router(services_router)
+    logger.info("✅ SERVICES ROUTER LOADED at /api/services")
+except Exception as e:
+    logger.error(f"❌ Error including services router: {e}")
+    @app.get("/api/services")
+    async def services_fallback():
+        return {"message": "Services router not loaded", "status": "fallback"}
+
 # ===== DIRECT AVAILABILITY ENDPOINTS (unchanged) =====
 class AvailabilityStats(BaseModel):
     totalEquipment: int = 0
