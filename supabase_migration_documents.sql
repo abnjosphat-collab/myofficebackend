@@ -48,10 +48,8 @@ create policy "service_role_documents"
   on public.documents for all to service_role using (true) with check (true);
 
 -- ============================================================
--- Storage bucket — run in Supabase Dashboard → Storage,
--- or uncomment the SQL below:
---
--- insert into storage.buckets (id, name, public)
--- values ('ams-documents', 'ams-documents', true)
--- on conflict do nothing;
+-- Storage bucket
+insert into storage.buckets (id, name, public)
+values ('ams-documents', 'ams-documents', true)
+on conflict do nothing;
 -- ============================================================

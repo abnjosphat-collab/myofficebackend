@@ -4,6 +4,9 @@ from pydantic import BaseModel
 from typing import Optional
 from datetime import datetime, date
 from app.supabase_client import supabase
+
+# Alias prevents the Pydantic field named 'date' from shadowing datetime.date in type resolution
+_Date = date
 import logging, io, re
 import uuid as uuid_module
 
@@ -23,7 +26,7 @@ router = APIRouter(prefix="/api/services", tags=["services"])
 # ── Pydantic models ────────────────────────────────────────────────────────────
 
 class ServiceIn(BaseModel):
-    date: Optional[date] = None
+    date: Optional[_Date] = None
     description: str = ''
     supplier: str = ''
     contact_person: str = ''
