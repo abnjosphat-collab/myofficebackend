@@ -4,13 +4,19 @@
 -- ============================================================
 
 -- Create table if it doesn't already exist
+-- availability_percentage is GENERATED so it cannot be set on insert/update
 create table if not exists public.availabilities (
   id                      serial          primary key,
   equipment_id            integer         not null,
   date                    date            not null,
   operational_hours       numeric(10, 2)  not null default 0,
   breakdown_hours         numeric(10, 2)  not null default 0,
-  availability_percentage numeric(5, 2)   not null default 100,
+  availability_percentage numeric(5, 2)   generated always as (
+    case when operational_hours > 0
+         then round(((operational_hours - breakdown_hours) / operational_hours) * 100, 2)
+         else 100
+    end
+  ) stored,
   status                  text            not null default 'operational',
   mtbf                    numeric(10, 2),
   mttr                    numeric(10, 2),

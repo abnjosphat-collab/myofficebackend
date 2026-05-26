@@ -155,6 +155,7 @@ async def create_availability_record(body: AvailRecordIn):
     try:
         now  = datetime.utcnow().isoformat()
         data = body.model_dump()
+        data.pop("availability_percentage", None)   # generated column — DB computes it
         data["created_at"] = now
         data["updated_at"] = now
         r = supabase.table("availabilities").insert(data).execute()
@@ -169,6 +170,7 @@ async def update_availability_record(record_id: int, body: AvailRecordIn):
     """Update an existing availability record."""
     try:
         data = body.model_dump()
+        data.pop("availability_percentage", None)   # generated column — DB computes it
         data["updated_at"] = datetime.utcnow().isoformat()
         r = (supabase.table("availabilities")
              .update(data)
