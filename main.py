@@ -319,6 +319,15 @@ except Exception as e:
     async def documents_fallback():
         return {"message": "Documents router not loaded", "status": "fallback"}
 
+# ===== PHOTOS ROUTER (shared upload for SHEQ / Safety pages) =====
+logger.info("🔄 Loading photos router...")
+try:
+    from app.routers.photos import router as photos_router
+    app.include_router(photos_router, prefix="/api", tags=["Photos"])
+    logger.info("✅ PHOTOS ROUTER LOADED at /api/photos/upload")
+except Exception as e:
+    logger.error(f"❌ Error including photos router: {e}")
+
 # ===== DIRECT AVAILABILITY ENDPOINTS (unchanged) =====
 class AvailabilityStats(BaseModel):
     totalEquipment: int = 0

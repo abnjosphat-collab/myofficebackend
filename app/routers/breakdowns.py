@@ -314,10 +314,10 @@ async def create_breakdown(breakdown: BreakdownCreate):
         raise HTTPException(status_code=500, detail=f"Error creating breakdown: {str(e)}")
 
 @router.get("/{breakdown_id}")
-async def get_breakdown(breakdown_id: int):
+async def get_breakdown(breakdown_id: str):
     """Get breakdown by ID"""
     db = check_supabase()
-    
+
     try:
         response = db.table("breakdowns").select("*").eq("id", breakdown_id).execute()
         
@@ -341,10 +341,10 @@ async def get_breakdown(breakdown_id: int):
         raise HTTPException(status_code=500, detail=f"Error fetching breakdown: {str(e)}")
 
 @router.patch("/{breakdown_id}")
-async def update_breakdown(breakdown_id: int, breakdown_update: BreakdownUpdate):
+async def update_breakdown(breakdown_id: str, breakdown_update: BreakdownUpdate):
     """Update breakdown"""
     db = check_supabase()
-    
+
     try:
         # Check if exists
         existing = db.table("breakdowns").select("*").eq("id", breakdown_id).execute()
@@ -415,10 +415,10 @@ async def update_breakdown(breakdown_id: int, breakdown_update: BreakdownUpdate)
         raise HTTPException(status_code=500, detail=f"Error updating breakdown: {str(e)}")
 
 @router.delete("/{breakdown_id}")
-async def delete_breakdown(breakdown_id: int):
+async def delete_breakdown(breakdown_id: str):
     """Delete breakdown"""
     db = check_supabase()
-    
+
     try:
         # Check if exists
         existing = db.table("breakdowns").select("*").eq("id", breakdown_id).execute()

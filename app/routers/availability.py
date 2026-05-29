@@ -149,6 +149,72 @@ async def list_availability_records(
         raise HTTPException(500, str(e))
 
 
+@router.get("/availability-records/from-breakdowns")
+async def availability_from_breakdowns(
+    equipment_id: Optional[int] = None,
+    date_from:    Optional[str] = None,
+    date_to:      Optional[str] = None,
+):
+    """Compute availability records derived from breakdown downtime entries."""
+    try:
+        from collections import defaultdict
+
+        # Load equipment: equipment_id (code) → row
+        eq_resp = supabase.table("equipment").select("id, name, equipment_id, category, department").execute()
+        equipment = eq_resp.data or []
+        code_to_eq = {e["equipment_id"]: e for e in equipment}
+        name_to_eq = {e["name"]: e for e in equipment}
+
+        # Load breakdowns
+        q = supabase.table("breakdowns").select("machine_id, machine_name, breakdown_date, downtime_minutes")
+        if date_from: q = q.gte("breakdown_date", date_from)
+        if date_to:   q = q.lte("breakdown_date", date_to)
+        bd_resp = q.execute()
+        breakdowns = bd_resp.data or []
+
+        # Group by (machine_id_code, date) and sum downtime_minutes
+        grouped: dict = defaultdict(lambda: {"bd_minutes": 0.0, "machine_name": ""})
+        for bd in breakdowns:
+            key = (bd.get("machine_id", ""), bd.get("breakdown_date", ""))
+            grouped[key]["bd_minutes"] += float(bd.get("downtime_minutes") or 0)
+            grouped[key]["machine_name"] = bd.get("machine_name") or ""
+
+        DAILY_OP_HOURS = 24.0
+        records = []
+        for (machine_code, date), v in grouped.items():
+            if not date:
+                continue
+            # Match equipment by code, then by name
+            eq = code_to_eq.get(machine_code) or name_to_eq.get(v["machine_name"])
+            eq_id  = eq["id"]   if eq else None
+            eq_name = eq["name"] if eq else (v["machine_name"] or machine_code)
+
+            if equipment_id and eq_id != equipment_id:
+                continue
+
+            bd_hours = round(min(v["bd_minutes"] / 60.0, DAILY_OP_HOURS), 2)
+            pct = round(((DAILY_OP_HOURS - bd_hours) / DAILY_OP_HOURS) * 100, 2)
+
+            records.append({
+                "id":                     f"bd_{machine_code}_{date}",
+                "equipment_id":           eq_id if eq_id is not None else machine_code,
+                "equipment_name":         eq_name,
+                "date":                   date,
+                "operational_hours":      DAILY_OP_HOURS,
+                "breakdown_hours":        bd_hours,
+                "availability_percentage": pct,
+                "notes":                  "Auto-computed from breakdowns",
+                "source":                 "breakdown",
+            })
+
+        records.sort(key=lambda r: r["date"], reverse=True)
+        return records
+
+    except Exception as e:
+        logger.error(f"availability_from_breakdowns error: {e}")
+        raise HTTPException(500, str(e))
+
+
 @router.post("/availability-records")
 async def create_availability_record(body: AvailRecordIn):
     """Create a new availability record."""

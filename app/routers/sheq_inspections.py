@@ -51,6 +51,8 @@ class SHEQBase(BaseModel):
     hodSignature: Optional[str] = None
     sheqSignature: Optional[str] = None
     status: str = "draft"
+    before_photos: List[str] = []
+    after_photos: List[str] = []
 
 class SHEQCreate(SHEQBase):
     findings: List[FindingCreate] = []
@@ -69,6 +71,8 @@ class SHEQUpdate(BaseModel):
     sheqSignature: Optional[str] = None
     status: Optional[str] = None
     findings: Optional[List[FindingUpdate]] = None
+    before_photos: Optional[List[str]] = None
+    after_photos: Optional[List[str]] = None
 
 # =============== HELPER FUNCTIONS ===============
 
@@ -91,6 +95,8 @@ def map_db_inspection_to_camel(db_inspection: dict) -> dict:
         "hodSignature": db_inspection.get("hodsignature"),
         "sheqSignature": db_inspection.get("sheqsignature"),
         "status": db_inspection.get("status", "draft"),
+        "before_photos": db_inspection.get("before_photos") or [],
+        "after_photos": db_inspection.get("after_photos") or [],
         "createdAt": db_inspection.get("created_at"),
         "updatedAt": db_inspection.get("updated_at")
     }
@@ -320,6 +326,8 @@ async def create_inspection(inspection: SHEQCreate):
             "hodsignature": inspection.hodSignature,     # lowercase to match DB
             "sheqsignature": inspection.sheqSignature,   # lowercase to match DB
             "status": inspection.status,
+            "before_photos": inspection.before_photos,
+            "after_photos": inspection.after_photos,
             "created_at": now,
             "updated_at": now
         }
@@ -408,12 +416,17 @@ async def update_inspection(inspection_id: str, updated: SHEQUpdate):
             "sheqOfficialName": "sheqofficialname",
             "hodSignature": "hodsignature",
             "sheqSignature": "sheqsignature",
-            "status": "status"
+            "status": "status",
+            "before_photos": "before_photos",
+            "after_photos": "after_photos",
         }
         
         for key, value in update_dict.items():
             if key in field_mapping and value is not None and key != "findings":
                 data_to_update[field_mapping[key]] = value
+            # lists can be empty — treat separately so [] clears photos
+            elif key in ("before_photos", "after_photos") and isinstance(value, list):
+                data_to_update[key] = value
         
         data_to_update["updated_at"] = datetime.utcnow().isoformat()
         
