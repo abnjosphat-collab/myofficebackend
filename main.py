@@ -328,6 +328,15 @@ try:
 except Exception as e:
     logger.error(f"❌ Error including photos router: {e}")
 
+# ===== AI SAFETY ANALYSIS ROUTER =====
+logger.info("🔄 Loading AI safety analysis router...")
+try:
+    from app.routers.ai_safety import router as ai_safety_router
+    app.include_router(ai_safety_router, prefix="/api", tags=["AI Safety"])
+    logger.info("✅ AI SAFETY ROUTER LOADED at /api/ai/safety-analysis")
+except Exception as e:
+    logger.error(f"❌ Error including AI safety router: {e}")
+
 # ===== DIRECT AVAILABILITY ENDPOINTS (unchanged) =====
 class AvailabilityStats(BaseModel):
     totalEquipment: int = 0
