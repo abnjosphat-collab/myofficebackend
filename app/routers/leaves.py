@@ -1,9 +1,10 @@
 # leaves.py – simplified, no department/manager, with error logging
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Header
 from pydantic import BaseModel, Field, validator
 from typing import Optional, List
 from datetime import date, datetime
 from app.supabase_client import supabase
+from app.auth import verify_approver
 import logging
 import traceback
 
@@ -172,7 +173,11 @@ async def get_leave(leave_id: int):
 
 # ---------- PATCH update leave ----------
 @router.patch("/{leave_id}", response_model=LeaveResponse)
-async def update_leave(leave_id: int, updated: LeaveUpdate):
+async def update_leave(leave_id: int, updated: LeaveUpdate, authorization: Optional[str] = Header(None)):
+    # Approve/reject requires verified manager+ JWT
+    if updated.status in ('approved', 'rejected'):
+        approver = await verify_approver(authorization)
+        logger.info(f"Leave approval '{updated.status}' by {approver['email']} (role: {approver['role']})")
     try:
         existing_resp = supabase.table("leaves").select("*").eq("id", leave_id).execute()
         existing = get_supabase_data(existing_resp)

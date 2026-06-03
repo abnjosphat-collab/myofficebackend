@@ -673,8 +673,12 @@ except ImportError as e:
 
 # ===== OTHER ROUTERS (unchanged) =====
 routers_to_import = [
-    "reports", "inventory", "overtime", "ppe", "documents", 
-    "training", "visualization", "leaves", "compressors"
+    "reports", "inventory", "overtime", "ppe", "documents",
+    "training", "visualization", "leaves", "compressors",
+    # Engineering modules
+    "job_cards", "handover", "compliance", "lubrication",
+    "condition_monitoring", "contractors", "production",
+    "failure_modes", "competency",
 ]
 
 for router_name in routers_to_import:
