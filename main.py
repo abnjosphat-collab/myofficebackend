@@ -13,6 +13,7 @@ from contextlib import asynccontextmanager
 
 # Import supabase client (used only for health check, standby router uses its own import)
 from app.supabase_client import supabase
+from app.redis_client import ping_redis, close_redis
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -23,8 +24,13 @@ logger = logging.getLogger(__name__)
 async def lifespan(app: FastAPI):
     # Startup
     logger.info("🚀 Starting MyOffice API...")
+    if await ping_redis():
+        logger.info("✅ Redis connection established")
+    else:
+        logger.warning("⚠️ Redis unreachable at startup — continuing without cache")
     yield
     # Shutdown
+    await close_redis()
     logger.info("🛑 Shutting down MyOffice API...")
 
 app = FastAPI(
@@ -91,11 +97,14 @@ async def health_check():
         logger.error(f"Health check failed to get standby count: {e}")
         standby_count = 0
 
+    redis_ok = await ping_redis()
+
     return {
-        "status": "healthy", 
+        "status": "healthy",
         "message": "API is running",
         "timestamp": datetime.utcnow().isoformat(),
-        "standby_schedules": standby_count
+        "standby_schedules": standby_count,
+        "redis": "connected" if redis_ok else "unavailable"
     }
 
 @app.get("/api/debug-test")

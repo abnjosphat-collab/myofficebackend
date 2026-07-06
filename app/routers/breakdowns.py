@@ -2,11 +2,12 @@
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, Field, validator
 from typing import Optional, List
-from datetime import datetime
+from datetime import datetime, timedelta
 import json
 import logging
 import os
 from supabase import create_client, Client
+from collections import defaultdict
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -182,6 +183,16 @@ def check_supabase():
     if supabase is None:
         raise HTTPException(status_code=500, detail="Database connection not available")
     return supabase
+
+def parse_spares(record: dict) -> list:
+    """Parse spares_used field from string to list"""
+    spares = record.get('spares_used', '[]')
+    if isinstance(spares, str):
+        try:
+            return json.loads(spares)
+        except:
+            return []
+    return spares
 
 # ===== API ENDPOINTS =====
 
@@ -517,3 +528,462 @@ async def health_check():
             "database": "connection_failed",
             "error": str(e)
         }
+
+@router.get("/analytics/heatmap")
+async def get_breakdown_heatmap(
+    date_from: Optional[str] = Query(None, description="Start date (YYYY-MM-DD)"),
+    date_to: Optional[str] = Query(None, description="End date (YYYY-MM-DD)"),
+    department: Optional[str] = Query(None),
+    machine_id: Optional[str] = Query(None)
+):
+    """Get comprehensive breakdown analytics with multiple visualizations"""
+    db = check_supabase()
+    
+    try:
+        query = db.table("breakdowns").select("*")
+        
+        # Apply filters
+        if date_from:
+            query = query.gte("breakdown_date", date_from)
+        if date_to:
+            query = query.lte("breakdown_date", date_to)
+        if department and department != "all":
+            query = query.eq("department", department)
+        if machine_id and machine_id != "all":
+            query = query.eq("machine_id", machine_id)
+        
+        response = query.execute()
+        records = response.data or []
+        
+        # ===== Initialize data structures =====
+        hour_day_heatmap = [[0 for _ in range(7)] for _ in range(24)]  # 24 hours x 7 days
+        machine_breakdowns = {}
+        artisan_breakdowns = {}
+        spare_parts_usage = {}
+        hourly_breakdowns = [0] * 24
+        daily_breakdowns = [0] * 7
+        
+        # NEW: Richer heatmap structures
+        breakdown_type_counts = defaultdict(int)
+        breakdown_type_hour_heatmap = defaultdict(lambda: [0] * 24)  # type -> [count per hour]
+        breakdown_type_day_heatmap = defaultdict(lambda: [0] * 7)    # type -> [count per day]
+        department_hour_heatmap = defaultdict(lambda: [0] * 24)      # dept -> [count per hour]
+        department_day_heatmap = defaultdict(lambda: [0] * 7)        # dept -> [count per day]
+        priority_hour_heatmap = defaultdict(lambda: [0] * 24)        # priority -> [count per hour]
+        priority_day_heatmap = defaultdict(lambda: [0] * 7)          # priority -> [count per day]
+        response_time_heatmap = [[0 for _ in range(7)] for _ in range(24)]  # avg response time by hour x day
+        response_time_count_hm = [[0 for _ in range(7)] for _ in range(24)]  # count for averaging
+        monthly_day_heatmap = defaultdict(lambda: [0] * 31)          # month -> [count per day of month]
+        artisan_hour_heatmap = defaultdict(lambda: [0] * 24)         # artisan -> [count per hour]
+        location_hour_heatmap = defaultdict(lambda: [0] * 24)        # location -> [count per hour]
+        
+        priority_counts = defaultdict(int)
+        status_counts = defaultdict(int)
+        department_counts = defaultdict(lambda: {'count': 0, 'downtime': 0})
+        monthly_trends = defaultdict(int)
+        weekly_trends = defaultdict(int)
+        response_time_by_hour = defaultdict(list)
+        downtime_by_machine = defaultdict(list)
+        repair_time_by_artisan = defaultdict(list)
+        location_counts = defaultdict(int)
+        machine_type_breakdowns = defaultdict(lambda: {'count': 0, 'downtime': 0})
+        
+        for record in records:
+            # Parse breakdown_start time
+            start_time = record.get('breakdown_start', '')
+            breakdown_date = record.get('breakdown_date', '')
+            
+            # Extract hour and day of week
+            hour = 0
+            day_of_week = 0
+            
+            if start_time:
+                try:
+                    time_parts = start_time.split(':')
+                    hour = int(time_parts[0]) if time_parts else 0
+                except:
+                    hour = 0
+            
+            if breakdown_date:
+                try:
+                    date_obj = datetime.strptime(breakdown_date, '%Y-%m-%d')
+                    day_of_week = date_obj.weekday()  # 0=Monday, 6=Sunday
+                    
+                    # Monthly trends
+                    month_key = date_obj.strftime('%Y-%m')
+                    monthly_trends[month_key] += 1
+                    
+                    # Weekly trends
+                    week_key = date_obj.strftime('%Y-W%W')
+                    weekly_trends[week_key] += 1
+                    
+                except:
+                    day_of_week = 0
+            
+            # Update heatmap
+            if 0 <= hour < 24 and 0 <= day_of_week < 7:
+                hour_day_heatmap[hour][day_of_week] += 1
+            
+            # Track hourly breakdowns
+            hourly_breakdowns[hour] += 1
+            
+            # Track daily breakdowns
+            daily_breakdowns[day_of_week] += 1
+            
+            # Track breakdown type
+            btype = record.get('breakdown_type', 'Unknown')
+            breakdown_type_counts[btype] += 1
+            
+            # Track priority
+            priority = record.get('priority', 'medium')
+            priority_counts[priority] += 1
+            
+            # Richer heatmaps: type x hour/day
+            if 0 <= hour < 24:
+                breakdown_type_hour_heatmap[btype][hour] += 1
+                department_hour_heatmap[dept][hour] += 1
+                priority_hour_heatmap[priority][hour] += 1
+                artisan_hour_heatmap[artisan_name][hour] += 1
+                location_hour_heatmap[loc][hour] += 1
+            if 0 <= day_of_week < 7:
+                breakdown_type_day_heatmap[btype][day_of_week] += 1
+                department_day_heatmap[dept][day_of_week] += 1
+                priority_day_heatmap[priority][day_of_week] += 1
+            
+            # Response time heatmap (avg response time by hour x day)
+            if resp_time > 0 and 0 <= hour < 24 and 0 <= day_of_week < 7:
+                response_time_heatmap[hour][day_of_week] += resp_time
+                response_time_count_hm[hour][day_of_week] += 1
+            
+            # Monthly day-of-month heatmap
+            if breakdown_date:
+                try:
+                    date_obj = datetime.strptime(breakdown_date, '%Y-%m-%d')
+                    day_of_month = date_obj.day - 1  # 0-30
+                    if 0 <= day_of_month < 31:
+                        monthly_day_heatmap[month_key][day_of_month] += 1
+                except:
+                    pass
+            
+            # Track status
+            status = record.get('status', 'unknown')
+            status_counts[status] += 1
+            
+            # Track department
+            dept = record.get('department', 'Unknown')
+            department_counts[dept]['count'] += 1
+            department_counts[dept]['downtime'] += record.get('downtime_minutes', 0)
+            
+            # Track location
+            loc = record.get('location', 'Unknown')
+            location_counts[loc] += 1
+            
+            # Track machine breakdowns
+            machine_name = record.get('machine_name', 'Unknown')
+            if machine_name not in machine_breakdowns:
+                machine_breakdowns[machine_name] = {
+                    'count': 0,
+                    'total_downtime': 0,
+                    'department': record.get('department', 'Unknown'),
+                    'total_repair_time': 0,
+                    'avg_response_time': 0,
+                    'response_times': []
+                }
+            machine_breakdowns[machine_name]['count'] += 1
+            machine_breakdowns[machine_name]['total_downtime'] += record.get('downtime_minutes', 0)
+            machine_breakdowns[machine_name]['total_repair_time'] += record.get('repair_time_minutes', 0)
+            resp_time = record.get('response_time_minutes', 0)
+            if resp_time > 0:
+                machine_breakdowns[machine_name]['response_times'].append(resp_time)
+            
+            # Track downtime by machine for scatter
+            downtime_by_machine[machine_name].append(record.get('downtime_minutes', 0))
+            
+            # Track artisan breakdowns
+            artisan_name = record.get('artisan_name', 'Unknown')
+            if artisan_name not in artisan_breakdowns:
+                artisan_breakdowns[artisan_name] = {
+                    'count': 0,
+                    'total_repair_time': 0,
+                    'avg_repair_time': 0,
+                    'repair_times': []
+                }
+            artisan_breakdowns[artisan_name]['count'] += 1
+            repair_mins = record.get('repair_time_minutes', 0)
+            artisan_breakdowns[artisan_name]['total_repair_time'] += repair_mins
+            if repair_mins > 0:
+                artisan_breakdowns[artisan_name]['repair_times'].append(repair_mins)
+            
+            # Track response time by hour
+            if resp_time > 0:
+                response_time_by_hour[hour].append(resp_time)
+            
+            # Track repair time by artisan
+            if repair_mins > 0:
+                repair_time_by_artisan[artisan_name].append(repair_mins)
+            
+            # Track spare parts usage
+            spares_used = parse_spares(record)
+            
+            for spare in spares_used:
+                spare_name = spare.get('name', 'Unknown')
+                if spare_name not in spare_parts_usage:
+                    spare_parts_usage[spare_name] = {
+                        'count': 0,
+                        'total_cost': 0,
+                        'part_number': spare.get('part_number', ''),
+                        'total_quantity': 0
+                    }
+                qty = spare.get('quantity', 1)
+                spare_parts_usage[spare_name]['count'] += 1  # times used in breakdowns
+                spare_parts_usage[spare_name]['total_quantity'] += qty
+                spare_parts_usage[spare_name]['total_cost'] += spare.get('total_cost', 0)
+        
+        # ===== Compute averages and derived metrics =====
+        
+        # Machine averages
+        for m_name, m_data in machine_breakdowns.items():
+            if m_data['response_times']:
+                m_data['avg_response_time'] = round(sum(m_data['response_times']) / len(m_data['response_times']), 1)
+            m_data['avg_downtime'] = round(m_data['total_downtime'] / m_data['count'], 1) if m_data['count'] > 0 else 0
+            m_data['avg_repair_time'] = round(m_data['total_repair_time'] / m_data['count'], 1) if m_data['count'] > 0 else 0
+            del m_data['response_times']
+        
+        # Artisan averages
+        for a_name, a_data in artisan_breakdowns.items():
+            if a_data['repair_times']:
+                a_data['avg_repair_time'] = round(sum(a_data['repair_times']) / len(a_data['repair_times']), 1)
+            del a_data['repair_times']
+        
+        # ===== Sort and format results =====
+        top_machines = sorted(
+            [{'name': k, **v} for k, v in machine_breakdowns.items()],
+            key=lambda x: x['count'],
+            reverse=True
+        )[:15]
+        
+        top_artisans = sorted(
+            [{'name': k, **v} for k, v in artisan_breakdowns.items()],
+            key=lambda x: x['count'],
+            reverse=True
+        )[:15]
+        
+        top_spares = sorted(
+            [{'name': k, **v} for k, v in spare_parts_usage.items()],
+            key=lambda x: x['count'],
+            reverse=True
+        )[:15]
+        
+        # Department comparison
+        dept_comparison = sorted(
+            [{'department': k, **v} for k, v in department_counts.items()],
+            key=lambda x: x['count'],
+            reverse=True
+        )
+        
+        # Breakdown type distribution
+        type_distribution = sorted(
+            [{'type': k, 'count': v} for k, v in breakdown_type_counts.items()],
+            key=lambda x: x['count'],
+            reverse=True
+        )
+        
+        # Priority distribution
+        priority_distribution = sorted(
+            [{'priority': k, 'count': v} for k, v in priority_counts.items()],
+            key=lambda x: x['count'],
+            reverse=True
+        )
+        
+        # Status distribution
+        status_distribution = sorted(
+            [{'status': k, 'count': v} for k, v in status_counts.items()],
+            key=lambda x: x['count'],
+            reverse=True
+        )
+        
+        # Monthly trends (sorted by date)
+        monthly_trends_sorted = sorted(
+            [{'month': k, 'count': v} for k, v in monthly_trends.items()],
+            key=lambda x: x['month']
+        )
+        
+        # Weekly trends (sorted)
+        weekly_trends_sorted = sorted(
+            [{'week': k, 'count': v} for k, v in weekly_trends.items()],
+            key=lambda x: x['week']
+        )
+        
+        # Location distribution
+        location_distribution = sorted(
+            [{'location': k, 'count': v} for k, v in location_counts.items()],
+            key=lambda x: x['count'],
+            reverse=True
+        )
+        
+        # Response time by hour (average)
+        response_time_by_hour_avg = []
+        for h in range(24):
+            times = response_time_by_hour.get(h, [])
+            avg = round(sum(times) / len(times), 1) if times else 0
+            response_time_by_hour_avg.append({
+                'hour': f'{h:02d}:00',
+                'avg_response_time': avg,
+                'count': len(times)
+            })
+        
+        # Downtime analysis by machine (for scatter plot)
+        machine_downtime_scatter = [
+            {
+                'name': name,
+                'breakdowns': data['count'],
+                'total_downtime': data['total_downtime'],
+                'avg_downtime': data['avg_downtime'],
+                'avg_repair_time': data['avg_repair_time'],
+                'department': data['department']
+            }
+            for name, data in machine_breakdowns.items()
+        ]
+        
+        # Artisan performance comparison
+        artisan_performance = sorted(
+            [{'name': k, **v} for k, v in artisan_breakdowns.items()],
+            key=lambda x: x['count'],
+            reverse=True
+        )[:15]
+        
+        # ===== Compute richer heatmap data =====
+        # Average response time heatmap
+        response_time_heatmap_avg = []
+        for h in range(24):
+            row = []
+            for d in range(7):
+                count = response_time_count_hm[h][d]
+                total = response_time_heatmap[h][d]
+                row.append(round(total / count, 1) if count > 0 else 0)
+            response_time_heatmap_avg.append(row)
+        
+        # Breakdown type x hour heatmap (formatted)
+        type_hour_heatmap_formatted = {}
+        for btype, hours_list in breakdown_type_hour_heatmap.items():
+            type_hour_heatmap_formatted[btype] = [
+                {'hour': f'{h:02d}:00', 'count': hours_list[h]}
+                for h in range(24)
+            ]
+        
+        # Breakdown type x day heatmap
+        type_day_heatmap_formatted = {}
+        for btype, days_list in breakdown_type_day_heatmap.items():
+            type_day_heatmap_formatted[btype] = [
+                {'day': day_names[d], 'count': days_list[d]}
+                for d in range(7)
+            ]
+        
+        # Department x hour heatmap (top depts only)
+        dept_hour_heatmap_formatted = {}
+        for dept, hours_list in department_hour_heatmap.items():
+            dept_hour_heatmap_formatted[dept] = [
+                {'hour': f'{h:02d}:00', 'count': hours_list[h]}
+                for h in range(24)
+            ]
+        
+        # Priority x hour heatmap
+        priority_hour_heatmap_formatted = {}
+        for pri, hours_list in priority_hour_heatmap.items():
+            priority_hour_heatmap_formatted[pri] = [
+                {'hour': f'{h:02d}:00', 'count': hours_list[h]}
+                for h in range(24)
+            ]
+        
+        # Artisan x hour heatmap (top 5 artisans)
+        top_artisan_names = [a['name'] for a in artisan_performance[:5]]
+        artisan_hour_heatmap_formatted = {}
+        for aname in top_artisan_names:
+            if aname in artisan_hour_heatmap:
+                artisan_hour_heatmap_formatted[aname] = [
+                    {'hour': f'{h:02d}:00', 'count': artisan_hour_heatmap[aname][h]}
+                    for h in range(24)
+                ]
+        
+        # Location x hour heatmap (top 5 locations)
+        top_location_names = [loc for loc, _ in sorted(location_counts.items(), key=lambda x: x[1], reverse=True)[:5]]
+        location_hour_heatmap_formatted = {}
+        for lname in top_location_names:
+            if lname in location_hour_heatmap:
+                location_hour_heatmap_formatted[lname] = [
+                    {'hour': f'{h:02d}:00', 'count': location_hour_heatmap[lname][h]}
+                    for h in range(24)
+                ]
+        
+        # Monthly day-of-month heatmap (formatted)
+        monthly_day_heatmap_formatted = {}
+        for month, days_list in monthly_day_heatmap.items():
+            monthly_day_heatmap_formatted[month] = [
+                {'day': d + 1, 'count': days_list[d]}
+                for d in range(31)
+            ]
+        
+        day_names = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday']
+        
+        return {
+            "heatmap": {
+                "hour_day": hour_day_heatmap,
+                "labels": {
+                    "hours": [f"{h:02d}:00" for h in range(24)],
+                    "days": day_names
+                }
+            },
+            "hourly_distribution": [
+                {"hour": f"{h:02d}:00", "count": hourly_breakdowns[h]}
+                for h in range(24)
+            ],
+            "daily_distribution": [
+                {"day": day_names[d], "count": daily_breakdowns[d]}
+                for d in range(7)
+            ],
+            "top_problem_machines": top_machines,
+            "top_artisans": top_artisans,
+            "top_spare_parts": top_spares,
+            # NEW analytics sections
+            "breakdown_type_distribution": type_distribution,
+            "priority_distribution": priority_distribution,
+            "status_distribution": status_distribution,
+            "department_comparison": dept_comparison,
+            "monthly_trends": monthly_trends_sorted,
+            "weekly_trends": weekly_trends_sorted,
+            "location_distribution": location_distribution,
+            "response_time_by_hour": response_time_by_hour_avg,
+            "machine_downtime_scatter": machine_downtime_scatter,
+            "artisan_performance": artisan_performance,
+            "summary": {
+                "total_breakdowns": len(records),
+                "unique_machines": len(machine_breakdowns),
+                "unique_artisans": len(artisan_breakdowns),
+                "unique_spares": len(spare_parts_usage),
+                "unique_departments": len(department_counts),
+                "unique_types": len(breakdown_type_counts),
+                "total_downtime_minutes": sum(r.get('downtime_minutes', 0) for r in records),
+                "total_repair_time_minutes": sum(r.get('repair_time_minutes', 0) for r in records),
+                "total_spare_cost": sum(r.get('total_spare_cost', 0) for r in records)
+            },
+            # Richer heatmap data
+            "response_time_heatmap": response_time_heatmap_avg,
+            "type_hour_heatmap": type_hour_heatmap_formatted,
+            "type_day_heatmap": type_day_heatmap_formatted,
+            "dept_hour_heatmap": dept_hour_heatmap_formatted,
+            "priority_hour_heatmap": priority_hour_heatmap_formatted,
+            "artisan_hour_heatmap": artisan_hour_heatmap_formatted,
+            "location_hour_heatmap": location_hour_heatmap_formatted,
+            "monthly_day_heatmap": monthly_day_heatmap_formatted,
+            "filters_applied": {
+                "date_from": date_from,
+                "date_to": date_to,
+                "department": department,
+                "machine_id": machine_id
+            },
+            "success": True
+        }
+        
+    except Exception as e:
+        logger.error(f"Error generating heatmap analytics: {e}")
+        raise HTTPException(status_code=500, detail=f"Error generating analytics: {str(e)}")
