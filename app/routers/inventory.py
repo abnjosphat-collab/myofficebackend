@@ -1,5 +1,6 @@
 # backend/app/routers/inventory.py
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Depends
+from app.auth import get_current_user, require_role
 from pydantic import BaseModel
 from typing import List, Optional
 from datetime import datetime, timedelta
@@ -199,7 +200,7 @@ async def get_inventory_item(item_id: str):
     return inventory_db[item_id]
 
 @router.post("/items", response_model=InventoryItem)
-async def create_inventory_item(item: InventoryItemCreate):
+async def create_inventory_item(item: InventoryItemCreate, current_user: dict = Depends(get_current_user)):
     """Create a new inventory item"""
     item_id = f"inv-{len(inventory_db) + 1:03d}"
     now = datetime.now().isoformat()
@@ -229,7 +230,7 @@ async def create_inventory_item(item: InventoryItemCreate):
     return new_item
 
 @router.put("/items/{item_id}", response_model=InventoryItem)
-async def update_inventory_item(item_id: str, item_update: InventoryItemUpdate):
+async def update_inventory_item(item_id: str, item_update: InventoryItemUpdate, current_user: dict = Depends(get_current_user)):
     """Update an existing inventory item"""
     if item_id not in inventory_db:
         raise HTTPException(status_code=404, detail="Inventory item not found")
@@ -257,7 +258,7 @@ async def update_inventory_item(item_id: str, item_update: InventoryItemUpdate):
     return existing_item
 
 @router.delete("/items/{item_id}")
-async def delete_inventory_item(item_id: str):
+async def delete_inventory_item(item_id: str, current_user: dict = Depends(require_role('manager'))):
     """Delete an inventory item"""
     if item_id not in inventory_db:
         raise HTTPException(status_code=404, detail="Inventory item not found")
@@ -266,7 +267,7 @@ async def delete_inventory_item(item_id: str):
     return {"message": "Inventory item deleted successfully"}
 
 @router.post("/items/{item_id}/restock")
-async def restock_item(item_id: str, quantity: int):
+async def restock_item(item_id: str, quantity: int, current_user: dict = Depends(get_current_user)):
     """Restock an inventory item"""
     if item_id not in inventory_db:
         raise HTTPException(status_code=404, detail="Inventory item not found")

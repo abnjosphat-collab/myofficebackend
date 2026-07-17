@@ -1,7 +1,8 @@
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel
 from typing import Optional, List, Any
 from app.supabase_client import supabase
+from app.auth import get_current_user, require_role
 import logging
 
 router = APIRouter(tags=["Contractors"])
@@ -82,7 +83,7 @@ async def get_contractor(c_id: int):
 
 @router.post("")
 @router.post("/")
-async def create_contractor(data: ContractorCreate):
+async def create_contractor(data: ContractorCreate, current_user: dict = Depends(get_current_user)):
     try:
         r = supabase.table("contractors").insert(data.dict(exclude_none=True)).execute()
         if not r.data:
@@ -94,7 +95,7 @@ async def create_contractor(data: ContractorCreate):
         raise HTTPException(500, str(e))
 
 @router.patch("/{c_id}")
-async def update_contractor(c_id: int, data: ContractorUpdate):
+async def update_contractor(c_id: int, data: ContractorUpdate, current_user: dict = Depends(get_current_user)):
     payload = {k: v for k, v in data.dict().items() if v is not None}
     r = supabase.table("contractors").update(payload).eq("id", c_id).execute()
     if not r.data:
@@ -102,7 +103,7 @@ async def update_contractor(c_id: int, data: ContractorUpdate):
     return r.data[0]
 
 @router.delete("/{c_id}")
-async def delete_contractor(c_id: int):
+async def delete_contractor(c_id: int, current_user: dict = Depends(require_role('manager'))):
     supabase.table("contractors").delete().eq("id", c_id).execute()
     return {"ok": True}
 
@@ -115,7 +116,7 @@ async def get_all_jobs(status: Optional[str] = None):
     return (q.execute()).data or []
 
 @router.post("/jobs")
-async def create_job(data: ContractorJobCreate):
+async def create_job(data: ContractorJobCreate, current_user: dict = Depends(get_current_user)):
     try:
         r = supabase.table("contractor_jobs").insert(data.dict(exclude_none=True)).execute()
         if not r.data:
@@ -127,7 +128,7 @@ async def create_job(data: ContractorJobCreate):
         raise HTTPException(500, str(e))
 
 @router.patch("/jobs/{j_id}")
-async def update_job(j_id: int, data: ContractorJobUpdate):
+async def update_job(j_id: int, data: ContractorJobUpdate, current_user: dict = Depends(get_current_user)):
     payload = {k: v for k, v in data.dict().items() if v is not None}
     r = supabase.table("contractor_jobs").update(payload).eq("id", j_id).execute()
     if not r.data:
@@ -135,6 +136,6 @@ async def update_job(j_id: int, data: ContractorJobUpdate):
     return r.data[0]
 
 @router.delete("/jobs/{j_id}")
-async def delete_job(j_id: int):
+async def delete_job(j_id: int, current_user: dict = Depends(require_role('manager'))):
     supabase.table("contractor_jobs").delete().eq("id", j_id).execute()
     return {"ok": True}

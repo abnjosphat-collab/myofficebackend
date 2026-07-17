@@ -1,7 +1,8 @@
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel
 from typing import Optional
 from app.supabase_client import supabase
+from app.auth import get_current_user, require_role
 import logging
 
 router = APIRouter(tags=["Competency Matrix"])
@@ -45,7 +46,7 @@ async def get_competencies(employee_id: Optional[str] = None, trade: Optional[st
 
 @router.post("")
 @router.post("/")
-async def create_competency(data: CompetencyCreate):
+async def create_competency(data: CompetencyCreate, current_user: dict = Depends(get_current_user)):
     try:
         r = supabase.table("competency_matrix").insert(data.dict(exclude_none=True)).execute()
         if not r.data:
@@ -57,7 +58,7 @@ async def create_competency(data: CompetencyCreate):
         raise HTTPException(500, str(e))
 
 @router.patch("/{c_id}")
-async def update_competency(c_id: int, data: CompetencyUpdate):
+async def update_competency(c_id: int, data: CompetencyUpdate, current_user: dict = Depends(get_current_user)):
     payload = {k: v for k, v in data.dict().items() if v is not None}
     r = supabase.table("competency_matrix").update(payload).eq("id", c_id).execute()
     if not r.data:
@@ -65,6 +66,6 @@ async def update_competency(c_id: int, data: CompetencyUpdate):
     return r.data[0]
 
 @router.delete("/{c_id}")
-async def delete_competency(c_id: int):
+async def delete_competency(c_id: int, current_user: dict = Depends(require_role('manager'))):
     supabase.table("competency_matrix").delete().eq("id", c_id).execute()
     return {"ok": True}

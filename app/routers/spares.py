@@ -1,11 +1,13 @@
 """
 Spares Management Router - PostgreSQL/Supabase Version
 """
-from fastapi import APIRouter, HTTPException, Query, File, UploadFile
+from fastapi import APIRouter, HTTPException, Query, File, UploadFile, Depends
 from pydantic import BaseModel, Field, validator
 from typing import Optional, List, Dict, Any
 from datetime import datetime, date
 from app.supabase_client import supabase
+from app.auth import get_current_user, require_role
+from app.uploads import read_and_validate_upload, SPREADSHEET_EXTS
 import logging
 import json
 import io
@@ -301,14 +303,14 @@ def _safe_val(v: Any) -> Any:
 
 
 @router.post("/infer")
-async def infer_spare_columns(file: UploadFile = File(...)):
+async def infer_spare_columns(file: UploadFile = File(...), current_user: dict = Depends(get_current_user)):
     """
     Upload an Excel (.xlsx) or CSV file.
     Polars reads it, inference engine scores every column,
     returns column mapping + all raw rows for client-side preview & re-mapping.
     """
     try:
-        content = await file.read()
+        content = await read_and_validate_upload(file, max_bytes=25 * 1024 * 1024, allowed_exts=SPREADSHEET_EXTS)
         fname = (file.filename or "").lower()
 
         if fname.endswith('.csv') or fname.endswith('.tsv'):
@@ -514,7 +516,7 @@ async def get_spare(spare_id: int):
 
 # POST bulk create spares
 @router.post("/bulk", status_code=201)
-async def bulk_create_spares(payload: BulkSpareCreate):
+async def bulk_create_spares(payload: BulkSpareCreate, current_user: dict = Depends(get_current_user)):
     """
     Bulk-insert spare parts efficiently:
     - One batched IN() query to find already-existing stock codes (no N+1)
@@ -615,7 +617,7 @@ async def bulk_create_spares(payload: BulkSpareCreate):
 
 # POST create spare
 @router.post("", status_code=201)
-async def create_spare(spare: SpareCreate):
+async def create_spare(spare: SpareCreate, current_user: dict = Depends(get_current_user)):
     """Create a new spare part"""
     try:
         # Check if stock code already exists
@@ -644,7 +646,7 @@ async def create_spare(spare: SpareCreate):
 
 # PUT update spare
 @router.put("/{spare_id}")
-async def update_spare(spare_id: int, spare_update: SpareUpdate):
+async def update_spare(spare_id: int, spare_update: SpareUpdate, current_user: dict = Depends(get_current_user)):
     """Update an existing spare part"""
     try:
         # Check if spare exists
@@ -726,7 +728,7 @@ async def update_spare(spare_id: int, spare_update: SpareUpdate):
 
 # DELETE spare
 @router.delete("/{spare_id}")
-async def delete_spare(spare_id: int):
+async def delete_spare(spare_id: int, current_user: dict = Depends(require_role('manager'))):
     """Delete a spare part"""
     try:
         # Check if spare exists
@@ -944,7 +946,7 @@ async def get_saved_spare_requisitions():
         return []
 
 @router.post("/saved-requisitions", status_code=201)
-async def create_saved_spare_requisition(data: SavedSpareReqCreate):
+async def create_saved_spare_requisition(data: SavedSpareReqCreate, current_user: dict = Depends(get_current_user)):
     """Save a spare requisition to Supabase"""
     try:
         now = datetime.utcnow().isoformat()
@@ -960,7 +962,7 @@ async def create_saved_spare_requisition(data: SavedSpareReqCreate):
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.put("/saved-requisitions/{req_id}")
-async def update_saved_spare_requisition(req_id: str, data: SavedSpareReqCreate):
+async def update_saved_spare_requisition(req_id: str, data: SavedSpareReqCreate, current_user: dict = Depends(get_current_user)):
     """Update a saved spare requisition"""
     try:
         now = datetime.utcnow().isoformat()
@@ -976,7 +978,7 @@ async def update_saved_spare_requisition(req_id: str, data: SavedSpareReqCreate)
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.delete("/saved-requisitions/{req_id}")
-async def delete_saved_spare_requisition(req_id: str):
+async def delete_saved_spare_requisition(req_id: str, current_user: dict = Depends(require_role('manager'))):
     """Delete a saved spare requisition"""
     try:
         supabase.table("spare_requisitions").delete().eq("id", req_id).execute()

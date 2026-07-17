@@ -1,6 +1,7 @@
 # backend/app/routers/photos.py — shared photo upload/delete for all pages
-from fastapi import APIRouter, HTTPException, UploadFile, File, Form, Query
+from fastapi import APIRouter, HTTPException, UploadFile, File, Form, Query, Depends
 from app.supabase_client import supabase
+from app.auth import get_current_user, require_role
 import uuid
 import logging
 
@@ -23,6 +24,7 @@ MAX_BYTES = 20 * 1024 * 1024  # 20 MB
 async def upload_photo(
     file:   UploadFile = File(...),
     folder: str        = Form(default="misc"),
+    current_user: dict = Depends(get_current_user),
 ):
     """Upload an image to Supabase Storage and return its public URL."""
     original = file.filename or "photo.jpg"
@@ -57,7 +59,7 @@ async def upload_photo(
 
 
 @router.delete("/photos/delete")
-async def delete_photo(path: str = Query(...)):
+async def delete_photo(path: str = Query(...), current_user: dict = Depends(require_role('manager'))):
     """Remove a photo from Supabase Storage by its storage path."""
     try:
         supabase.storage.from_(BUCKET).remove([path])

@@ -1,6 +1,7 @@
 # backend/app/routers/ai_safety.py
 # SHEQ Safety Analysis — Polars-powered, no external AI API required
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Depends
+from app.auth import get_current_user, require_role
 from pydantic import BaseModel
 from typing import Any, Optional
 from datetime import datetime, timezone, timedelta
@@ -522,7 +523,7 @@ def analyse(data: SafetyDataInput) -> dict:
 # ── Endpoint ──────────────────────────────────────────────────────────────────
 
 @router.post("/ai/safety-analysis")
-async def analyze_safety(data: SafetyDataInput):
+async def analyze_safety(data: SafetyDataInput, current_user: dict = Depends(get_current_user)):
     """
     Analyse SHEQ safety data using Polars aggregation and rule-based scoring.
     Returns risk score, hotspots, trends, and prioritised recommendations.

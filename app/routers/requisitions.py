@@ -1,8 +1,9 @@
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Request, Depends
 from pydantic import BaseModel
 from typing import Optional, List
 from datetime import datetime, date
 from app.supabase_client import supabase
+from app.auth import get_current_user, require_role
 import logging
 
 logger = logging.getLogger(__name__)
@@ -61,7 +62,7 @@ async def health_check():
 # ============= CREATE (handles both / and no trailing slash) =============
 @router.post("")
 @router.post("/")
-async def create_requisition(requisition: RequisitionCreate, request: Request = None):
+async def create_requisition(requisition: RequisitionCreate, request: Request = None, current_user: dict = Depends(get_current_user)):
     print("\n" + "="*60)
     print("✅✅✅ POST /api/requisitions - HIT ✅✅✅")
     print(f"📦 Requisition Number: {requisition.requisition_number}")
@@ -189,7 +190,7 @@ async def get_requisition(requisition_id: int):
 
 # ============= UPDATE =============
 @router.patch("/{requisition_id}")
-async def update_requisition(requisition_id: int, update: RequisitionUpdate):
+async def update_requisition(requisition_id: int, update: RequisitionUpdate, current_user: dict = Depends(get_current_user)):
     try:
         existing = supabase.table("requisitions").select("*").eq("id", requisition_id).execute()
         if not existing.data:
@@ -250,7 +251,7 @@ async def update_requisition(requisition_id: int, update: RequisitionUpdate):
 
 # ============= DELETE =============
 @router.delete("/{requisition_id}")
-async def delete_requisition(requisition_id: int):
+async def delete_requisition(requisition_id: int, current_user: dict = Depends(require_role('manager'))):
     try:
         existing = supabase.table("requisitions").select("*").eq("id", requisition_id).execute()
         if not existing.data:

@@ -1,8 +1,9 @@
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Depends
 from pydantic import BaseModel
 from typing import Optional, List, Dict, Any
 from datetime import datetime, date
 from app.supabase_client import supabase
+from app.auth import get_current_user, require_role
 import logging
 import json
 
@@ -68,7 +69,7 @@ async def get_timesheets(
         raise HTTPException(status_code=500, detail=f"Error fetching timesheets: {str(e)}")
 
 @router.post("")
-async def create_timesheet_entry(entry: TimesheetEntryCreate):
+async def create_timesheet_entry(entry: TimesheetEntryCreate, current_user: dict = Depends(get_current_user)):
     """Create a new timesheet entry"""
     try:
         logger.info(f"Creating timesheet entry for employee {entry.employee_id} on {entry.date}")
@@ -145,7 +146,7 @@ async def get_timesheet_entry(entry_id: int):
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.patch("/{entry_id}")
-async def update_timesheet_entry(entry_id: int, updated: TimesheetEntryUpdate):
+async def update_timesheet_entry(entry_id: int, updated: TimesheetEntryUpdate, current_user: dict = Depends(get_current_user)):
     """Update a timesheet entry"""
     try:
         # Check if entry exists
@@ -180,7 +181,7 @@ async def update_timesheet_entry(entry_id: int, updated: TimesheetEntryUpdate):
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.delete("/{entry_id}")
-async def delete_timesheet_entry(entry_id: int):
+async def delete_timesheet_entry(entry_id: int, current_user: dict = Depends(require_role('manager'))):
     """Delete a timesheet entry"""
     try:
         # Check if entry exists

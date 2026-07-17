@@ -1,7 +1,8 @@
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel
 from typing import Optional
 from app.supabase_client import supabase
+from app.auth import get_current_user, require_role
 import logging
 
 router = APIRouter(tags=["Production"])
@@ -71,7 +72,7 @@ async def production_summary():
 
 @router.post("")
 @router.post("/")
-async def create_production(data: ProductionCreate):
+async def create_production(data: ProductionCreate, current_user: dict = Depends(get_current_user)):
     try:
         r = supabase.table("production_data").insert(data.dict(exclude_none=True)).execute()
         if not r.data:
@@ -83,7 +84,7 @@ async def create_production(data: ProductionCreate):
         raise HTTPException(500, str(e))
 
 @router.patch("/{p_id}")
-async def update_production(p_id: int, data: ProductionUpdate):
+async def update_production(p_id: int, data: ProductionUpdate, current_user: dict = Depends(get_current_user)):
     payload = {k: v for k, v in data.dict().items() if v is not None}
     r = supabase.table("production_data").update(payload).eq("id", p_id).execute()
     if not r.data:
@@ -91,6 +92,6 @@ async def update_production(p_id: int, data: ProductionUpdate):
     return r.data[0]
 
 @router.delete("/{p_id}")
-async def delete_production(p_id: int):
+async def delete_production(p_id: int, current_user: dict = Depends(require_role('manager'))):
     supabase.table("production_data").delete().eq("id", p_id).execute()
     return {"ok": True}

@@ -1,9 +1,11 @@
 # backend/app/routers/employees.py
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Depends
 from pydantic import BaseModel, Field, validator
 from typing import List, Optional
 from datetime import date
 from app.supabase_client import supabase
+from app.auth import get_current_user, require_role
+from app.cache import cached, invalidate_namespace
 
 router = APIRouter()
 
@@ -128,6 +130,7 @@ async def search_employees(
 
 @router.get("")
 @router.get("/")
+@cached("employees", ttl=60)
 async def get_employees():
     """Return all employees."""
     try:
@@ -153,7 +156,7 @@ async def get_employee(id: int):
 
 @router.post("")
 @router.post("/")
-async def create_employee(employee: Employee):
+async def create_employee(employee: Employee, current_user: dict = Depends(get_current_user)):
     """Create a new employee. The employee_id must be unique."""
     try:
         # Reject duplicate employee_id
@@ -174,6 +177,7 @@ async def create_employee(employee: Employee):
         rows = _data(supabase.table("employees").insert(payload).execute())
         if not rows:
             raise HTTPException(500, detail="No data returned after insertion")
+        await invalidate_namespace("employees")
         return _dates_from_db(rows[0])
 
     except HTTPException:
@@ -183,7 +187,7 @@ async def create_employee(employee: Employee):
 
 
 @router.put("/{id}")
-async def update_employee(id: int, updated: Employee):
+async def update_employee(id: int, updated: Employee, current_user: dict = Depends(get_current_user)):
     """
     Update an employee record identified by the integer database ID.
     employee_id in the request body can be freely changed to any value
@@ -222,6 +226,7 @@ async def update_employee(id: int, updated: Employee):
         )
         if not rows:
             raise HTTPException(500, detail="No data returned after update")
+        await invalidate_namespace("employees")
         return _dates_from_db(rows[0])
 
     except HTTPException:
@@ -231,7 +236,7 @@ async def update_employee(id: int, updated: Employee):
 
 
 @router.delete("/{id}")
-async def delete_employee(id: int):
+async def delete_employee(id: int, current_user: dict = Depends(require_role('manager'))):
     """Delete an employee by their database ID."""
     try:
         existing_rows = _data(
@@ -247,6 +252,7 @@ async def delete_employee(id: int):
         name = f"{emp.get('first_name', '')} {emp.get('last_name', '')}".strip() or "Unknown"
 
         supabase.table("employees").delete().eq("id", id).execute()
+        await invalidate_namespace("employees")
 
         return {
             "success": True,

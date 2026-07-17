@@ -1,9 +1,11 @@
 # app/routers/services.py — Services Tracker (CRUD + OCR + Attachments)
-from fastapi import APIRouter, HTTPException, UploadFile, File
+from fastapi import APIRouter, HTTPException, UploadFile, File, Depends
 from pydantic import BaseModel
 from typing import Optional
 from datetime import datetime, date
 from app.supabase_client import supabase
+from app.auth import get_current_user, require_role
+from app.uploads import read_and_validate_upload, DOCUMENT_EXTS
 
 # Alias prevents the Pydantic field named 'date' from shadowing datetime.date in type resolution
 _Date = date
@@ -93,7 +95,7 @@ async def list_services():
 
 @router.post("")
 @router.post("/")
-async def create_service(body: ServiceIn):
+async def create_service(body: ServiceIn, current_user: dict = Depends(get_current_user)):
     try:
         data = _serialize(body.model_dump())
         now = datetime.utcnow().isoformat()
@@ -169,7 +171,7 @@ def _parse_service_text(text: str) -> dict:
 # ── OCR — must be registered BEFORE /{service_id} routes ──────────────────────
 
 @router.post("/ocr")
-async def ocr_document(file: UploadFile = File(...)):
+async def ocr_document(file: UploadFile = File(...), current_user: dict = Depends(get_current_user)):
     """Extract service completion fields from a PDF or image using PyMuPDF + pytesseract (no AI API)."""
     content = await file.read()
     if len(content) > 20 * 1024 * 1024:
@@ -224,7 +226,7 @@ async def ocr_document(file: UploadFile = File(...)):
 # ── Single-record operations ───────────────────────────────────────────────────
 
 @router.put("/{service_id}")
-async def update_service(service_id: str, body: ServiceIn):
+async def update_service(service_id: str, body: ServiceIn, current_user: dict = Depends(get_current_user)):
     try:
         data = _serialize(body.model_dump(exclude_none=False))
         data['updated_at'] = datetime.utcnow().isoformat()
@@ -240,7 +242,7 @@ async def update_service(service_id: str, body: ServiceIn):
 
 
 @router.delete("/{service_id}")
-async def delete_service(service_id: str):
+async def delete_service(service_id: str, current_user: dict = Depends(require_role('manager'))):
     try:
         supabase.table("services").delete().eq("id", service_id).execute()
         return {"ok": True}
@@ -268,10 +270,8 @@ async def list_attachments(service_id: str):
 
 
 @router.post("/{service_id}/attachments")
-async def upload_attachment(service_id: str, file: UploadFile = File(...)):
-    content = await file.read()
-    if len(content) > 50 * 1024 * 1024:
-        raise HTTPException(400, "File too large — maximum 50 MB")
+async def upload_attachment(service_id: str, file: UploadFile = File(...), current_user: dict = Depends(get_current_user)):
+    content = await read_and_validate_upload(file, max_bytes=50 * 1024 * 1024, allowed_exts=DOCUMENT_EXTS)
 
     original_name = file.filename or "upload"
     ext = original_name.rsplit(".", 1)[-1] if "." in original_name else "bin"
@@ -305,7 +305,7 @@ async def upload_attachment(service_id: str, file: UploadFile = File(...)):
 
 
 @router.delete("/{service_id}/attachments/{attachment_id}")
-async def delete_attachment(service_id: str, attachment_id: str):
+async def delete_attachment(service_id: str, attachment_id: str, current_user: dict = Depends(require_role('manager'))):
     try:
         row = (supabase.table("service_attachments")
                .select("storage_path")

@@ -1,9 +1,11 @@
 # app/routers/documents.py — AMS Document Hub (CRUD + Supabase Storage)
-from fastapi import APIRouter, HTTPException, UploadFile, File, Form
+from fastapi import APIRouter, HTTPException, UploadFile, File, Form, Depends
 from pydantic import BaseModel
 from typing import Optional
 from datetime import datetime
 from app.supabase_client import supabase
+from app.auth import get_current_user, require_role
+from app.uploads import read_and_validate_upload, DOCUMENT_EXTS
 import logging, uuid as uuid_module
 
 logger = logging.getLogger(__name__)
@@ -53,10 +55,9 @@ async def upload_document(
     category_name: str= Form(""),
     folder_id: str    = Form(""),   # empty string = root
     folder_path: str  = Form(""),
+    current_user: dict = Depends(get_current_user),
 ):
-    content = await file.read()
-    if len(content) > 100 * 1024 * 1024:
-        raise HTTPException(400, "File too large — maximum 100 MB")
+    content = await read_and_validate_upload(file, max_bytes=100 * 1024 * 1024, allowed_exts=DOCUMENT_EXTS)
 
     original_name = file.filename or "upload"
     display_name  = name.strip() or original_name
@@ -113,7 +114,7 @@ class DocUpdate(BaseModel):
 
 
 @router.put("/{doc_id}")
-async def update_document(doc_id: str, body: DocUpdate):
+async def update_document(doc_id: str, body: DocUpdate, current_user: dict = Depends(get_current_user)):
     updates: dict = {"updated_at": datetime.utcnow().isoformat()}
     if body.name        is not None: updates["name"]        = body.name
     if body.description is not None: updates["description"] = body.description
@@ -133,7 +134,7 @@ async def update_document(doc_id: str, body: DocUpdate):
 # ── Delete ────────────────────────────────────────────────────────────────────
 
 @router.delete("/{doc_id}")
-async def delete_document(doc_id: str):
+async def delete_document(doc_id: str, current_user: dict = Depends(require_role('manager'))):
     try:
         row = (supabase.table("documents")
                .select("storage_path")

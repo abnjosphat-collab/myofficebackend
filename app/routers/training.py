@@ -1,6 +1,7 @@
 # app/routers/training.py - FastAPI Router for Compliance Management
 
-from fastapi import APIRouter, HTTPException, UploadFile, File, Form
+from fastapi import APIRouter, HTTPException, UploadFile, File, Form, Depends
+from app.auth import get_current_user, require_role
 from pydantic import BaseModel, Field
 from typing import List, Optional, Dict, Any
 from datetime import date, timedelta
@@ -125,7 +126,7 @@ async def create_new_certification(
     expiry_date: date = Form(..., description="Format: YYYY-MM-DD"),
     required_refresher: str = Form(...),
     certificate_file: Optional[UploadFile] = File(None)
-):
+, current_user: dict = Depends(get_current_user)):
     """Creates a new certification record and handles the file upload."""
     
     file_url = None
@@ -175,7 +176,7 @@ async def update_certification(
     expiry_date: date = Form(None),
     required_refresher: str = Form(None),
     certificate_file: Optional[UploadFile] = File(None)
-):
+, current_user: dict = Depends(get_current_user)):
     """Update an existing certification record."""
     record = find_record(record_id)
     if not record:
@@ -207,7 +208,7 @@ async def update_certification(
     return record
 
 @router.delete("/{record_id}")
-async def delete_certification(record_id: str):
+async def delete_certification(record_id: str, current_user: dict = Depends(require_role('manager'))):
     """Deletes a certification record."""
     global CERTIFICATIONS_DB
     

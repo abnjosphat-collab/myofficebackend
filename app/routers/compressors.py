@@ -9,9 +9,9 @@ from typing import List, Dict, Optional, Any, Tuple
 from enum import Enum
 from collections import defaultdict
 
-import supabase
 from dotenv import load_dotenv
 from fastapi import APIRouter, HTTPException, Depends, Query, Body, BackgroundTasks, Form, UploadFile, File
+from app.uploads import read_and_validate_upload
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 import asyncio
@@ -102,95 +102,28 @@ class DailyUpdateRequest(BaseModel):
     temperature: float = 0.0
     notes: Optional[str] = None
 
+class ServiceRecordCreate(BaseModel):
+    compressor_id: str
+    service_type: str
+    service_date: str
+    running_hours_at_service: float = 0.0
+    description: Optional[str] = None
+    is_completed: bool = False
+
 class StatusUpdateRequest(BaseModel):
     status: CompressorStatus
 
-# Supabase Client with better error handling
-class SupabaseClient:
-    _instance = None
-    
-    def __new__(cls):
-        if cls._instance is None:
-            supabase_url = os.getenv("SUPABASE_URL", "http://localhost:54321")  # Default for local
-            supabase_key = os.getenv("SUPABASE_KEY", "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZS1kZW1vIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImV4cCI6MTk4MzgxMjk5Nn0.EGIM96RAZx35lJzdJsyH-qQwv8Hdp7fsn3W0YpN81IU")
-            
-            if not supabase_url or not supabase_key:
-                print("⚠️ Warning: SUPABASE_URL and SUPABASE_KEY not set, using defaults")
-            
-            try:
-                cls._instance = supabase.create_client(supabase_url, supabase_key)
-                print(f"✅ Connected to Supabase at {supabase_url}")
-            except Exception as e:
-                print(f"❌ Error connecting to Supabase: {e}")
-                # Create a mock client for development
-                cls._instance = None
-        return cls._instance
+# Supabase client — this router used to build its OWN client with a hardcoded
+# fallback service-role key (a real credential, sitting in source) and would
+# silently swap in a fake in-memory "mock" client if the connection failed,
+# which could make broken DB connectivity look like "it worked, there's just
+# no data" instead of failing loudly. Use the single shared client every other
+# router uses instead — one client, one set of credentials, no hidden mock.
+from app.supabase_client import supabase as _shared_supabase_client
+from app.auth import get_current_user, require_role
 
 def get_supabase():
-    client = SupabaseClient()
-    if client is None:
-        # Return a mock for development
-        class MockSupabase:
-            def table(self, table_name):
-                class MockTable:
-                    def __init__(self, name):
-                        self.name = name
-                        self.data = []
-                    
-                    def select(self, *args):
-                        return self
-                    
-                    def eq(self, field, value):
-                        return self
-                    
-                    def gte(self, field, value):
-                        return self
-                    
-                    def lte(self, field, value):
-                        return self
-                    
-                    def lt(self, field, value):
-                        return self
-                    
-                    def gt(self, field, value):
-                        return self
-                    
-                    def order(self, field, ascending=True):
-                        return self
-                    
-                    def limit(self, num):
-                        return self
-                    
-                    def execute(self):
-                        class MockResult:
-                            def __init__(self, data):
-                                self.data = data
-                        return MockResult(self.data)
-                    
-                    def insert(self, data):
-                        if isinstance(data, list):
-                            self.data.extend(data)
-                        else:
-                            self.data.append(data)
-                        class MockResult:
-                            def __init__(self, data):
-                                self.data = [data] if data else []
-                        return MockResult(data)
-                    
-                    def update(self, data):
-                        return self
-                    
-                    def delete(self):
-                        return self
-                    
-                    def in_(self, field, values):
-                        return self
-                
-                return MockTable(table_name)
-        
-        print("⚠️ Using mock Supabase client for development")
-        return MockSupabase()
-    return client
+    return _shared_supabase_client
 
 # Helper functions
 def calculate_efficiency(running_hours: float, loaded_hours: float) -> float:
@@ -416,7 +349,7 @@ async def get_compressor_by_id(
 async def create_compressor(
     compressor: CompressorCreate,
     supabase_client = Depends(get_supabase)
-):
+, current_user: dict = Depends(get_current_user)):
     """Create a new compressor"""
     try:
         compressor_data = compressor.dict()
@@ -453,7 +386,7 @@ async def update_compressor(
     compressor_id: str,
     compressor_update: CompressorUpdate,
     supabase_client = Depends(get_supabase)
-):
+, current_user: dict = Depends(get_current_user)):
     """Update a compressor"""
     try:
         update_data = compressor_update.dict(exclude_unset=True)
@@ -480,7 +413,7 @@ async def update_compressor_status(
     compressor_id: str,
     status_update: StatusUpdateRequest,
     supabase_client = Depends(get_supabase)
-):
+, current_user: dict = Depends(get_current_user)):
     """Update only the status of a compressor"""
     try:
         new_status = status_update.status.value
@@ -514,7 +447,7 @@ async def update_compressor_status(
 async def delete_compressor(
     compressor_id: str,
     supabase_client = Depends(get_supabase)
-):
+, current_user: dict = Depends(require_role('manager'))):
     """Delete a compressor"""
     try:
         supabase_client.table(COMPRESSORS_TABLE).delete().eq("id", compressor_id).execute()
@@ -527,7 +460,7 @@ async def delete_compressor(
 async def create_daily_entry_cumulative(
     request: DailyUpdateRequest,
     supabase_client = Depends(get_supabase)
-):
+, current_user: dict = Depends(get_current_user)):
     """Create or update daily entry using cumulative hours with proper validation"""
     try:
         date_str = request.date
@@ -1329,8 +1262,8 @@ async def get_management_summary(supabase_client = Depends(get_supabase)):
 # Export/Import endpoints
 @router.post("/export")
 async def export_data(
-    export_request: dict = Body(...),
-    supabase_client = Depends(get_supabase)
+    supabase_client = Depends(get_supabase),
+    current_user: dict = Depends(get_current_user),
 ):
     """Export data to CSV format"""
     try:
@@ -1368,12 +1301,15 @@ async def export_data(
 async def import_data(
     file: UploadFile = File(...),
     supabase_client = Depends(get_supabase)
-):
+, current_user: dict = Depends(get_current_user)):
     """Import data from CSV file"""
     try:
-        contents = await file.read()
-        content_str = contents.decode('utf-8')
-        
+        contents = await read_and_validate_upload(file, max_bytes=10 * 1024 * 1024, allowed_exts={"csv"})
+        try:
+            content_str = contents.decode('utf-8')
+        except UnicodeDecodeError:
+            raise HTTPException(status_code=400, detail="File is not valid UTF-8 text — expected a CSV file")
+
         # Parse CSV content
         lines = content_str.strip().split('\n')
         headers = lines[0].split(',')
@@ -1414,27 +1350,31 @@ async def import_data(
             "message": f"Imported {imported_count} compressors successfully"
         }
         
+    except HTTPException:
+        raise
     except Exception as e:
         print(f"Error importing data: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Error importing data: {str(e)}")
 
 @router.post("/service-records")
 async def create_service_record(
-    service_record: dict = Body(...),
-    supabase_client = Depends(get_supabase)
+    service_record: ServiceRecordCreate,
+    supabase_client = Depends(get_supabase),
+    current_user: dict = Depends(get_current_user),
 ):
     """Create a service record"""
     try:
         # Add metadata
-        service_record["id"] = str(uuid.uuid4())
-        service_record["created_at"] = datetime.utcnow().isoformat()
-        
+        data = service_record.dict()
+        data["id"] = str(uuid.uuid4())
+        data["created_at"] = datetime.utcnow().isoformat()
+
         # Insert into database
-        result = supabase_client.table(SERVICE_RECORDS_TABLE).insert(service_record).execute()
-        
+        result = supabase_client.table(SERVICE_RECORDS_TABLE).insert(data).execute()
+
         return {
             "success": True,
-            "data": service_record,
+            "data": data,
             "message": "Service record created successfully"
         }
         

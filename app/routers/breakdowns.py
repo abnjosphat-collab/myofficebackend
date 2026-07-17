@@ -1,5 +1,6 @@
 # app/routers/breakdowns.py
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Depends
+from app.auth import get_current_user, require_role
 from pydantic import BaseModel, Field, validator
 from typing import Optional, List
 from datetime import datetime, timedelta
@@ -8,6 +9,7 @@ import logging
 import os
 from supabase import create_client, Client
 from collections import defaultdict
+from app.cache import cached, cache_get, cache_set, build_key, invalidate_namespace
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -222,7 +224,15 @@ async def get_breakdowns(
 ):
     """Get breakdowns with filtering"""
     db = check_supabase()
-    
+
+    cache_key = build_key(
+        "breakdowns", _fn="get_breakdowns", status=status, breakdown_type=breakdown_type,
+        department=department, limit=limit, offset=offset,
+    )
+    cached_result = await cache_get(cache_key)
+    if cached_result is not None:
+        return cached_result
+
     try:
         query = db.table("breakdowns").select("*")
         
@@ -244,18 +254,20 @@ async def get_breakdowns(
                 except:
                     record['spares_used'] = []
         
-        return {
+        result = {
             "data": records,
             "count": len(records),
             "success": True
         }
-        
+        await cache_set(cache_key, result, ttl=60, namespace="breakdowns")
+        return result
+
     except Exception as e:
         logger.error(f"Error fetching breakdowns: {e}")
         raise HTTPException(status_code=500, detail=f"Error fetching breakdowns: {str(e)}")
 
 @router.post("/")
-async def create_breakdown(breakdown: BreakdownCreate):
+async def create_breakdown(breakdown: BreakdownCreate, current_user: dict = Depends(get_current_user)):
     """Create a new breakdown record"""
     db = check_supabase()
     
@@ -310,6 +322,7 @@ async def create_breakdown(breakdown: BreakdownCreate):
                 except:
                     result['spares_used'] = []
             
+            await invalidate_namespace("breakdowns")
             return {
                 "success": True,
                 "data": result,
@@ -352,7 +365,7 @@ async def get_breakdown(breakdown_id: str):
         raise HTTPException(status_code=500, detail=f"Error fetching breakdown: {str(e)}")
 
 @router.patch("/{breakdown_id}")
-async def update_breakdown(breakdown_id: str, breakdown_update: BreakdownUpdate):
+async def update_breakdown(breakdown_id: str, breakdown_update: BreakdownUpdate, current_user: dict = Depends(get_current_user)):
     """Update breakdown"""
     db = check_supabase()
 
@@ -414,7 +427,8 @@ async def update_breakdown(breakdown_id: str, breakdown_update: BreakdownUpdate)
                     result['spares_used'] = json.loads(result['spares_used'])
                 except:
                     result['spares_used'] = []
-            
+
+            await invalidate_namespace("breakdowns")
             return result
         else:
             raise HTTPException(status_code=500, detail="Update failed")
@@ -426,7 +440,7 @@ async def update_breakdown(breakdown_id: str, breakdown_update: BreakdownUpdate)
         raise HTTPException(status_code=500, detail=f"Error updating breakdown: {str(e)}")
 
 @router.delete("/{breakdown_id}")
-async def delete_breakdown(breakdown_id: str):
+async def delete_breakdown(breakdown_id: str, current_user: dict = Depends(require_role('manager'))):
     """Delete breakdown"""
     db = check_supabase()
 
@@ -438,7 +452,8 @@ async def delete_breakdown(breakdown_id: str):
         
         # Delete
         db.table("breakdowns").delete().eq("id", breakdown_id).execute()
-        
+        await invalidate_namespace("breakdowns")
+
         return {"success": True, "message": "Breakdown deleted successfully"}
         
     except HTTPException:
@@ -448,6 +463,7 @@ async def delete_breakdown(breakdown_id: str):
         raise HTTPException(status_code=500, detail=f"Error deleting breakdown: {str(e)}")
 
 @router.get("/dashboard/overview")
+@cached("breakdowns", ttl=60)
 async def get_dashboard_overview():
     """Get dashboard metrics"""
     db = check_supabase()

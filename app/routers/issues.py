@@ -1,11 +1,12 @@
 """
 Stock Issues Router — record items issued to personnel
 """
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Depends
 from pydantic import BaseModel, Field
 from typing import Optional, List
 from datetime import datetime, date, timedelta
 from app.supabase_client import supabase
+from app.auth import get_current_user, require_role
 import logging
 
 logger = logging.getLogger(__name__)
@@ -67,7 +68,7 @@ async def get_issues(
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.post("", status_code=201)
-async def create_issue(issue: StockIssueCreate):
+async def create_issue(issue: StockIssueCreate, current_user: dict = Depends(get_current_user)):
     try:
         now = datetime.utcnow().isoformat()
         row = {
@@ -90,7 +91,7 @@ async def create_issue(issue: StockIssueCreate):
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.delete("/{issue_id}")
-async def delete_issue(issue_id: int):
+async def delete_issue(issue_id: int, current_user: dict = Depends(require_role('manager'))):
     try:
         existing = supabase.table("stock_issues").select("id").eq("id", issue_id).execute()
         if not existing.data:

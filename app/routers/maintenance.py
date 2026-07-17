@@ -1,9 +1,11 @@
 # backend/app/routes/maintenance.py
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel, Field
 from typing import Optional, List, Dict, Any
 from datetime import datetime, date
 from app.supabase_client import supabase
+from app.auth import get_current_user, require_role
+from app.cache import cached, cache_get, cache_set, build_key, invalidate_namespace
 import logging
 import json
 
@@ -84,6 +86,16 @@ class WorkOrderCreate(BaseModel):
     progress: int = 0
     notes: Optional[str] = None
 
+    # Classification & analysis fields (previously stored only in browser localStorage —
+    # now persisted server-side; requires the matching columns from migration
+    # 2026-07_work_orders_classification.sql).
+    classification: Optional[str] = None
+    classification_custom: Optional[str] = None
+    failure_mode: Optional[str] = None
+    discipline: Optional[str] = None
+    trade: Optional[str] = None
+    spares_used: Optional[List[Dict[str, Any]]] = None
+
 class WorkOrderUpdate(BaseModel):
     to_department: Optional[str] = None
     to_section: Optional[str] = None
@@ -132,6 +144,12 @@ class WorkOrderUpdate(BaseModel):
     due_date: Optional[date] = None
     progress: Optional[int] = None
     notes: Optional[str] = None
+    classification: Optional[str] = None
+    classification_custom: Optional[str] = None
+    failure_mode: Optional[str] = None
+    discipline: Optional[str] = None
+    trade: Optional[str] = None
+    spares_used: Optional[List[Dict[str, Any]]] = None
 
 # ==================== PPE MODELS (if not already separate) ====================
 class PPEIssueCreate(BaseModel):
@@ -214,7 +232,7 @@ def prepare_data_for_db(data: dict) -> dict:
 def prepare_data_for_response(data: dict) -> dict:
     """Convert JSON strings back to objects for API response"""
     result = {}
-    json_fields = ['job_type', 'manpower']
+    json_fields = ['job_type', 'manpower', 'spares_used']
     
     for key, value in data.items():
         if key in json_fields and value and isinstance(value, str):
@@ -235,6 +253,13 @@ async def get_work_orders(
     allocated_to: Optional[str] = None,
     to_department: Optional[str] = None
 ):
+    cache_key = build_key(
+        "work_orders", status=status, priority=priority, department=department,
+        allocated_to=allocated_to, to_department=to_department,
+    )
+    cached_result = await cache_get(cache_key)
+    if cached_result is not None:
+        return cached_result
     try:
         query = supabase.table("work_orders").select("*")
         
@@ -256,15 +281,16 @@ async def get_work_orders(
         for record in records:
             processed_record = prepare_data_for_response(record)
             processed_records.append(processed_record)
-            
+
+        await cache_set(cache_key, processed_records, ttl=60, namespace="work_orders")
         return processed_records
-        
+
     except Exception as e:
         logger.error(f"Error fetching work orders: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Error fetching work orders: {str(e)}")
 
 @router.post("/work-orders")
-async def create_work_order(work_order: WorkOrderCreate):
+async def create_work_order(work_order: WorkOrderCreate, current_user: dict = Depends(get_current_user)):
     try:
         data_to_insert = work_order.dict()
         
@@ -296,6 +322,7 @@ async def create_work_order(work_order: WorkOrderCreate):
         
         if response.data:
             result = prepare_data_for_response(response.data[0])
+            await invalidate_namespace("work_orders")
             return result
         else:
             raise HTTPException(status_code=500, detail="Failed to create work order")
@@ -321,7 +348,7 @@ async def get_work_order(work_order_id: int):
         raise HTTPException(status_code=500, detail=f"Error fetching work order: {str(e)}")
 
 @router.patch("/work-orders/{work_order_id}")
-async def update_work_order(work_order_id: int, updated: WorkOrderUpdate):
+async def update_work_order(work_order_id: int, updated: WorkOrderUpdate, current_user: dict = Depends(get_current_user)):
     try:
         existing = supabase.table("work_orders").select("*").eq("id", work_order_id).execute()
         if not existing.data:
@@ -335,6 +362,7 @@ async def update_work_order(work_order_id: int, updated: WorkOrderUpdate):
         
         if response.data:
             result = prepare_data_for_response(response.data[0])
+            await invalidate_namespace("work_orders")
             return result
         else:
             raise HTTPException(status_code=500, detail="Update failed")
@@ -346,13 +374,14 @@ async def update_work_order(work_order_id: int, updated: WorkOrderUpdate):
         raise HTTPException(status_code=500, detail=f"Error updating work order: {str(e)}")
 
 @router.delete("/work-orders/{work_order_id}")
-async def delete_work_order(work_order_id: int):
+async def delete_work_order(work_order_id: int, current_user: dict = Depends(require_role('manager'))):
     try:
         existing = supabase.table("work_orders").select("*").eq("id", work_order_id).execute()
         if not existing.data:
             raise HTTPException(status_code=404, detail="Work order not found")
         
         supabase.table("work_orders").delete().eq("id", work_order_id).execute()
+        await invalidate_namespace("work_orders")
         return {"success": True, "message": "Work order deleted successfully"}
         
     except HTTPException:
@@ -380,6 +409,7 @@ async def get_work_orders_by_allocated(allocated_to: str):
 
 # ==================== WORK ORDERS STATISTICS ====================
 @router.get("/work-orders/stats/summary")
+@cached("work_orders", ttl=60)
 async def get_work_order_stats():
     try:
         # Get total records count
@@ -490,7 +520,7 @@ async def get_ppe_records(
         raise HTTPException(status_code=500, detail=f"Error fetching PPE records: {str(e)}")
 
 @router.post("/ppe")
-async def create_ppe_record(record: PPEIssueCreate):
+async def create_ppe_record(record: PPEIssueCreate, current_user: dict = Depends(get_current_user)):
     try:
         data_to_insert = record.dict()
         

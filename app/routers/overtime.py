@@ -2,7 +2,7 @@ from fastapi import APIRouter, HTTPException, Header
 from pydantic import BaseModel, Field
 from typing import Optional
 from app.supabase_client import supabase
-from app.auth import verify_approver
+from app.auth import require_role
 import logging
 from datetime import datetime
 
@@ -112,7 +112,7 @@ async def create_overtime(overtime: OvertimeCreate):
 async def update_overtime(overtime_id: int, updated: OvertimeUpdate, authorization: Optional[str] = Header(None)):
     # Approve/reject requires verified manager+ JWT
     if updated.status in ('approved', 'rejected'):
-        approver = await verify_approver(authorization)
+        approver = await require_role('manager')(authorization)
         logger.info(f"Approval action '{updated.status}' by {approver['email']} (role: {approver['role']})")
     try:
         logger.info(f"Updating overtime {overtime_id}")

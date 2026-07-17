@@ -1,9 +1,10 @@
 # backend/app/routers/near_miss.py
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Depends
 from pydantic import BaseModel, Field
 from typing import Optional, List
 from app.supabase_client import supabase
+from app.auth import get_current_user, require_role
 import logging
 from datetime import datetime
 import uuid
@@ -148,7 +149,7 @@ async def get_report(report_id: str):
 # POST create report
 @router.post("")
 @router.post("/")
-async def create_report(report: NearMissCreate):
+async def create_report(report: NearMissCreate, current_user: dict = Depends(get_current_user)):
     try:
         logger.info(f"Creating near miss report for department: {report.department}")
         
@@ -190,7 +191,7 @@ async def create_report(report: NearMissCreate):
 
 # PATCH update report
 @router.patch("/{report_id}")
-async def update_report(report_id: str, updated: NearMissUpdate):
+async def update_report(report_id: str, updated: NearMissUpdate, current_user: dict = Depends(get_current_user)):
     try:
         logger.info(f"Updating near miss report {report_id}")
         
@@ -245,7 +246,7 @@ async def update_report(report_id: str, updated: NearMissUpdate):
 
 # DELETE report
 @router.delete("/{report_id}")
-async def delete_report(report_id: str):
+async def delete_report(report_id: str, current_user: dict = Depends(require_role('manager'))):
     try:
         logger.info(f"Deleting near miss report {report_id}")
         

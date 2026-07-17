@@ -1,7 +1,8 @@
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel
 from typing import Optional
 from app.supabase_client import supabase
+from app.auth import get_current_user, require_role
 import logging
 
 router = APIRouter(tags=["Condition Monitoring"])
@@ -56,7 +57,7 @@ async def get_readings(monitoring_type: Optional[str] = None, result: Optional[s
 
 @router.post("")
 @router.post("/")
-async def create_reading(data: CMCreate):
+async def create_reading(data: CMCreate, current_user: dict = Depends(get_current_user)):
     try:
         r = supabase.table("condition_monitoring").insert(data.dict(exclude_none=True)).execute()
         if not r.data:
@@ -68,7 +69,7 @@ async def create_reading(data: CMCreate):
         raise HTTPException(500, str(e))
 
 @router.patch("/{r_id}")
-async def update_reading(r_id: int, data: CMUpdate):
+async def update_reading(r_id: int, data: CMUpdate, current_user: dict = Depends(get_current_user)):
     payload = {k: v for k, v in data.dict().items() if v is not None}
     r = supabase.table("condition_monitoring").update(payload).eq("id", r_id).execute()
     if not r.data:
@@ -76,6 +77,6 @@ async def update_reading(r_id: int, data: CMUpdate):
     return r.data[0]
 
 @router.delete("/{r_id}")
-async def delete_reading(r_id: int):
+async def delete_reading(r_id: int, current_user: dict = Depends(require_role('manager'))):
     supabase.table("condition_monitoring").delete().eq("id", r_id).execute()
     return {"ok": True}

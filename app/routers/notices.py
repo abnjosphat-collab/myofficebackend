@@ -1,9 +1,10 @@
 # app/api/notices.py
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Depends
 from pydantic import BaseModel
 from typing import Optional
 from datetime import datetime, date
 from app.supabase_client import supabase
+from app.auth import get_current_user, require_role
 
 router = APIRouter()
 
@@ -63,7 +64,7 @@ async def get_notices(
 
 # POST create notice
 @router.post("")
-async def create_notice(notice: NoticeCreate):
+async def create_notice(notice: NoticeCreate, current_user: dict = Depends(get_current_user)):
     try:
         data = notice.dict()
         
@@ -100,7 +101,7 @@ async def get_notice(notice_id: str):
 
 # PUT update notice
 @router.put("/{notice_id}")
-async def update_notice(notice_id: str, notice: NoticeUpdate):
+async def update_notice(notice_id: str, notice: NoticeUpdate, current_user: dict = Depends(get_current_user)):
     try:
         # Check if exists
         check = supabase.table("notices").select("id").eq("id", notice_id).execute()
@@ -128,7 +129,7 @@ async def update_notice(notice_id: str, notice: NoticeUpdate):
 
 # DELETE notice
 @router.delete("/{notice_id}")
-async def delete_notice(notice_id: str):
+async def delete_notice(notice_id: str, current_user: dict = Depends(require_role('manager'))):
     try:
         # Check if exists
         check = supabase.table("notices").select("id").eq("id", notice_id).execute()

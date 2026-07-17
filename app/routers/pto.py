@@ -3,10 +3,11 @@
 
 # backend/app/routers/pto.py
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Depends
 from pydantic import BaseModel, Field, validator
 from typing import Optional, List, Dict, Any
 from app.supabase_client import supabase
+from app.auth import get_current_user, require_role
 import logging
 from datetime import datetime
 import uuid
@@ -507,7 +508,7 @@ async def get_pto_report(report_id: str):
 # POST create report
 @router.post("")
 @router.post("/")
-async def create_pto_report(report: PTOReportCreate):
+async def create_pto_report(report: PTOReportCreate, current_user: dict = Depends(get_current_user)):
     try:
         logger.info(f"Creating PTO report for observer: {report.observerName}")
         
@@ -593,7 +594,7 @@ async def create_pto_report(report: PTOReportCreate):
 
 # PATCH update report
 @router.patch("/{report_id}")
-async def update_pto_report(report_id: str, updated: PTOReportUpdate):
+async def update_pto_report(report_id: str, updated: PTOReportUpdate, current_user: dict = Depends(get_current_user)):
     try:
         logger.info(f"Updating PTO report {report_id}")
         
@@ -725,7 +726,7 @@ async def update_pto_report(report_id: str, updated: PTOReportUpdate):
 
 # DELETE report
 @router.delete("/{report_id}")
-async def delete_pto_report(report_id: str):
+async def delete_pto_report(report_id: str, current_user: dict = Depends(require_role('manager'))):
     try:
         logger.info(f"Deleting PTO report {report_id}")
         

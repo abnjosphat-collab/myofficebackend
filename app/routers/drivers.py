@@ -1,11 +1,12 @@
 """
 Drivers Router — authorised mine drivers registry
 """
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Depends
 from pydantic import BaseModel, Field
 from typing import Optional, List
 from datetime import datetime, date
 from app.supabase_client import supabase
+from app.auth import get_current_user, require_role
 import logging
 
 logger = logging.getLogger(__name__)
@@ -85,7 +86,7 @@ async def get_drivers(
 
 
 @router.post("", status_code=201)
-async def create_driver(driver: DriverCreate):
+async def create_driver(driver: DriverCreate, current_user: dict = Depends(get_current_user)):
     try:
         now = datetime.utcnow().isoformat()
         row = {
@@ -111,7 +112,7 @@ async def create_driver(driver: DriverCreate):
 
 
 @router.put("/{driver_id}")
-async def update_driver(driver_id: int, driver: DriverUpdate):
+async def update_driver(driver_id: int, driver: DriverUpdate, current_user: dict = Depends(get_current_user)):
     try:
         existing = supabase.table("drivers").select("id").eq("id", driver_id).execute()
         if not existing.data:
@@ -136,7 +137,7 @@ async def update_driver(driver_id: int, driver: DriverUpdate):
 
 
 @router.delete("/{driver_id}")
-async def delete_driver(driver_id: int):
+async def delete_driver(driver_id: int, current_user: dict = Depends(require_role('manager'))):
     try:
         existing = supabase.table("drivers").select("id, full_name").eq("id", driver_id).execute()
         if not existing.data:

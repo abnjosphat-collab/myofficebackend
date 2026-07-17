@@ -4,7 +4,7 @@ from pydantic import BaseModel, Field, validator
 from typing import Optional, List
 from datetime import date, datetime
 from app.supabase_client import supabase
-from app.auth import verify_approver
+from app.auth import require_role
 import logging
 import traceback
 
@@ -176,7 +176,7 @@ async def get_leave(leave_id: int):
 async def update_leave(leave_id: int, updated: LeaveUpdate, authorization: Optional[str] = Header(None)):
     # Approve/reject requires verified manager+ JWT
     if updated.status in ('approved', 'rejected'):
-        approver = await verify_approver(authorization)
+        approver = await require_role('manager')(authorization)
         logger.info(f"Leave approval '{updated.status}' by {approver['email']} (role: {approver['role']})")
     try:
         existing_resp = supabase.table("leaves").select("*").eq("id", leave_id).execute()

@@ -3,6 +3,7 @@ from pydantic import BaseModel, Field, validator
 from typing import Optional, Dict, Any, List, Union
 from datetime import datetime, date, timedelta
 from app.supabase_client import supabase
+from app.auth import get_current_user, require_role
 import logging
 import json
 from uuid import UUID, uuid4
@@ -299,7 +300,7 @@ async def get_employee(employee_id: str):
         raise HTTPException(status_code=500, detail=f"Error fetching employee: {str(e)}")
 
 @router.post("/employees", response_model=EmployeeResponse)
-async def create_employee(employee: EmployeeCreate):
+async def create_employee(employee: EmployeeCreate, current_user: dict = Depends(get_current_user)):
     """
     Create a new employee
     """
@@ -334,7 +335,7 @@ async def create_employee(employee: EmployeeCreate):
         raise HTTPException(status_code=500, detail=f"Error creating employee: {str(e)}")
 
 @router.patch("/employees/{employee_id}", response_model=EmployeeResponse)
-async def update_employee(employee_id: str, updated: EmployeeUpdate):
+async def update_employee(employee_id: str, updated: EmployeeUpdate, current_user: dict = Depends(get_current_user)):
     """
     Update an existing employee
     """
@@ -369,7 +370,7 @@ async def update_employee(employee_id: str, updated: EmployeeUpdate):
         raise HTTPException(status_code=500, detail=f"Error updating employee: {str(e)}")
 
 @router.delete("/employees/{employee_id}")
-async def delete_employee(employee_id: str):
+async def delete_employee(employee_id: str, current_user: dict = Depends(require_role('manager'))):
     """
     Delete an employee (soft delete by setting status to inactive)
     """
@@ -513,7 +514,7 @@ async def get_sheq_reports(
         raise HTTPException(status_code=500, detail=f"Error fetching SHEQ reports: {str(e)}")
 
 @router.post("", response_model=SHEQReportResponse)
-async def create_sheq_report(report: SHEQReportCreate):
+async def create_sheq_report(report: SHEQReportCreate, current_user: dict = Depends(get_current_user)):
     """
     Create a new SHEQ report
     """
@@ -567,7 +568,7 @@ async def get_sheq_report(report_id: int):
         raise HTTPException(status_code=500, detail=f"Error fetching SHEQ report: {str(e)}")
 
 @router.patch("/{report_id}", response_model=SHEQReportResponse)
-async def update_sheq_report(report_id: int, updated: SHEQReportUpdate):
+async def update_sheq_report(report_id: int, updated: SHEQReportUpdate, current_user: dict = Depends(get_current_user)):
     """
     Update an existing SHEQ report
     """
@@ -602,7 +603,7 @@ async def update_sheq_report(report_id: int, updated: SHEQReportUpdate):
         raise HTTPException(status_code=500, detail=f"Error updating SHEQ report: {str(e)}")
 
 @router.delete("/{report_id}")
-async def delete_sheq_report(report_id: int):
+async def delete_sheq_report(report_id: int, current_user: dict = Depends(require_role('manager'))):
     """
     Delete a SHEQ report
     """
@@ -1000,7 +1001,7 @@ async def bulk_update_status(
     report_ids: List[int],
     status: str,
     notes: Optional[str] = None
-):
+, current_user: dict = Depends(get_current_user)):
     """
     Bulk update status of multiple reports
     """

@@ -1,9 +1,11 @@
 # backend/app/routers/equipment.py
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel, Field
 from typing import List, Optional
 from datetime import date
 from app.supabase_client import supabase
+from app.auth import get_current_user, require_role
+from app.cache import cached, invalidate_namespace
 
 router = APIRouter()
 
@@ -90,6 +92,7 @@ def generate_equipment_id():
 
 @router.get("")
 @router.get("/")
+@cached("equipment", ttl=60)
 async def get_equipment():
     """Retrieve all equipment from the database."""
     try:
@@ -125,7 +128,7 @@ async def get_equipment_item(equipment_id: int):
 
 @router.post("")
 @router.post("/")
-async def create_equipment(equipment: Equipment):
+async def create_equipment(equipment: Equipment, current_user: dict = Depends(get_current_user)):
     """Create a new equipment record."""
     try:
         data_to_insert = equipment.dict(exclude_none=True)
@@ -145,6 +148,7 @@ async def create_equipment(equipment: Equipment):
             raise HTTPException(status_code=500, detail="No data returned after insertion")
             
         created_equipment = process_dates_from_db(created_data[0])
+        await invalidate_namespace("equipment")
         return created_equipment
         
     except HTTPException:
@@ -158,7 +162,7 @@ async def create_equipment(equipment: Equipment):
         raise HTTPException(status_code=500, detail=f"Error creating equipment: {error_detail}")
 
 @router.put("/{equipment_id}")
-async def update_equipment(equipment_id: int, updated: Equipment):
+async def update_equipment(equipment_id: int, updated: Equipment, current_user: dict = Depends(get_current_user)):
     """Update an existing equipment record."""
     try:
         existing_response = supabase.table("equipment").select("id").eq("id", equipment_id).execute()
@@ -184,6 +188,7 @@ async def update_equipment(equipment_id: int, updated: Equipment):
             raise HTTPException(status_code=500, detail="No data returned after update")
             
         updated_equipment = process_dates_from_db(updated_data[0])
+        await invalidate_namespace("equipment")
         return updated_equipment
         
     except HTTPException:
@@ -193,7 +198,7 @@ async def update_equipment(equipment_id: int, updated: Equipment):
         raise HTTPException(status_code=500, detail=f"Error updating equipment: {str(e)}")
 
 @router.delete("/{equipment_id}")
-async def delete_equipment(equipment_id: int):
+async def delete_equipment(equipment_id: int, current_user: dict = Depends(require_role('manager'))):
     """Delete an equipment record."""
     try:
         existing_response = supabase.table("equipment").select("id, name").eq("id", equipment_id).execute()
@@ -208,7 +213,8 @@ async def delete_equipment(equipment_id: int):
         equipment_name = existing_data[0].get('name', 'Unknown')
         
         supabase.table("equipment").delete().eq("id", equipment_id).execute()
-            
+        await invalidate_namespace("equipment")
+
         return {
             "success": True,
             "detail": f"Equipment {equipment_id} ({equipment_name}) successfully deleted",

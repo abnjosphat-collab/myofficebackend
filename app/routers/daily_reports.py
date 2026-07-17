@@ -1,5 +1,6 @@
 # backend/app/routers/daily_report.py
-from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi import APIRouter, HTTPException, Query, Request, Depends
+from app.auth import get_current_user, require_role
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from typing import List, Optional
@@ -176,7 +177,7 @@ async def get_reports(
 
 # POST report endpoint - CRITICAL: This was being hidden by duplicate routes
 @router.post("/")
-async def create_report(report: DailyReportCreate):
+async def create_report(report: DailyReportCreate, current_user: dict = Depends(get_current_user)):
     """Create a new daily report"""
     logger.info(f"💾 Creating report for date: {report.date}")
     
@@ -438,7 +439,7 @@ async def get_equipment_performance_trend(
 
 # Delete all reports
 @router.delete("/")
-async def delete_all_reports():
+async def delete_all_reports(current_user: dict = Depends(require_role('manager'))):
     """Delete all reports"""
     try:
         if not supabase:

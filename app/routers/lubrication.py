@@ -1,7 +1,8 @@
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel
 from typing import Optional
 from app.supabase_client import supabase
+from app.auth import get_current_user, require_role
 from datetime import date, timedelta
 import logging
 
@@ -75,7 +76,7 @@ async def get_schedules(status: Optional[str] = None, section: Optional[str] = N
 
 @router.post("")
 @router.post("/")
-async def create_schedule(data: LubeScheduleCreate):
+async def create_schedule(data: LubeScheduleCreate, current_user: dict = Depends(get_current_user)):
     try:
         payload = data.dict(exclude_none=True)
         payload["status"] = _lube_status(data.next_due_date)
@@ -89,7 +90,7 @@ async def create_schedule(data: LubeScheduleCreate):
         raise HTTPException(500, str(e))
 
 @router.patch("/{s_id}")
-async def update_schedule(s_id: int, data: LubeScheduleUpdate):
+async def update_schedule(s_id: int, data: LubeScheduleUpdate, current_user: dict = Depends(get_current_user)):
     payload = {k: v for k, v in data.dict().items() if v is not None}
     if "next_due_date" in payload:
         payload["status"] = _lube_status(payload["next_due_date"])
@@ -99,7 +100,7 @@ async def update_schedule(s_id: int, data: LubeScheduleUpdate):
     return r.data[0]
 
 @router.delete("/{s_id}")
-async def delete_schedule(s_id: int):
+async def delete_schedule(s_id: int, current_user: dict = Depends(require_role('manager'))):
     supabase.table("lube_schedules").delete().eq("id", s_id).execute()
     return {"ok": True}
 
@@ -113,7 +114,7 @@ async def get_lube_records(schedule_id: Optional[int] = None):
     return (q.execute()).data or []
 
 @router.post("/records")
-async def create_lube_record(data: LubeRecordCreate):
+async def create_lube_record(data: LubeRecordCreate, current_user: dict = Depends(get_current_user)):
     try:
         r = supabase.table("lube_records").insert(data.dict(exclude_none=True)).execute()
         if not r.data:

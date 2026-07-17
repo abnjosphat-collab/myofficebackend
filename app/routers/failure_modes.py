@@ -1,7 +1,8 @@
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel
 from typing import Optional
 from app.supabase_client import supabase
+from app.auth import get_current_user, require_role
 import logging
 
 router = APIRouter(tags=["Failure Modes"])
@@ -52,7 +53,7 @@ async def get_failure_modes(equipment_type: Optional[str] = None):
 
 @router.post("")
 @router.post("/")
-async def create_failure_mode(data: FMCreate):
+async def create_failure_mode(data: FMCreate, current_user: dict = Depends(get_current_user)):
     try:
         r = supabase.table("failure_modes").insert(data.dict(exclude_none=True)).execute()
         if not r.data:
@@ -64,7 +65,7 @@ async def create_failure_mode(data: FMCreate):
         raise HTTPException(500, str(e))
 
 @router.patch("/{fm_id}")
-async def update_failure_mode(fm_id: int, data: FMUpdate):
+async def update_failure_mode(fm_id: int, data: FMUpdate, current_user: dict = Depends(get_current_user)):
     payload = {k: v for k, v in data.dict().items() if v is not None}
     r = supabase.table("failure_modes").update(payload).eq("id", fm_id).execute()
     if not r.data:
@@ -72,6 +73,6 @@ async def update_failure_mode(fm_id: int, data: FMUpdate):
     return r.data[0]
 
 @router.delete("/{fm_id}")
-async def delete_failure_mode(fm_id: int):
+async def delete_failure_mode(fm_id: int, current_user: dict = Depends(require_role('manager'))):
     supabase.table("failure_modes").delete().eq("id", fm_id).execute()
     return {"ok": True}

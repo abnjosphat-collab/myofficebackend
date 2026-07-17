@@ -1,8 +1,9 @@
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel
 from typing import Optional
 import logging
 from app.supabase_client import supabase
+from app.auth import get_current_user, require_role
 from datetime import datetime, timedelta
 
 logger = logging.getLogger(__name__)
@@ -216,7 +217,7 @@ async def availability_from_breakdowns(
 
 
 @router.post("/availability-records")
-async def create_availability_record(body: AvailRecordIn):
+async def create_availability_record(body: AvailRecordIn, current_user: dict = Depends(get_current_user)):
     """Create a new availability record."""
     try:
         now  = datetime.utcnow().isoformat()
@@ -232,7 +233,7 @@ async def create_availability_record(body: AvailRecordIn):
 
 
 @router.put("/availability-records/{record_id}")
-async def update_availability_record(record_id: int, body: AvailRecordIn):
+async def update_availability_record(record_id: int, body: AvailRecordIn, current_user: dict = Depends(get_current_user)):
     """Update an existing availability record."""
     try:
         data = body.model_dump()
@@ -253,7 +254,7 @@ async def update_availability_record(record_id: int, body: AvailRecordIn):
 
 
 @router.delete("/availability-records/{record_id}")
-async def delete_availability_record(record_id: int):
+async def delete_availability_record(record_id: int, current_user: dict = Depends(require_role('manager'))):
     """Delete an availability record."""
     try:
         supabase.table("availabilities").delete().eq("id", record_id).execute()

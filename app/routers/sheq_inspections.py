@@ -1,9 +1,10 @@
 # backend/app/routers/sheq_inspections.py
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Depends
 from pydantic import BaseModel, Field
 from typing import Optional, List
 from app.supabase_client import supabase
+from app.auth import get_current_user, require_role
 import logging
 from datetime import datetime
 import uuid
@@ -304,7 +305,7 @@ async def get_inspection(inspection_id: str):
 # POST create inspection
 @router.post("")
 @router.post("/")
-async def create_inspection(inspection: SHEQCreate):
+async def create_inspection(inspection: SHEQCreate, current_user: dict = Depends(get_current_user)):
     try:
         logger.info(f"Creating inspection: {inspection.title}")
         
@@ -386,7 +387,7 @@ async def create_inspection(inspection: SHEQCreate):
 
 # PATCH update inspection
 @router.patch("/{inspection_id}")
-async def update_inspection(inspection_id: str, updated: SHEQUpdate):
+async def update_inspection(inspection_id: str, updated: SHEQUpdate, current_user: dict = Depends(get_current_user)):
     try:
         logger.info(f"Updating inspection {inspection_id}")
         
@@ -502,7 +503,7 @@ async def update_inspection(inspection_id: str, updated: SHEQUpdate):
 
 # DELETE inspection
 @router.delete("/{inspection_id}")
-async def delete_inspection(inspection_id: str):
+async def delete_inspection(inspection_id: str, current_user: dict = Depends(require_role('manager'))):
     try:
         logger.info(f"Deleting inspection {inspection_id}")
         
@@ -549,7 +550,7 @@ async def get_findings(inspection_id: str):
 
 # POST add finding to inspection
 @router.post("/{inspection_id}/findings")
-async def add_finding(inspection_id: str, finding: FindingCreate):
+async def add_finding(inspection_id: str, finding: FindingCreate, current_user: dict = Depends(get_current_user)):
     try:
         logger.info(f"Adding finding to inspection {inspection_id}")
         
@@ -594,7 +595,7 @@ async def add_finding(inspection_id: str, finding: FindingCreate):
 
 # PATCH update finding
 @router.patch("/findings/{finding_id}")
-async def update_finding(finding_id: str, updated: FindingUpdate):
+async def update_finding(finding_id: str, updated: FindingUpdate, current_user: dict = Depends(get_current_user)):
     try:
         logger.info(f"Updating finding {finding_id}")
         
@@ -650,7 +651,7 @@ async def update_finding(finding_id: str, updated: FindingUpdate):
 
 # DELETE finding
 @router.delete("/findings/{finding_id}")
-async def delete_finding(finding_id: str):
+async def delete_finding(finding_id: str, current_user: dict = Depends(require_role('manager'))):
     try:
         logger.info(f"Deleting finding {finding_id}")
         

@@ -42,11 +42,12 @@
 #
 # ─────────────────────────────────────────────────────────────────────────────
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel, Field, validator
 from typing import Optional, List
 from datetime import date, datetime
 from app.supabase_client import supabase
+from app.auth import get_current_user, require_role
 import logging
 
 logger = logging.getLogger(__name__)
@@ -183,7 +184,7 @@ async def get_assignment(assignment_id: int):
 
 @router.post("",  response_model=ShiftRosterResponse, status_code=201)
 @router.post("/", response_model=ShiftRosterResponse, status_code=201)
-async def create_assignment(payload: ShiftRosterCreate):
+async def create_assignment(payload: ShiftRosterCreate, current_user: dict = Depends(get_current_user)):
     try:
         data: dict = {
             "employee_id":      payload.employee_id,
@@ -230,7 +231,7 @@ def _is_missing_column_error(e: Exception) -> bool:
 # ─── PUT update ───────────────────────────────────────────────────────────────
 
 @router.put("/{assignment_id}", response_model=ShiftRosterResponse)
-async def update_assignment(assignment_id: int, payload: ShiftRosterUpdate):
+async def update_assignment(assignment_id: int, payload: ShiftRosterUpdate, current_user: dict = Depends(get_current_user)):
     try:
         _require_exists(assignment_id)
 
@@ -268,7 +269,7 @@ async def update_assignment(assignment_id: int, payload: ShiftRosterUpdate):
 # ─── DELETE ───────────────────────────────────────────────────────────────────
 
 @router.delete("/{assignment_id}")
-async def delete_assignment(assignment_id: int):
+async def delete_assignment(assignment_id: int, current_user: dict = Depends(require_role('manager'))):
     try:
         _require_exists(assignment_id)
         supabase.table(TABLE).delete().eq("id", assignment_id).execute()

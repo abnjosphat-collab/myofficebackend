@@ -1,8 +1,9 @@
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel, Field
 from typing import Optional
 from datetime import datetime, date
 from app.supabase_client import supabase
+from app.auth import get_current_user, require_role
 import logging
 import json
 
@@ -109,7 +110,7 @@ async def get_ppe_records(
         raise HTTPException(status_code=500, detail=f"Error fetching PPE records: {str(e)}")
 
 @router.post("")
-async def create_ppe_record(record: PPEIssueCreate):
+async def create_ppe_record(record: PPEIssueCreate, current_user: dict = Depends(get_current_user)):
     try:
         # Convert Pydantic model to dict and handle date serialization
         data_to_insert = record.dict()
@@ -154,7 +155,7 @@ async def get_ppe_record(record_id: int):
         raise HTTPException(status_code=500, detail=f"Error fetching PPE record: {str(e)}")
 
 @router.patch("/{record_id}")
-async def update_ppe_record(record_id: int, updated: PPEIssueUpdate):
+async def update_ppe_record(record_id: int, updated: PPEIssueUpdate, current_user: dict = Depends(get_current_user)):
     try:
         existing = supabase.table("ppe_records").select("*").eq("id", record_id).execute()
         if not existing.data:
@@ -186,7 +187,7 @@ async def update_ppe_record(record_id: int, updated: PPEIssueUpdate):
         raise HTTPException(status_code=500, detail=f"Error updating PPE record: {str(e)}")
 
 @router.delete("/{record_id}")
-async def delete_ppe_record(record_id: int):
+async def delete_ppe_record(record_id: int, current_user: dict = Depends(require_role('manager'))):
     try:
         existing = supabase.table("ppe_records").select("*").eq("id", record_id).execute()
         if not existing.data:

@@ -1,7 +1,8 @@
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel
 from typing import Optional
 from app.supabase_client import supabase
+from app.auth import get_current_user, require_role
 from datetime import date
 import logging
 
@@ -71,7 +72,7 @@ async def get_compliance_item(c_id: int):
 
 @router.post("")
 @router.post("/")
-async def create_compliance(data: ComplianceCreate):
+async def create_compliance(data: ComplianceCreate, current_user: dict = Depends(get_current_user)):
     try:
         payload = data.dict(exclude_none=True)
         payload["status"] = _compute_status(data.expiry_date)
@@ -85,7 +86,7 @@ async def create_compliance(data: ComplianceCreate):
         raise HTTPException(500, str(e))
 
 @router.patch("/{c_id}")
-async def update_compliance(c_id: int, data: ComplianceUpdate):
+async def update_compliance(c_id: int, data: ComplianceUpdate, current_user: dict = Depends(get_current_user)):
     payload = {k: v for k, v in data.dict().items() if v is not None}
     if "expiry_date" in payload:
         payload["status"] = _compute_status(payload["expiry_date"])
@@ -95,6 +96,6 @@ async def update_compliance(c_id: int, data: ComplianceUpdate):
     return r.data[0]
 
 @router.delete("/{c_id}")
-async def delete_compliance(c_id: int):
+async def delete_compliance(c_id: int, current_user: dict = Depends(require_role('manager'))):
     supabase.table("compliance_register").delete().eq("id", c_id).execute()
     return {"ok": True}

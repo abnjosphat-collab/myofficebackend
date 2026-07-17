@@ -1,9 +1,10 @@
 # app/routers/schedules.py
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel, Field, validator
 from typing import Optional, List, Dict, Any
 from datetime import date, datetime
 from app.supabase_client import supabase
+from app.auth import get_current_user, require_role
 import logging
 
 logger = logging.getLogger(__name__)
@@ -102,7 +103,7 @@ async def get_schedule(schedule_id: int):
         raise HTTPException(status_code=500, detail="Internal server error")
 
 @router.post("", response_model=ScheduleResponse)
-async def create_schedule(schedule: ScheduleCreate):
+async def create_schedule(schedule: ScheduleCreate, current_user: dict = Depends(get_current_user)):
     """Create a new maintenance schedule."""
     try:
         # Verify equipment exists (will raise 404 if not)
@@ -127,7 +128,7 @@ async def create_schedule(schedule: ScheduleCreate):
         raise HTTPException(status_code=500, detail="Internal server error")
 
 @router.patch("/{schedule_id}", response_model=ScheduleResponse)
-async def update_schedule(schedule_id: int, updates: ScheduleUpdate):
+async def update_schedule(schedule_id: int, updates: ScheduleUpdate, current_user: dict = Depends(get_current_user)):
     """Update an existing schedule."""
     try:
         existing_resp = supabase.table("maintenance_schedules").select("*").eq("id", schedule_id).execute()
@@ -171,7 +172,7 @@ async def update_schedule(schedule_id: int, updates: ScheduleUpdate):
         raise HTTPException(status_code=500, detail="Internal server error")
 
 @router.delete("/{schedule_id}")
-async def delete_schedule(schedule_id: int):
+async def delete_schedule(schedule_id: int, current_user: dict = Depends(require_role('manager'))):
     """Delete a schedule."""
     try:
         existing_resp = supabase.table("maintenance_schedules").select("id").eq("id", schedule_id).execute()

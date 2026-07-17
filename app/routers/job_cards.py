@@ -1,7 +1,8 @@
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel
 from typing import Optional, List, Any
 from app.supabase_client import supabase
+from app.auth import get_current_user, require_role
 import logging
 
 router = APIRouter(tags=["Job Cards"])
@@ -69,7 +70,7 @@ async def get_job_card(jc_id: int):
 
 @router.post("")
 @router.post("/")
-async def create_job_card(data: JobCardCreate):
+async def create_job_card(data: JobCardCreate, current_user: dict = Depends(get_current_user)):
     try:
         r = supabase.table("job_cards").insert(data.dict(exclude_none=True)).execute()
         if not r.data:
@@ -82,7 +83,7 @@ async def create_job_card(data: JobCardCreate):
         raise HTTPException(500, str(e))
 
 @router.patch("/{jc_id}")
-async def update_job_card(jc_id: int, data: JobCardUpdate):
+async def update_job_card(jc_id: int, data: JobCardUpdate, current_user: dict = Depends(get_current_user)):
     payload = {k: v for k, v in data.dict().items() if v is not None}
     if not payload:
         raise HTTPException(400, "No fields to update")
@@ -92,6 +93,6 @@ async def update_job_card(jc_id: int, data: JobCardUpdate):
     return r.data[0]
 
 @router.delete("/{jc_id}")
-async def delete_job_card(jc_id: int):
+async def delete_job_card(jc_id: int, current_user: dict = Depends(require_role('manager'))):
     supabase.table("job_cards").delete().eq("id", jc_id).execute()
     return {"ok": True}

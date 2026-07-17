@@ -1,10 +1,11 @@
 # vfl router
 # backend/app/routers/vfl.py
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Depends
 from pydantic import BaseModel, Field, validator
 from typing import Optional, List, Dict, Any
 from app.supabase_client import supabase
+from app.auth import get_current_user, require_role
 import logging
 from datetime import datetime
 import uuid
@@ -415,7 +416,7 @@ async def get_vfl_report(report_id: str):
 # POST create report
 @router.post("")
 @router.post("/")
-async def create_vfl_report(report: VFLReportCreate):
+async def create_vfl_report(report: VFLReportCreate, current_user: dict = Depends(get_current_user)):
     try:
         logger.info(f"Creating VFL report for observer: {report.observerName}")
         
@@ -493,7 +494,7 @@ async def create_vfl_report(report: VFLReportCreate):
 
 # PATCH update report
 @router.patch("/{report_id}")
-async def update_vfl_report(report_id: str, updated: VFLReportUpdate):
+async def update_vfl_report(report_id: str, updated: VFLReportUpdate, current_user: dict = Depends(get_current_user)):
     try:
         logger.info(f"Updating VFL report {report_id}")
         
@@ -612,7 +613,7 @@ async def update_vfl_report(report_id: str, updated: VFLReportUpdate):
 
 # DELETE report
 @router.delete("/{report_id}")
-async def delete_vfl_report(report_id: str):
+async def delete_vfl_report(report_id: str, current_user: dict = Depends(require_role('manager'))):
     try:
         logger.info(f"Deleting VFL report {report_id}")
         

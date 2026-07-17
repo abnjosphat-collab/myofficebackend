@@ -1,5 +1,6 @@
 # app/routers/reports.py
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Depends
+from app.auth import get_current_user, require_role
 from pydantic import BaseModel
 from typing import Optional, List, Dict, Any
 from datetime import datetime, timedelta
@@ -380,7 +381,7 @@ async def get_analytics_summary_route():
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.post("/generate")
-async def generate_report(report_data: ReportCreate):
+async def generate_report(report_data: ReportCreate, current_user: dict = Depends(get_current_user)):
     """Generate a new report"""
     try:
         report_type = report_data.type
@@ -428,7 +429,7 @@ async def generate_report(report_data: ReportCreate):
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.delete("/{report_id}")
-async def delete_report(report_id: str):
+async def delete_report(report_id: str, current_user: dict = Depends(require_role('manager'))):
     """Delete a report"""
     try:
         # In production, this would delete from database
@@ -461,7 +462,7 @@ async def get_reports_stats():
 
 # Custom report generation with filters
 @router.post("/custom")
-async def generate_custom_report(custom_report: CustomReportCreate):
+async def generate_custom_report(custom_report: CustomReportCreate, current_user: dict = Depends(get_current_user)):
     """Generate custom report with advanced filters"""
     try:
         filters = custom_report.filters

@@ -4,6 +4,7 @@ __pycache__/
 *.pyo
 *.pyd
 *.sqlite3
+.pytest_cache/
 
 # Virtual environment
 .venv/

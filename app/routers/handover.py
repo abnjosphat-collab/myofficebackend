@@ -1,7 +1,8 @@
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel
 from typing import Optional, List, Any
 from app.supabase_client import supabase
+from app.auth import get_current_user, require_role
 import logging
 
 router = APIRouter(tags=["Shift Handover"])
@@ -54,7 +55,7 @@ async def get_handover(h_id: int):
 
 @router.post("")
 @router.post("/")
-async def create_handover(data: HandoverCreate):
+async def create_handover(data: HandoverCreate, current_user: dict = Depends(get_current_user)):
     try:
         r = supabase.table("shift_handovers").insert(data.dict(exclude_none=True)).execute()
         if not r.data:
@@ -66,7 +67,7 @@ async def create_handover(data: HandoverCreate):
         raise HTTPException(500, str(e))
 
 @router.patch("/{h_id}")
-async def update_handover(h_id: int, data: HandoverUpdate):
+async def update_handover(h_id: int, data: HandoverUpdate, current_user: dict = Depends(get_current_user)):
     payload = {k: v for k, v in data.dict().items() if v is not None}
     r = supabase.table("shift_handovers").update(payload).eq("id", h_id).execute()
     if not r.data:
@@ -74,6 +75,6 @@ async def update_handover(h_id: int, data: HandoverUpdate):
     return r.data[0]
 
 @router.delete("/{h_id}")
-async def delete_handover(h_id: int):
+async def delete_handover(h_id: int, current_user: dict = Depends(require_role('manager'))):
     supabase.table("shift_handovers").delete().eq("id", h_id).execute()
     return {"ok": True}

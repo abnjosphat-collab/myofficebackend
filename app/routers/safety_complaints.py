@@ -1,9 +1,10 @@
 # backend/app/routers/safety_complaints.py
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Depends
 from pydantic import BaseModel, Field, validator
 from typing import Optional, List
 from app.supabase_client import supabase
+from app.auth import get_current_user, require_role
 import logging
 from datetime import datetime, date
 import uuid
@@ -165,7 +166,7 @@ async def get_complaint(complaint_id: str):
 
 @router.post("", status_code=201)
 @router.post("/", status_code=201)
-async def create_complaint(payload: SafetyComplaintCreate):
+async def create_complaint(payload: SafetyComplaintCreate, current_user: dict = Depends(get_current_user)):
     try:
         record = {
             "id": generate_id(),
@@ -199,7 +200,7 @@ async def create_complaint(payload: SafetyComplaintCreate):
 _DATE_COLS = {"by_when", "date_closed", "date"}
 
 @router.patch("/{complaint_id}")
-async def update_complaint(complaint_id: str, payload: SafetyComplaintUpdate):
+async def update_complaint(complaint_id: str, payload: SafetyComplaintUpdate, current_user: dict = Depends(get_current_user)):
     try:
         raw = payload.dict(exclude_none=True)
         # Convert empty strings to None for date-typed columns so Postgres doesn't reject them
@@ -218,7 +219,7 @@ async def update_complaint(complaint_id: str, payload: SafetyComplaintUpdate):
 
 
 @router.delete("/{complaint_id}", status_code=204)
-async def delete_complaint(complaint_id: str):
+async def delete_complaint(complaint_id: str, current_user: dict = Depends(require_role('manager'))):
     try:
         result = supabase.table("safety_complaints").delete().eq("id", complaint_id).execute()
         if not result.data:

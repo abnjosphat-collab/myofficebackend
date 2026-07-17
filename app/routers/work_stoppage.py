@@ -3,10 +3,11 @@
 
 # backend/app/routers/work_stoppage.py
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Depends
 from pydantic import BaseModel, Field, validator
 from typing import Optional, List, Dict, Any
 from app.supabase_client import supabase
+from app.auth import get_current_user, require_role
 import logging
 from datetime import datetime
 import uuid
@@ -271,7 +272,7 @@ async def get_report(report_id: str):
 # POST create report
 @router.post("")
 @router.post("/")
-async def create_report(report: WorkStoppageCreate):
+async def create_report(report: WorkStoppageCreate, current_user: dict = Depends(get_current_user)):
     try:
         logger.info(f"Creating work stoppage report for department: {report.department}")
         
@@ -343,7 +344,7 @@ async def create_report(report: WorkStoppageCreate):
 
 # PATCH update report
 @router.patch("/{report_id}")
-async def update_report(report_id: str, updated: WorkStoppageUpdate):
+async def update_report(report_id: str, updated: WorkStoppageUpdate, current_user: dict = Depends(get_current_user)):
     try:
         logger.info(f"Updating work stoppage report {report_id}")
         
@@ -449,7 +450,7 @@ async def update_report(report_id: str, updated: WorkStoppageUpdate):
 
 # DELETE report
 @router.delete("/{report_id}")
-async def delete_report(report_id: str):
+async def delete_report(report_id: str, current_user: dict = Depends(require_role('manager'))):
     try:
         logger.info(f"Deleting work stoppage report {report_id}")
         

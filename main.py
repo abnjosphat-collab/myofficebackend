@@ -1,6 +1,7 @@
-﻿# main.py - COMPLETE VERSION WITH STANDBY, SHEQ, NEAR MISS, WORK STOPPAGE, PTO, VFL, AND PACHEDU ROUTERS INTEGRATED
-from fastapi import FastAPI, APIRouter, HTTPException
+# main.py - COMPLETE VERSION WITH STANDBY, SHEQ, NEAR MISS, WORK STOPPAGE, PTO, VFL, AND PACHEDU ROUTERS INTEGRATED
+from fastapi import FastAPI, APIRouter, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 from typing import Optional, List
 from datetime import datetime, date
@@ -13,7 +14,28 @@ from contextlib import asynccontextmanager
 
 # Import supabase client (used only for health check, standby router uses its own import)
 from app.supabase_client import supabase
+from app.auth import get_current_user, require_role
 from app.redis_client import ping_redis, close_redis
+from slowapi.errors import RateLimitExceeded
+from slowapi.middleware import SlowAPIMiddleware
+from app.rate_limit import limiter
+
+# Rate limiting — keyed by client IP, a single global default (see app/rate_limit.py)
+# applied to every route via SlowAPIMiddleware, rather than a per-route
+# @limiter.limit(...) decorator on all ~405 endpoints individually. This is the
+# highest-leverage single change: it stops basic abuse/hammering across the whole
+# API uniformly. A handful of the most sensitive endpoints (bulk delete, CSV/bulk
+# import) get an additional, tighter decorator where they're defined.
+
+# Sentry — error tracking. sentry-sdk has been a dependency all along but was never
+# actually initialized anywhere, so no errors were ever being captured. Wired up
+# conditionally: does nothing until SENTRY_DSN is set (a project-specific secret URL
+# from sentry.io — not something that can be generated without a Sentry account), so
+# this is safe to ship now and just start working the moment that env var is added.
+SENTRY_DSN = os.environ.get("SENTRY_DSN")
+if SENTRY_DSN:
+    import sentry_sdk
+    sentry_sdk.init(dsn=SENTRY_DSN, traces_sample_rate=0.1, send_default_pii=False)
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -41,7 +63,23 @@ app = FastAPI(
     lifespan=lifespan
 )
 
-# CORS middleware — read allowed origins from env var (comma-separated) with sensible defaults
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, lambda request, exc: JSONResponse(
+    status_code=429,
+    content={"detail": f"Rate limit exceeded: {exc.detail}"},
+))
+app.add_middleware(SlowAPIMiddleware)
+
+# CORS middleware — read allowed origins from env var (comma-separated) with sensible defaults.
+#
+# Previously this also matched allow_origin_regex=r"https://myoffice.*\.vercel\.app" with
+# allow_methods/allow_headers=["*"] — the regex matches ANY domain containing "myoffice"
+# before ".vercel.app" (e.g. "https://myoffice-evil-clone.vercel.app" would pass), and the
+# wildcard methods/headers accept literally anything. Combined with allow_credentials=True
+# (so cookies/auth headers are sent cross-origin), that's a broader trust boundary than
+# intended. Now: only the explicit ALLOWED_ORIGINS list is trusted — add any new preview/
+# deployment URL to that env var as needed rather than pattern-matching domain names — and
+# only the methods/headers this API actually uses are allowed.
 _raw_origins = os.environ.get(
     "ALLOWED_ORIGINS",
     "http://localhost:3000,http://127.0.0.1:3000,https://myoffice-black.vercel.app"
@@ -51,10 +89,9 @@ ALLOWED_ORIGINS = [o.strip() for o in _raw_origins.split(",") if o.strip()]
 app.add_middleware(
     CORSMiddleware,
     allow_origins=ALLOWED_ORIGINS,
-    allow_origin_regex=r"https://myoffice.*\.vercel\.app",
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    allow_headers=["Content-Type", "Authorization", "Accept", "X-Requested-With"],
 )
 
 # ===== BASIC ENDPOINTS THAT SHOULD ALWAYS WORK =====
@@ -123,7 +160,7 @@ except ImportError as e:
     async def standby_fallback():
         return {"message": "Standby router not loaded", "status": "fallback"}
     @app.post("/api/standby")
-    async def standby_post_fallback():
+    async def standby_post_fallback(current_user: dict = Depends(get_current_user)):
         raise HTTPException(status_code=503, detail="Standby router not available")
 except Exception as e:
     logger.error(f"❌ Error including standby router: {e}")
@@ -169,7 +206,7 @@ except Exception as e:
     async def nearmiss_fallback():
         return {"message": "Near miss router not loaded", "error": str(e)}
     @app.post("/api/nearmiss")
-    async def nearmiss_post_fallback():
+    async def nearmiss_post_fallback(current_user: dict = Depends(get_current_user)):
         raise HTTPException(status_code=503, detail="Near miss router not available")
     @app.get("/api/nearmiss/{path:path}")
     async def nearmiss_path_fallback(path: str):
@@ -216,7 +253,7 @@ except Exception as e:
     async def pto_fallback():
         return {"message": "PTO router not loaded", "error": str(e)}
     @app.post("/api/pto")
-    async def pto_post_fallback():
+    async def pto_post_fallback(current_user: dict = Depends(get_current_user)):
         raise HTTPException(status_code=503, detail="PTO router not available")
     @app.get("/api/pto/{path:path}")
     async def pto_path_fallback(path: str):
@@ -251,7 +288,7 @@ except Exception as e:
     async def vfl_fallback():
         return {"message": "VFL router not loaded", "error": str(e)}
     @app.post("/api/vfl")
-    async def vfl_post_fallback():
+    async def vfl_post_fallback(current_user: dict = Depends(get_current_user)):
         raise HTTPException(status_code=503, detail="VFL router not available")
     @app.get("/api/vfl/{path:path}")
     async def vfl_path_fallback(path: str):
@@ -286,7 +323,7 @@ except Exception as e:
     async def pachedu_fallback():
         return {"message": "Pachedu router not loaded", "error": str(e)}
     @app.post("/api/pachedu")
-    async def pachedu_post_fallback():
+    async def pachedu_post_fallback(current_user: dict = Depends(get_current_user)):
         raise HTTPException(status_code=503, detail="Pachedu router not available")
     @app.get("/api/pachedu/{path:path}")
     async def pachedu_path_fallback(path: str):
@@ -543,7 +580,7 @@ except ImportError as e:
         return {"message": "Temporary notices endpoint - router not loaded", "notices": []}
     
     @app.post("/api/notices")
-    async def temp_create_notice(notice: TempNoticeCreate):
+    async def temp_create_notice(notice: TempNoticeCreate, current_user: dict = Depends(get_current_user)):
         return {
             "message": "Temporary notice created",
             "data": notice.dict(),
@@ -580,6 +617,17 @@ try:
 except ImportError as e:
     logger.error(f"❌ Failed to import employees router: {e}")
     loaded_routers["employees"] = None
+
+# ===== ADMIN ROUTER (user roles/permissions — moved off direct-Supabase-from-frontend) =====
+logger.info("🔄 Loading admin router...")
+try:
+    from app.routers.admin import router as admin_router
+    app.include_router(admin_router)
+    loaded_routers["admin"] = admin_router
+    logger.info("✅ ADMIN ROUTER SUCCESSFULLY LOADED at /api/admin")
+except ImportError as e:
+    logger.error(f"❌ Failed to import admin router: {e}")
+    loaded_routers["admin"] = None
 
 # ===== TIMESHEETS ROUTER (unchanged) =====
 logger.info("🔄 CRITICAL: Loading timesheets router...")
@@ -682,6 +730,7 @@ except ImportError as e:
 
 # ===== OTHER ROUTERS (unchanged) =====
 routers_to_import = [
+    "signatures",
     "reports", "inventory", "overtime", "ppe", "documents",
     "training", "visualization", "leaves", "compressors",
     # Engineering modules
@@ -746,7 +795,7 @@ async def get_direct_notices():
     return notices_db
 
 @app.post("/api/direct-notices")
-async def create_direct_notice(notice: DirectNoticeCreate):
+async def create_direct_notice(notice: DirectNoticeCreate, current_user: dict = Depends(get_current_user)):
     notice_id = str(uuid.uuid4())
     new_notice = {
         "id": notice_id,
