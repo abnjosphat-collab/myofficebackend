@@ -14,6 +14,7 @@
 
 import json
 import logging
+import time
 from functools import wraps
 from typing import Any, Optional
 
@@ -22,6 +23,26 @@ from app.redis_client import redis_client
 logger = logging.getLogger(__name__)
 
 KEY_PREFIX = "cache"
+
+# Circuit breaker. Failing soft is right, but without this every cache call
+# still *attempted* the connection and paid the full connect timeout — on a
+# machine with no Redis that stacked into multi-second responses on every
+# request. After a failure, skip Redis entirely for a cooldown; one cheap
+# retry when it expires re-detects a recovered Redis.
+_REDIS_COOLDOWN_SECONDS = 30.0
+_redis_down_until = 0.0
+
+
+def _redis_up() -> bool:
+    return time.monotonic() >= _redis_down_until
+
+
+def _mark_redis_down(op: str, e: Exception) -> None:
+    global _redis_down_until
+    _redis_down_until = time.monotonic() + _REDIS_COOLDOWN_SECONDS
+    logger.warning(
+        f"{op} failed ({e}); skipping cache for {_REDIS_COOLDOWN_SECONDS:.0f}s"
+    )
 
 
 def _namespace_keyset(namespace: str) -> str:
@@ -43,10 +64,12 @@ def build_key(namespace: str, **params: Any) -> str:
 async def cache_get(key: str) -> Optional[Any]:
     """Returns the cached value (JSON-decoded) for `key`, or None on a miss,
     a decode failure, or if Redis is unreachable."""
+    if not _redis_up():
+        return None
     try:
         raw = await redis_client.get(key)
     except Exception as e:
-        logger.warning(f"cache_get({key}) failed, treating as a miss: {e}")
+        _mark_redis_down(f"cache_get({key})", e)
         return None
     if raw is None:
         return None
@@ -59,17 +82,24 @@ async def cache_get(key: str) -> Optional[Any]:
 async def cache_set(key: str, value: Any, ttl: int, namespace: str) -> None:
     """Caches `value` under `key` for `ttl` seconds, and records `key` in the
     namespace's keyset so invalidate_namespace() can find it later."""
+    if not _redis_up():
+        return
     try:
         await redis_client.set(key, json.dumps(value, default=str), ex=ttl)
         await redis_client.sadd(_namespace_keyset(namespace), key)
     except Exception as e:
-        logger.warning(f"cache_set({key}) failed, continuing without caching: {e}")
+        _mark_redis_down(f"cache_set({key})", e)
 
 
 async def invalidate_namespace(namespace: str) -> None:
     """Deletes every cache entry ever written under `namespace`. Call this
     from a resource's write endpoints (create/update/delete) so the next
-    read after a write always sees fresh data instead of a stale cache hit."""
+    read after a write always sees fresh data instead of a stale cache hit.
+
+    Deliberately NOT behind the circuit breaker: if Redis is flaky rather
+    than fully down, skipping invalidation would leave stale entries being
+    served until their TTL. Writes are rare compared to reads, so paying the
+    (now short) connect timeout here buys correctness cheaply."""
     keyset = _namespace_keyset(namespace)
     try:
         keys = await redis_client.smembers(keyset)
