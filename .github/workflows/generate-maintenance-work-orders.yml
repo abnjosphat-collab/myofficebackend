@@ -1,0 +1,76 @@
+# Raises work orders for maintenance schedules that have come due.
+#
+# Schedules ("grease the pump every Monday") need something to wake up and act
+# on them. This used to be the maintenance page itself, which meant a job was
+# only raised if somebody happened to open it that day. This workflow is that
+# alarm clock, and it runs whether or not anyone is looking.
+#
+# Setup — both must hold or the call is rejected with 401:
+#   1. GitHub  → repo Settings → Secrets and variables → Actions → New
+#                repository secret, named CRON_SECRET
+#   2. Render  → backend service → Environment → add CRON_SECRET
+#      (the same value in both places)
+#
+# The endpoint is safe to call repeatedly: it claims each (schedule, due date)
+# before creating anything, so a retry or an overlapping run cannot raise the
+# same job twice.
+
+name: Generate maintenance work orders
+
+on:
+  schedule:
+    # 06:00 UTC daily. GitHub cron is always UTC — adjust for your timezone.
+    # Actions schedules can lag by several minutes under load, which is fine
+    # for a daily job.
+    - cron: '0 6 * * *'
+  # Lets you trigger a run by hand from the Actions tab, to test it now rather
+  # than waiting for tomorrow.
+  workflow_dispatch:
+
+jobs:
+  generate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Call the generate endpoint
+        env:
+          CRON_SECRET: ${{ secrets.CRON_SECRET }}
+        run: |
+          if [ -z "$CRON_SECRET" ]; then
+            echo "CRON_SECRET repository secret is not set — nothing would be authorised."
+            exit 1
+          fi
+
+          # Render free instances sleep when idle and take ~50s to wake, so the
+          # first call can time out. Retry rather than skipping a day's jobs.
+          for attempt in 1 2 3; do
+            echo "Attempt $attempt..."
+            code=$(curl -sS -o response.json -w '%{http_code}' \
+              --max-time 120 \
+              -X POST 'https://myofficebackend.onrender.com/api/schedules/generate' \
+              -H "X-Cron-Secret: $CRON_SECRET" \
+              -H 'Content-Type: application/json' \
+              -d '{}') || code=000
+
+            if [ "$code" = "200" ]; then
+              echo "OK:"
+              cat response.json
+              # Surface the count in the run summary so a glance at the Actions
+              # tab tells you what happened.
+              generated=$(grep -o '"generated":[0-9]*' response.json | cut -d: -f2)
+              echo "### Raised ${generated:-0} work order(s)" >> "$GITHUB_STEP_SUMMARY"
+              exit 0
+            fi
+
+            echo "HTTP $code"
+            cat response.json 2>/dev/null || true
+
+            # 401 is a wrong/missing secret — retrying will not fix it.
+            if [ "$code" = "401" ]; then
+              echo "Secret rejected. Check CRON_SECRET matches the value set on Render."
+              exit 1
+            fi
+            sleep 30
+          done
+
+          echo "Failed after 3 attempts."
+          exit 1
