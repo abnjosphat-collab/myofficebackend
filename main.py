@@ -82,7 +82,8 @@ app.add_middleware(SlowAPIMiddleware)
 # only the methods/headers this API actually uses are allowed.
 _raw_origins = os.environ.get(
     "ALLOWED_ORIGINS",
-    "http://localhost:3000,http://127.0.0.1:3000,https://myoffice-black.vercel.app"
+    "http://localhost:3000,http://127.0.0.1:3000,"
+    "https://myofficefrontend.vercel.app,https://myoffice-black.vercel.app"
 )
 ALLOWED_ORIGINS = [o.strip() for o in _raw_origins.split(",") if o.strip()]
 
