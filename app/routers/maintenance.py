@@ -251,18 +251,22 @@ async def get_work_orders(
     priority: Optional[str] = None,
     department: Optional[str] = None,
     allocated_to: Optional[str] = None,
-    to_department: Optional[str] = None
+    to_department: Optional[str] = None,
+    # A caller that only needs the N most recent rows (e.g. a sidebar activity
+    # feed) can ask for them directly instead of downloading the entire table
+    # and slicing client-side.
+    limit: Optional[int] = None,
 ):
     cache_key = build_key(
         "work_orders", status=status, priority=priority, department=department,
-        allocated_to=allocated_to, to_department=to_department,
+        allocated_to=allocated_to, to_department=to_department, limit=limit,
     )
     cached_result = await cache_get(cache_key)
     if cached_result is not None:
         return cached_result
     try:
         query = supabase.table("work_orders").select("*")
-        
+
         if status and status != 'all':
             query = query.eq("status", status)
         if priority and priority != 'all':
@@ -273,8 +277,11 @@ async def get_work_orders(
             query = query.eq("allocated_to", allocated_to)
         if to_department and to_department != 'all':
             query = query.eq("to_department", to_department)
-            
-        response = query.order("created_at", desc=True).execute()
+
+        query = query.order("created_at", desc=True)
+        if limit:
+            query = query.limit(limit)
+        response = query.execute()
         
         records = response.data or []
         processed_records = []
