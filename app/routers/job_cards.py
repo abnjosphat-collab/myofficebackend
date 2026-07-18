@@ -84,7 +84,9 @@ async def create_job_card(data: JobCardCreate, current_user: dict = Depends(get_
 
 @router.patch("/{jc_id}")
 async def update_job_card(jc_id: int, data: JobCardUpdate, current_user: dict = Depends(get_current_user)):
-    payload = {k: v for k, v in data.dict().items() if v is not None}
+    # exclude_unset, not a None-filter: an explicitly-sent null must clear the
+    # field, not be silently dropped. See work_orders (backend edec24a).
+    payload = data.model_dump(exclude_unset=True)
     if not payload:
         raise HTTPException(400, "No fields to update")
     r = supabase.table("job_cards").update(payload).eq("id", jc_id).execute()

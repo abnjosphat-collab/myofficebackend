@@ -161,7 +161,9 @@ async def update_ppe_record(record_id: int, updated: PPEIssueUpdate, current_use
         if not existing.data:
             raise HTTPException(status_code=404, detail="PPE record not found")
         
-        data_to_update = {k: v for k, v in updated.dict().items() if v is not None}
+        # exclude_unset, not a None-filter: an explicitly-sent null must clear the
+        # field, not be silently dropped. See work_orders (backend edec24a).
+        data_to_update = updated.model_dump(exclude_unset=True)
         
         # Convert dates to ISO format for database
         if data_to_update.get('issue_date'):

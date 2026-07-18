@@ -59,7 +59,9 @@ async def create_competency(data: CompetencyCreate, current_user: dict = Depends
 
 @router.patch("/{c_id}")
 async def update_competency(c_id: int, data: CompetencyUpdate, current_user: dict = Depends(get_current_user)):
-    payload = {k: v for k, v in data.dict().items() if v is not None}
+    # exclude_unset, not a None-filter: an explicitly-sent null must clear the
+    # field, not be silently dropped. See work_orders (backend edec24a).
+    payload = data.model_dump(exclude_unset=True)
     r = supabase.table("competency_matrix").update(payload).eq("id", c_id).execute()
     if not r.data:
         raise HTTPException(404, "Entry not found")

@@ -204,7 +204,9 @@ async def create_schedule(payload: ScheduleCreate, user: dict = Depends(require_
 
 @router.patch("/{schedule_id}")
 async def update_schedule(schedule_id: int, payload: ScheduleUpdate, user: dict = Depends(require_role('manager'))):
-    body = {k: v for k, v in payload.model_dump(mode='json').items() if v is not None}
+    # exclude_unset, not a None-filter: an explicitly-sent null must clear the
+    # field, not be silently dropped. See work_orders (backend edec24a).
+    body = payload.model_dump(mode='json', exclude_unset=True)
     if not body:
         raise HTTPException(status_code=400, detail="No fields to update.")
     try:

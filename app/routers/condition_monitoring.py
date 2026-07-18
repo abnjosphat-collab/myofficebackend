@@ -70,7 +70,9 @@ async def create_reading(data: CMCreate, current_user: dict = Depends(get_curren
 
 @router.patch("/{r_id}")
 async def update_reading(r_id: int, data: CMUpdate, current_user: dict = Depends(get_current_user)):
-    payload = {k: v for k, v in data.dict().items() if v is not None}
+    # exclude_unset, not a None-filter: an explicitly-sent null must clear the
+    # field, not be silently dropped. See work_orders (backend edec24a).
+    payload = data.model_dump(exclude_unset=True)
     r = supabase.table("condition_monitoring").update(payload).eq("id", r_id).execute()
     if not r.data:
         raise HTTPException(404, "Reading not found")

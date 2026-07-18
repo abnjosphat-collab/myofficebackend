@@ -68,7 +68,9 @@ async def create_handover(data: HandoverCreate, current_user: dict = Depends(get
 
 @router.patch("/{h_id}")
 async def update_handover(h_id: int, data: HandoverUpdate, current_user: dict = Depends(get_current_user)):
-    payload = {k: v for k, v in data.dict().items() if v is not None}
+    # exclude_unset, not a None-filter: an explicitly-sent null must clear the
+    # field, not be silently dropped. See work_orders (backend edec24a).
+    payload = data.model_dump(exclude_unset=True)
     r = supabase.table("shift_handovers").update(payload).eq("id", h_id).execute()
     if not r.data:
         raise HTTPException(404, "Handover not found")

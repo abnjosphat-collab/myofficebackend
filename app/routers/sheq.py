@@ -346,7 +346,9 @@ async def update_employee(employee_id: str, updated: EmployeeUpdate, current_use
             raise HTTPException(status_code=404, detail="Employee not found")
         
         # Convert Pydantic model to dict and handle date serialization
-        data_to_update = {k: v for k, v in updated.dict().items() if v is not None}
+        # exclude_unset, not a None-filter: an explicitly-sent null must clear the
+        # field, not be silently dropped. See work_orders (backend edec24a).
+        data_to_update = updated.model_dump(exclude_unset=True)
         
         # Ensure dates are properly formatted for database
         if data_to_update.get("employment_date"):
@@ -577,7 +579,9 @@ async def update_sheq_report(report_id: int, updated: SHEQReportUpdate, current_
         if not existing.data:
             raise HTTPException(status_code=404, detail="SHEQ report not found")
         
-        data_to_update = {k: v for k, v in updated.dict().items() if v is not None}
+        # exclude_unset, not a None-filter: an explicitly-sent null must clear the
+        # field, not be silently dropped. See work_orders (backend edec24a).
+        data_to_update = updated.model_dump(exclude_unset=True)
         
         # Convert dates to ISO format for database
         date_fields = ['date_reported', 'due_date', 'completion_date']

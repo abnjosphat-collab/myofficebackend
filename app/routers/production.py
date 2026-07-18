@@ -85,7 +85,9 @@ async def create_production(data: ProductionCreate, current_user: dict = Depends
 
 @router.patch("/{p_id}")
 async def update_production(p_id: int, data: ProductionUpdate, current_user: dict = Depends(get_current_user)):
-    payload = {k: v for k, v in data.dict().items() if v is not None}
+    # exclude_unset, not a None-filter: an explicitly-sent null must clear the
+    # field, not be silently dropped. See work_orders (backend edec24a).
+    payload = data.model_dump(exclude_unset=True)
     r = supabase.table("production_data").update(payload).eq("id", p_id).execute()
     if not r.data:
         raise HTTPException(404, "Record not found")

@@ -87,7 +87,9 @@ async def create_compliance(data: ComplianceCreate, current_user: dict = Depends
 
 @router.patch("/{c_id}")
 async def update_compliance(c_id: int, data: ComplianceUpdate, current_user: dict = Depends(get_current_user)):
-    payload = {k: v for k, v in data.dict().items() if v is not None}
+    # exclude_unset, not a None-filter: an explicitly-sent null must clear the
+    # field, not be silently dropped. See work_orders (backend edec24a).
+    payload = data.model_dump(exclude_unset=True)
     if "expiry_date" in payload:
         payload["status"] = _compute_status(payload["expiry_date"])
     r = supabase.table("compliance_register").update(payload).eq("id", c_id).execute()

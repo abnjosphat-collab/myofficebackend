@@ -96,7 +96,9 @@ async def create_contractor(data: ContractorCreate, current_user: dict = Depends
 
 @router.patch("/{c_id}")
 async def update_contractor(c_id: int, data: ContractorUpdate, current_user: dict = Depends(get_current_user)):
-    payload = {k: v for k, v in data.dict().items() if v is not None}
+    # exclude_unset, not a None-filter: an explicitly-sent null must clear the
+    # field, not be silently dropped. See work_orders (backend edec24a).
+    payload = data.model_dump(exclude_unset=True)
     r = supabase.table("contractors").update(payload).eq("id", c_id).execute()
     if not r.data:
         raise HTTPException(404, "Contractor not found")
@@ -129,7 +131,9 @@ async def create_job(data: ContractorJobCreate, current_user: dict = Depends(get
 
 @router.patch("/jobs/{j_id}")
 async def update_job(j_id: int, data: ContractorJobUpdate, current_user: dict = Depends(get_current_user)):
-    payload = {k: v for k, v in data.dict().items() if v is not None}
+    # exclude_unset, not a None-filter: an explicitly-sent null must clear the
+    # field, not be silently dropped. See work_orders (backend edec24a).
+    payload = data.model_dump(exclude_unset=True)
     r = supabase.table("contractor_jobs").update(payload).eq("id", j_id).execute()
     if not r.data:
         raise HTTPException(404, "Job not found")
