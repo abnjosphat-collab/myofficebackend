@@ -24,6 +24,14 @@ PROTECTED_WRITES = [
     ("post", "/api/drivers"),
     ("post", "/api/maintenance/work-orders"),
     ("post", "/api/breakdowns/"),
+    # leaves / overtime writes were unauthenticated until 2026-07-19 — a no-token
+    # DELETE reached the handler and would have removed the row. Guard added.
+    ("post", "/api/leaves"),
+    ("patch", "/api/leaves/1"),
+    ("delete", "/api/leaves/1"),
+    ("post", "/api/overtime"),
+    ("patch", "/api/overtime/1"),
+    ("delete", "/api/overtime/1"),
     ("get", "/api/admin/users"),          # admin read is deliberately protected
     ("patch", "/api/admin/users/abc"),
 ]

@@ -1,8 +1,8 @@
-from fastapi import APIRouter, HTTPException, Header
+from fastapi import APIRouter, HTTPException, Header, Depends
 from pydantic import BaseModel, Field
 from typing import Optional
 from app.supabase_client import supabase
-from app.auth import require_role
+from app.auth import require_role, get_current_user
 import logging
 from datetime import datetime
 
@@ -69,7 +69,7 @@ async def get_overtime(status: Optional[str] = None, overtime_type: Optional[str
 # POST create overtime
 @router.post("")
 @router.post("/")
-async def create_overtime(overtime: OvertimeCreate):
+async def create_overtime(overtime: OvertimeCreate, current_user: dict = Depends(get_current_user)):
     try:
         logger.info(f"Creating overtime for: {overtime.employee_name}")
         
@@ -109,8 +109,9 @@ async def create_overtime(overtime: OvertimeCreate):
 
 # PATCH update overtime
 @router.patch("/{overtime_id}")
-async def update_overtime(overtime_id: int, updated: OvertimeUpdate, authorization: Optional[str] = Header(None)):
-    # Approve/reject requires verified manager+ JWT
+async def update_overtime(overtime_id: int, updated: OvertimeUpdate, authorization: Optional[str] = Header(None), current_user: dict = Depends(get_current_user)):
+    # Any edit requires a signed-in user (current_user); approve/reject additionally
+    # requires manager+ (checked below against the same Authorization header).
     if updated.status in ('approved', 'rejected'):
         approver = await require_role('manager')(authorization)
         logger.info(f"Approval action '{updated.status}' by {approver['email']} (role: {approver['role']})")
@@ -141,7 +142,7 @@ async def update_overtime(overtime_id: int, updated: OvertimeUpdate, authorizati
 
 # DELETE overtime
 @router.delete("/{overtime_id}")
-async def delete_overtime(overtime_id: int):
+async def delete_overtime(overtime_id: int, current_user: dict = Depends(get_current_user)):
     try:
         logger.info(f"Deleting overtime {overtime_id}")
         

@@ -1,10 +1,10 @@
 # leaves.py – simplified, no department/manager, with error logging
-from fastapi import APIRouter, HTTPException, Header
+from fastapi import APIRouter, HTTPException, Header, Depends
 from pydantic import BaseModel, Field, validator
 from typing import Optional, List
 from datetime import date, datetime
 from app.supabase_client import supabase
-from app.auth import require_role
+from app.auth import require_role, get_current_user
 import logging
 import traceback
 
@@ -85,7 +85,7 @@ def get_supabase_data(response):
 # ---------- POST create leave ----------
 @router.post("", response_model=LeaveResponse)
 @router.post("/", response_model=LeaveResponse)
-async def create_leave(leave: LeaveCreate):
+async def create_leave(leave: LeaveCreate, current_user: dict = Depends(get_current_user)):
     try:
         total_days = calculate_total_days(leave.start_date, leave.end_date)
 
@@ -173,8 +173,9 @@ async def get_leave(leave_id: int):
 
 # ---------- PATCH update leave ----------
 @router.patch("/{leave_id}", response_model=LeaveResponse)
-async def update_leave(leave_id: int, updated: LeaveUpdate, authorization: Optional[str] = Header(None)):
-    # Approve/reject requires verified manager+ JWT
+async def update_leave(leave_id: int, updated: LeaveUpdate, authorization: Optional[str] = Header(None), current_user: dict = Depends(get_current_user)):
+    # Any edit requires a signed-in user (current_user); approve/reject additionally
+    # requires manager+ (checked below against the same Authorization header).
     if updated.status in ('approved', 'rejected'):
         approver = await require_role('manager')(authorization)
         logger.info(f"Leave approval '{updated.status}' by {approver['email']} (role: {approver['role']})")
@@ -215,7 +216,7 @@ async def update_leave(leave_id: int, updated: LeaveUpdate, authorization: Optio
 
 # ---------- DELETE leave ----------
 @router.delete("/{leave_id}")
-async def delete_leave(leave_id: int):
+async def delete_leave(leave_id: int, current_user: dict = Depends(get_current_user)):
     try:
         existing_resp = supabase.table("leaves").select("id").eq("id", leave_id).execute()
         if not get_supabase_data(existing_resp):
