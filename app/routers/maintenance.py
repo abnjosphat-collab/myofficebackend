@@ -368,7 +368,12 @@ async def update_work_order(work_order_id: int, updated: WorkOrderUpdate, curren
         if not existing.data:
             raise HTTPException(status_code=404, detail="Work order not found")
         
-        data_to_update = {k: v for k, v in updated.dict().items() if v is not None}
+        # exclude_unset, not "drop every None": fields the client didn't send are
+        # omitted either way (identical behaviour for normal partial updates), but
+        # a field the client explicitly sent as null now actually clears instead of
+        # being silently ignored. Without this there is no way to clear a due date —
+        # the save would report success and change nothing.
+        data_to_update = updated.model_dump(exclude_unset=True)
         data_to_update = prepare_data_for_db(data_to_update)
         data_to_update["updated_at"] = datetime.utcnow().isoformat()
         
