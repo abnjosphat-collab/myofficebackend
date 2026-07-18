@@ -20,7 +20,11 @@ class Equipment(BaseModel):
     subcategory: Optional[str] = None
     
     # Status and location
-    status: Optional[str] = "Available"
+    # Default must satisfy the equipment_status_check DB constraint, which only
+    # accepts the form's values: operational | maintenance | out_of_service |
+    # reserved. The old default "Available" violated it — any create that omitted
+    # status got a 500.
+    status: Optional[str] = "operational"
     location: Optional[str] = None
     assigned_to: Optional[str] = None
     
