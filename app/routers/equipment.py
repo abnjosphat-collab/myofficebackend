@@ -42,6 +42,23 @@ class Equipment(BaseModel):
     image_url: Optional[str] = None
     notes: Optional[str] = None
 
+    # Fields the EquipmentForm has always sent but this model silently dropped
+    # (Pydantic ignores unknown keys by default). All 11 have existed as columns
+    # in the equipment table all along — every one was NULL in every row because
+    # saves discarded them while still returning success. The "Total Value" KPI
+    # summed current_value over rows that could never have one.
+    model: Optional[str] = None
+    department: Optional[str] = None
+    commission_date: Optional[date] = None
+    purchase_cost: Optional[float] = None
+    current_value: Optional[float] = None
+    depreciation_rate: Optional[float] = None
+    supplier_contact: Optional[str] = None
+    supplier_phone: Optional[str] = None
+    warranty_info: Optional[str] = None
+    specifications: Optional[str] = None
+    maintenance_interval: Optional[int] = None
+
     class Config:
         json_encoders = {date: lambda v: v.isoformat()}
 
@@ -49,7 +66,7 @@ def process_dates_for_db(data: dict) -> dict:
     """Convert date objects to ISO strings for Supabase"""
     processed_data = data.copy()
     
-    date_fields = ['purchase_date', 'warranty_expiry', 'last_maintenance', 'next_maintenance']
+    date_fields = ['purchase_date', 'warranty_expiry', 'last_maintenance', 'next_maintenance', 'commission_date']
     for field in date_fields:
         if isinstance(processed_data.get(field), date):
             processed_data[field] = processed_data[field].isoformat()
@@ -60,7 +77,7 @@ def process_dates_from_db(data: dict) -> dict:
     """Convert ISO date strings back to date objects"""
     processed_data = data.copy()
     
-    date_fields = ['purchase_date', 'warranty_expiry', 'last_maintenance', 'next_maintenance']
+    date_fields = ['purchase_date', 'warranty_expiry', 'last_maintenance', 'next_maintenance', 'commission_date']
     for field in date_fields:
         if processed_data.get(field):
             try:
