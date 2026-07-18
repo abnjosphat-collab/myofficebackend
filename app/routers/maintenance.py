@@ -94,7 +94,14 @@ class WorkOrderCreate(BaseModel):
     failure_mode: Optional[str] = None
     discipline: Optional[str] = None
     trade: Optional[str] = None
-    spares_used: Optional[List[Dict[str, Any]]] = None
+    # Unlike the fields above, the DB column is NOT NULL DEFAULT '[]'::jsonb
+    # (supabase_migration_work_orders_classification.sql). work_order.dict()
+    # below (create_work_order) sends every Optional field's None through as
+    # an explicit JSON null, which overrides a column default and fails the
+    # NOT NULL constraint — manpower needed the identical fix a few lines
+    # down for the same reason. Defaulting to [] here avoids needing another
+    # one-off patch in the handler.
+    spares_used: List[Dict[str, Any]] = Field(default_factory=list)
 
 class WorkOrderUpdate(BaseModel):
     to_department: Optional[str] = None
