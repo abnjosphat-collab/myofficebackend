@@ -1,12 +1,12 @@
-from fastapi import APIRouter, HTTPException, Depends
-from pydantic import BaseModel
 from typing import Optional
+from pydantic import BaseModel
+from app.crud_router import CrudRouter
 from app.supabase_client import supabase
-from app.auth import get_current_user, require_role
+from fastapi import HTTPException
 import logging
 
-router = APIRouter(tags=["Production"])
 logger = logging.getLogger(__name__)
+
 
 class ProductionCreate(BaseModel):
     prod_date: str
@@ -23,6 +23,7 @@ class ProductionCreate(BaseModel):
     operator: Optional[str] = None
     comments: Optional[str] = None
 
+
 class ProductionUpdate(BaseModel):
     prod_date: Optional[str] = None
     shift: Optional[str] = None
@@ -38,15 +39,18 @@ class ProductionUpdate(BaseModel):
     operator: Optional[str] = None
     comments: Optional[str] = None
 
-@router.get("")
-@router.get("/")
-async def get_production(limit: int = 30, shift: Optional[str] = None):
-    try:
-        q = supabase.table("production_data").select("*").order("prod_date", desc=True).limit(limit)
-        if shift: q = q.eq("shift", shift)
-        return (q.execute()).data or []
-    except Exception as e:
-        raise HTTPException(500, str(e))
+
+# Standard CRUD over production_data (most recent day first, default 30 rows) plus one
+# bespoke analytics endpoint below. See app/crud_router.py.
+router = CrudRouter(
+    "production_data", ProductionCreate, ProductionUpdate,
+    tags=["Production"],
+    order_by="prod_date", order_desc=True,
+    default_limit=30,
+    filters={"shift": "shift"},
+    not_found="Record not found",
+).router
+
 
 @router.get("/stats/summary")
 async def production_summary():
@@ -69,31 +73,3 @@ async def production_summary():
         }
     except Exception as e:
         raise HTTPException(500, str(e))
-
-@router.post("")
-@router.post("/")
-async def create_production(data: ProductionCreate, current_user: dict = Depends(get_current_user)):
-    try:
-        r = supabase.table("production_data").insert(data.dict(exclude_none=True)).execute()
-        if not r.data:
-            raise HTTPException(500, "Insert failed")
-        return r.data[0]
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(500, str(e))
-
-@router.patch("/{p_id}")
-async def update_production(p_id: int, data: ProductionUpdate, current_user: dict = Depends(get_current_user)):
-    # exclude_unset, not a None-filter: an explicitly-sent null must clear the
-    # field, not be silently dropped. See work_orders (backend edec24a).
-    payload = data.model_dump(exclude_unset=True)
-    r = supabase.table("production_data").update(payload).eq("id", p_id).execute()
-    if not r.data:
-        raise HTTPException(404, "Record not found")
-    return r.data[0]
-
-@router.delete("/{p_id}")
-async def delete_production(p_id: int, current_user: dict = Depends(require_role('manager'))):
-    supabase.table("production_data").delete().eq("id", p_id).execute()
-    return {"ok": True}

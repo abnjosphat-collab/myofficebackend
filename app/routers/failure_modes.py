@@ -1,12 +1,7 @@
-from fastapi import APIRouter, HTTPException, Depends
-from pydantic import BaseModel
 from typing import Optional
-from app.supabase_client import supabase
-from app.auth import get_current_user, require_role
-import logging
+from pydantic import BaseModel
+from app.crud_router import CrudRouter
 
-router = APIRouter(tags=["Failure Modes"])
-logger = logging.getLogger(__name__)
 
 class FMCreate(BaseModel):
     equipment_type: str
@@ -25,6 +20,7 @@ class FMCreate(BaseModel):
     last_occurred: Optional[str] = None
     created_by: Optional[str] = None
 
+
 class FMUpdate(BaseModel):
     equipment_type: Optional[str] = None
     equipment_name: Optional[str] = None
@@ -41,40 +37,12 @@ class FMUpdate(BaseModel):
     occurrence_count: Optional[int] = None
     last_occurred: Optional[str] = None
 
-@router.get("")
-@router.get("/")
-async def get_failure_modes(equipment_type: Optional[str] = None):
-    try:
-        q = supabase.table("failure_modes").select("*").order("equipment_type")
-        if equipment_type: q = q.eq("equipment_type", equipment_type)
-        return (q.execute()).data or []
-    except Exception as e:
-        raise HTTPException(500, str(e))
 
-@router.post("")
-@router.post("/")
-async def create_failure_mode(data: FMCreate, current_user: dict = Depends(get_current_user)):
-    try:
-        r = supabase.table("failure_modes").insert(data.dict(exclude_none=True)).execute()
-        if not r.data:
-            raise HTTPException(500, "Insert failed")
-        return r.data[0]
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(500, str(e))
-
-@router.patch("/{fm_id}")
-async def update_failure_mode(fm_id: int, data: FMUpdate, current_user: dict = Depends(get_current_user)):
-    # exclude_unset, not a None-filter: an explicitly-sent null must clear the
-    # field, not be silently dropped. See work_orders (backend edec24a).
-    payload = data.model_dump(exclude_unset=True)
-    r = supabase.table("failure_modes").update(payload).eq("id", fm_id).execute()
-    if not r.data:
-        raise HTTPException(404, "Failure mode not found")
-    return r.data[0]
-
-@router.delete("/{fm_id}")
-async def delete_failure_mode(fm_id: int, current_user: dict = Depends(require_role('manager'))):
-    supabase.table("failure_modes").delete().eq("id", fm_id).execute()
-    return {"ok": True}
+# Standard CRUD over failure_modes — see app/crud_router.py.
+router = CrudRouter(
+    "failure_modes", FMCreate, FMUpdate,
+    tags=["Failure Modes"],
+    order_by="equipment_type",
+    filters={"equipment_type": "equipment_type"},
+    not_found="Failure mode not found",
+).router

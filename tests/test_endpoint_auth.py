@@ -32,6 +32,18 @@ PROTECTED_WRITES = [
     ("post", "/api/overtime"),
     ("patch", "/api/overtime/1"),
     ("delete", "/api/overtime/1"),
+    # Routers migrated onto the shared CrudRouter (2026-07-19) — auth must survive the
+    # move from hand-written handlers to the base class, incl. its bespoke extensions.
+    ("post", "/api/competency"),
+    ("delete", "/api/competency/1"),
+    ("post", "/api/failure-modes"),
+    ("patch", "/api/condition-monitoring/1"),
+    ("post", "/api/production"),
+    ("delete", "/api/production/1"),
+    ("post", "/api/contractors"),
+    ("delete", "/api/contractors/1"),
+    ("post", "/api/contractors/jobs"),      # sub-resource added alongside the base
+    ("delete", "/api/contractors/jobs/1"),
     ("get", "/api/admin/users"),          # admin read is deliberately protected
     ("patch", "/api/admin/users/abc"),
 ]

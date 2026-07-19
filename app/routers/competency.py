@@ -1,12 +1,7 @@
-from fastapi import APIRouter, HTTPException, Depends
-from pydantic import BaseModel
 from typing import Optional
-from app.supabase_client import supabase
-from app.auth import get_current_user, require_role
-import logging
+from pydantic import BaseModel
+from app.crud_router import CrudRouter
 
-router = APIRouter(tags=["Competency Matrix"])
-logger = logging.getLogger(__name__)
 
 class CompetencyCreate(BaseModel):
     employee_id: str
@@ -21,6 +16,7 @@ class CompetencyCreate(BaseModel):
     certified_by: Optional[str] = None
     notes: Optional[str] = None
 
+
 class CompetencyUpdate(BaseModel):
     trade: Optional[str] = None
     equipment_type: Optional[str] = None
@@ -32,42 +28,14 @@ class CompetencyUpdate(BaseModel):
     certified_by: Optional[str] = None
     notes: Optional[str] = None
 
-@router.get("")
-@router.get("/")
-async def get_competencies(employee_id: Optional[str] = None, trade: Optional[str] = None, equipment_type: Optional[str] = None):
-    try:
-        q = supabase.table("competency_matrix").select("*").order("employee_name")
-        if employee_id:    q = q.eq("employee_id", employee_id)
-        if trade:          q = q.eq("trade", trade)
-        if equipment_type: q = q.eq("equipment_type", equipment_type)
-        return (q.execute()).data or []
-    except Exception as e:
-        raise HTTPException(500, str(e))
 
-@router.post("")
-@router.post("/")
-async def create_competency(data: CompetencyCreate, current_user: dict = Depends(get_current_user)):
-    try:
-        r = supabase.table("competency_matrix").insert(data.dict(exclude_none=True)).execute()
-        if not r.data:
-            raise HTTPException(500, "Insert failed")
-        return r.data[0]
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(500, str(e))
-
-@router.patch("/{c_id}")
-async def update_competency(c_id: int, data: CompetencyUpdate, current_user: dict = Depends(get_current_user)):
-    # exclude_unset, not a None-filter: an explicitly-sent null must clear the
-    # field, not be silently dropped. See work_orders (backend edec24a).
-    payload = data.model_dump(exclude_unset=True)
-    r = supabase.table("competency_matrix").update(payload).eq("id", c_id).execute()
-    if not r.data:
-        raise HTTPException(404, "Entry not found")
-    return r.data[0]
-
-@router.delete("/{c_id}")
-async def delete_competency(c_id: int, current_user: dict = Depends(require_role('manager'))):
-    supabase.table("competency_matrix").delete().eq("id", c_id).execute()
-    return {"ok": True}
+# Standard CRUD over competency_matrix — see app/crud_router.py. Filters and ordering
+# match the previous hand-written handlers exactly (order by employee_name; eq filters
+# on employee_id / trade / equipment_type).
+router = CrudRouter(
+    "competency_matrix", CompetencyCreate, CompetencyUpdate,
+    tags=["Competency Matrix"],
+    order_by="employee_name",
+    filters={"employee_id": "employee_id", "trade": "trade", "equipment_type": "equipment_type"},
+    not_found="Entry not found",
+).router
