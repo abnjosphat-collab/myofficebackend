@@ -1,12 +1,9 @@
-from fastapi import APIRouter, HTTPException, Depends
-from pydantic import BaseModel
 from typing import Optional, List, Any
+from fastapi import HTTPException
+from pydantic import BaseModel
+from app.crud_router import CrudRouter
 from app.supabase_client import supabase
-from app.auth import get_current_user, require_role
-import logging
 
-router = APIRouter(tags=["Shift Handover"])
-logger = logging.getLogger(__name__)
 
 class HandoverCreate(BaseModel):
     handover_date: str
@@ -22,6 +19,7 @@ class HandoverCreate(BaseModel):
     production_notes: Optional[str] = None
     general_notes: Optional[str] = None
 
+
 class HandoverUpdate(BaseModel):
     incoming_supervisor: Optional[str] = None
     section: Optional[str] = None
@@ -35,16 +33,16 @@ class HandoverUpdate(BaseModel):
     acknowledged_by: Optional[str] = None
     acknowledged_at: Optional[str] = None
 
-@router.get("")
-@router.get("/")
-async def get_handovers(shift: Optional[str] = None, section: Optional[str] = None):
-    try:
-        q = supabase.table("shift_handovers").select("*").order("created_at", desc=True)
-        if shift:   q = q.eq("shift", shift)
-        if section: q = q.eq("section", section)
-        return (q.execute()).data or []
-    except Exception as e:
-        raise HTTPException(500, str(e))
+
+# Standard CRUD over shift_handovers (newest first) + a detail-view endpoint.
+router = CrudRouter(
+    "shift_handovers", HandoverCreate, HandoverUpdate,
+    tags=["Shift Handover"],
+    order_by="created_at", order_desc=True,
+    filters={"shift": "shift", "section": "section"},
+    not_found="Handover not found",
+).router
+
 
 @router.get("/{h_id}")
 async def get_handover(h_id: int):
@@ -52,31 +50,3 @@ async def get_handover(h_id: int):
     if not r.data:
         raise HTTPException(404, "Handover not found")
     return r.data[0]
-
-@router.post("")
-@router.post("/")
-async def create_handover(data: HandoverCreate, current_user: dict = Depends(get_current_user)):
-    try:
-        r = supabase.table("shift_handovers").insert(data.dict(exclude_none=True)).execute()
-        if not r.data:
-            raise HTTPException(500, "Insert failed")
-        return r.data[0]
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(500, str(e))
-
-@router.patch("/{h_id}")
-async def update_handover(h_id: int, data: HandoverUpdate, current_user: dict = Depends(get_current_user)):
-    # exclude_unset, not a None-filter: an explicitly-sent null must clear the
-    # field, not be silently dropped. See work_orders (backend edec24a).
-    payload = data.model_dump(exclude_unset=True)
-    r = supabase.table("shift_handovers").update(payload).eq("id", h_id).execute()
-    if not r.data:
-        raise HTTPException(404, "Handover not found")
-    return r.data[0]
-
-@router.delete("/{h_id}")
-async def delete_handover(h_id: int, current_user: dict = Depends(require_role('manager'))):
-    supabase.table("shift_handovers").delete().eq("id", h_id).execute()
-    return {"ok": True}

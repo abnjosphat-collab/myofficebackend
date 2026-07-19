@@ -153,6 +153,25 @@ def test_delete_returns_ok(client_and_store):
     assert resp.json() == {"ok": True}
 
 
+def test_reject_empty_update_returns_400(monkeypatch):
+    """With reject_empty_update=True, a PATCH resolving to no fields is a 400 (job_cards)."""
+    import app.crud_router as cr
+    importlib.reload(cr)
+    store = {"queries": [], "data": [{"id": 1, "name": "X"}]}
+    monkeypatch.setattr(cr, "supabase", FakeSupabase(store))
+    monkeypatch.setattr(cr, "get_current_user", lambda: {"role": "manager"})
+    monkeypatch.setattr(cr, "require_role", lambda role: (lambda: {"role": role}))
+    crud = cr.CrudRouter("jc", ItemCreate, ItemUpdate, reject_empty_update=True)
+    app = FastAPI()
+    app.include_router(crud.router, prefix="/api/jc")
+    client = TestClient(app)
+
+    # empty patch → 400
+    assert client.patch("/api/jc/1", json={}).status_code == 400
+    # non-empty patch still works
+    assert client.patch("/api/jc/1", json={"name": "Y"}).status_code == 200
+
+
 def test_default_limit_is_honoured(monkeypatch):
     """A router configured with default_limit applies .limit() and honours ?limit=."""
     import app.crud_router as cr

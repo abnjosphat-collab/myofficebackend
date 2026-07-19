@@ -1,12 +1,9 @@
-from fastapi import APIRouter, HTTPException, Depends
-from pydantic import BaseModel
 from typing import Optional, List, Any
+from fastapi import HTTPException
+from pydantic import BaseModel
+from app.crud_router import CrudRouter
 from app.supabase_client import supabase
-from app.auth import get_current_user, require_role
-import logging
 
-router = APIRouter(tags=["Job Cards"])
-logger = logging.getLogger(__name__)
 
 class JobCardCreate(BaseModel):
     job_no: str
@@ -26,6 +23,7 @@ class JobCardCreate(BaseModel):
     scheduled_date: Optional[str] = None
     notes: Optional[str] = None
     created_by: Optional[str] = None
+
 
 class JobCardUpdate(BaseModel):
     title: Optional[str] = None
@@ -48,18 +46,18 @@ class JobCardUpdate(BaseModel):
     sign_off_at: Optional[str] = None
     notes: Optional[str] = None
 
-@router.get("")
-@router.get("/")
-async def get_job_cards(status: Optional[str] = None, priority: Optional[str] = None, section: Optional[str] = None):
-    try:
-        q = supabase.table("job_cards").select("*").order("created_at", desc=True)
-        if status:   q = q.eq("status", status)
-        if priority: q = q.eq("priority", priority)
-        if section:  q = q.eq("section", section)
-        return (q.execute()).data or []
-    except Exception as e:
-        logger.error(f"get_job_cards: {e}")
-        raise HTTPException(500, str(e))
+
+# Standard CRUD over job_cards (newest first) + a detail-view endpoint. reject_empty_update
+# preserves the previous handler's 400 on a no-op PATCH.
+router = CrudRouter(
+    "job_cards", JobCardCreate, JobCardUpdate,
+    tags=["Job Cards"],
+    order_by="created_at", order_desc=True,
+    filters={"status": "status", "priority": "priority", "section": "section"},
+    not_found="Job card not found",
+    reject_empty_update=True,
+).router
+
 
 @router.get("/{jc_id}")
 async def get_job_card(jc_id: int):
@@ -67,34 +65,3 @@ async def get_job_card(jc_id: int):
     if not r.data:
         raise HTTPException(404, "Job card not found")
     return r.data[0]
-
-@router.post("")
-@router.post("/")
-async def create_job_card(data: JobCardCreate, current_user: dict = Depends(get_current_user)):
-    try:
-        r = supabase.table("job_cards").insert(data.dict(exclude_none=True)).execute()
-        if not r.data:
-            raise HTTPException(500, "Insert returned no data")
-        return r.data[0]
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"create_job_card: {e}")
-        raise HTTPException(500, str(e))
-
-@router.patch("/{jc_id}")
-async def update_job_card(jc_id: int, data: JobCardUpdate, current_user: dict = Depends(get_current_user)):
-    # exclude_unset, not a None-filter: an explicitly-sent null must clear the
-    # field, not be silently dropped. See work_orders (backend edec24a).
-    payload = data.model_dump(exclude_unset=True)
-    if not payload:
-        raise HTTPException(400, "No fields to update")
-    r = supabase.table("job_cards").update(payload).eq("id", jc_id).execute()
-    if not r.data:
-        raise HTTPException(404, "Job card not found")
-    return r.data[0]
-
-@router.delete("/{jc_id}")
-async def delete_job_card(jc_id: int, current_user: dict = Depends(require_role('manager'))):
-    supabase.table("job_cards").delete().eq("id", jc_id).execute()
-    return {"ok": True}

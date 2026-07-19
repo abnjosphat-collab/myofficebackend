@@ -72,6 +72,7 @@ class CrudRouter:
         search_columns: Optional[list] = None,  # ILIKE OR across these when ?search= is given
         default_limit: Optional[int] = None,     # None → unbounded; int → .limit(default) and honour ?limit=
         not_found: str = "Not found",
+        reject_empty_update: bool = False,   # 400 on a PATCH that resolves to no fields (job_cards)
     ):
         self.table = table
         self.create_model = create_model
@@ -82,6 +83,7 @@ class CrudRouter:
         self.search_columns = search_columns or []
         self.default_limit = default_limit
         self.not_found = not_found
+        self.reject_empty_update = reject_empty_update
         self.router = APIRouter(tags=tags or [])
         self._register()
 
@@ -98,6 +100,7 @@ class CrudRouter:
         search_columns = self.search_columns
         default_limit = self.default_limit
         not_found = self.not_found
+        reject_empty_update = self.reject_empty_update
 
         async def list_items(request: Request):
             try:
@@ -143,6 +146,8 @@ class CrudRouter:
             # exclude_unset (not a None-filter): an explicitly-sent null clears the field,
             # an unset field is left untouched. See work_orders (backend edec24a).
             payload = data.dict(exclude_unset=True)
+            if reject_empty_update and not payload:
+                raise HTTPException(status_code=400, detail="No fields to update")
             r = supabase.table(table).update(payload).eq("id", item_id).execute()
             if not r.data:
                 raise HTTPException(status_code=404, detail=not_found)

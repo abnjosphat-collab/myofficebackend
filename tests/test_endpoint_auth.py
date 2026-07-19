@@ -44,6 +44,10 @@ PROTECTED_WRITES = [
     ("delete", "/api/contractors/1"),
     ("post", "/api/contractors/jobs"),      # sub-resource added alongside the base
     ("delete", "/api/contractors/jobs/1"),
+    ("post", "/api/handover"),
+    ("delete", "/api/handover/1"),
+    ("post", "/api/job-cards"),
+    ("delete", "/api/job-cards/1"),
     ("get", "/api/admin/users"),          # admin read is deliberately protected
     ("patch", "/api/admin/users/abc"),
 ]
