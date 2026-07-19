@@ -37,8 +37,8 @@ class OvertimeUpdate(BaseModel):
     status: Optional[str] = None
 
 # GET all overtime
-@router.get("")
-@router.get("/")
+@router.get("", dependencies=[Depends(get_current_user)])
+@router.get("/", dependencies=[Depends(get_current_user)])
 async def get_overtime(status: Optional[str] = None, overtime_type: Optional[str] = None):
     try:
         logger.info("Fetching overtime data...")

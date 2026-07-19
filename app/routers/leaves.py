@@ -116,8 +116,8 @@ async def create_leave(leave: LeaveCreate, current_user: dict = Depends(get_curr
         raise HTTPException(status_code=500, detail=f"Error creating leave: {str(e)}")
 
 # ---------- GET all leaves ----------
-@router.get("", response_model=List[LeaveResponse])
-@router.get("/", response_model=List[LeaveResponse])
+@router.get("", response_model=List[LeaveResponse], dependencies=[Depends(get_current_user)])
+@router.get("/", response_model=List[LeaveResponse], dependencies=[Depends(get_current_user)])
 async def get_leaves(status: Optional[str] = None, leave_type: Optional[str] = None):
     try:
         query = supabase.table("leaves").select("*")
@@ -159,7 +159,7 @@ async def get_leave_stats():
         return {"total": 0, "pending": 0, "approved": 0, "rejected": 0, "on_leave_now": 0, "upcoming": 0}
 
 # ---------- GET leave by id ----------
-@router.get("/{leave_id}", response_model=LeaveResponse)
+@router.get("/{leave_id}", response_model=LeaveResponse, dependencies=[Depends(get_current_user)])
 async def get_leave(leave_id: int):
     try:
         resp = supabase.table("leaves").select("*").eq("id", leave_id).execute()
