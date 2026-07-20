@@ -100,7 +100,7 @@ async def employees_health():
         raise HTTPException(503, detail=f"Employees service unhealthy: {e}")
 
 
-@router.get("/search/{query}")
+@router.get("/search/{query}", dependencies=[Depends(get_current_user)])
 async def search_employees(
     query: str,
     search_by: str = Query("all", enum=["all", "name", "id", "id_number", "email"])
@@ -128,8 +128,8 @@ async def search_employees(
         raise HTTPException(500, detail=f"Search error: {e}")
 
 
-@router.get("")
-@router.get("/")
+@router.get("", dependencies=[Depends(get_current_user)])
+@router.get("/", dependencies=[Depends(get_current_user)])
 @cached("employees", ttl=60)
 async def get_employees():
     """Return all employees."""
@@ -140,7 +140,7 @@ async def get_employees():
         raise HTTPException(500, detail=f"Error fetching employees: {e}")
 
 
-@router.get("/{id}")
+@router.get("/{id}", dependencies=[Depends(get_current_user)])
 async def get_employee(id: int):
     """Return a single employee by their database ID."""
     try:

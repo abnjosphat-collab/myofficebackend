@@ -53,6 +53,16 @@ PROTECTED_WRITES = [
     # PPE matrix writes (interval save + recalculate) are manager-gated.
     ("put", "/api/ppe/matrix"),
     ("post", "/api/ppe/matrix/worksuit/apply"),
+    # PII reads guarded 2026-07-19 — individual employee/timesheet/leave/overtime
+    # records must not be readable without a token. (Aggregate /stats/summary stays open.)
+    ("get", "/api/employees"),
+    ("get", "/api/employees/1"),
+    ("get", "/api/employees/search/foo"),
+    ("get", "/api/timesheets"),
+    ("get", "/api/timesheets/1"),
+    ("get", "/api/leaves"),
+    ("get", "/api/leaves/1"),
+    ("get", "/api/overtime"),
 ]
 
 
@@ -67,8 +77,10 @@ def test_write_endpoints_require_auth(method, path):
 
 OPEN_READS = [
     "/api/health",
-    "/api/employees",
-    "/api/equipment",
+    "/api/equipment",                 # equipment list isn't PII — stays open
+    "/api/employees/health/status",   # health probe stays open
+    "/api/leaves/stats/summary",      # aggregate counts, not individual records
+    "/api/timesheets/stats/summary",
 ]
 
 

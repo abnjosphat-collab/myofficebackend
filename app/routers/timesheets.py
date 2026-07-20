@@ -44,7 +44,7 @@ class TimesheetEntryUpdate(BaseModel):
     callout_count: Optional[int] = None
 
 # Timesheet Endpoints
-@router.get("")
+@router.get("", dependencies=[Depends(get_current_user)])
 async def get_timesheets(
     employee_id: Optional[int] = Query(None),
     start_date: Optional[date] = Query(None),
@@ -122,7 +122,7 @@ async def create_timesheet_entry(entry: TimesheetEntryCreate, current_user: dict
         logger.error(f"Error creating timesheet entry: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
-@router.get("/{entry_id}")
+@router.get("/{entry_id}", dependencies=[Depends(get_current_user)])
 async def get_timesheet_entry(entry_id: int):
     """Get a specific timesheet entry by ID"""
     try:
