@@ -137,7 +137,7 @@ async def create_ppe_record(record: PPEIssueCreate, current_user: dict = Depends
         logger.error(f"Error creating PPE record: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Error creating PPE record: {str(e)}")
 
-@router.get("/{record_id}")
+@router.get("/{record_id:int}")
 async def get_ppe_record(record_id: int):
     try:
         response = supabase.table("ppe_records").select("*").eq("id", record_id).execute()
@@ -284,3 +284,94 @@ async def get_ppe_stats():
     except Exception as e:
         logger.error(f"Error fetching PPE stats: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Error fetching PPE stats: {str(e)}")
+
+
+# ─── PPE replacement matrix ────────────────────────────────────────────────────
+# Default months-until-expiry per item type (calculated from the issue date). Overrides
+# are stored in the ppe_matrix table (see supabase_migration_ppe_matrix.sql) and merged
+# over these; the endpoints degrade gracefully to defaults if that table doesn't exist.
+
+import calendar
+
+PPE_MATRIX_DEFAULTS = {
+    "worksuit": 6, "gumboots": 6, "safety_shoes": 6,
+    "helmet": 24, "Cap_lamp_belt": 24, "pneumo_jacket": 24, "harness": 24,
+    "vest": 12, "glasses": 12, "respirator": 12, "rainsuit": 12,
+    "gloves": 6, "overall": 6,
+}
+
+
+def _add_months(iso_date, months):
+    """issue date (YYYY-MM-DD) + N months → expiry date string, clamping day overflow."""
+    if not iso_date or not months:
+        return None
+    try:
+        d = date.fromisoformat(str(iso_date)[:10])
+    except Exception:
+        return None
+    m = d.month - 1 + int(months)
+    y = d.year + m // 12
+    m = m % 12 + 1
+    day = min(d.day, calendar.monthrange(y, m)[1])
+    return date(y, m, day).isoformat()
+
+
+def _matrix_overrides():
+    """{ppe_type: interval_months} from the ppe_matrix table, or {} if unavailable."""
+    try:
+        resp = supabase.table("ppe_matrix").select("ppe_type, interval_months").execute()
+        return {r["ppe_type"]: r["interval_months"] for r in (resp.data or [])}
+    except Exception as e:
+        logger.info(f"ppe_matrix table unavailable, using defaults: {e}")
+        return {}
+
+
+class MatrixEntry(BaseModel):
+    ppe_type: str = Field(..., min_length=1)
+    interval_months: int = Field(..., ge=1, le=120)
+
+
+@router.get("/matrix")
+async def get_ppe_matrix():
+    """Effective matrix: company defaults with any saved overrides applied."""
+    matrix = dict(PPE_MATRIX_DEFAULTS)
+    matrix.update(_matrix_overrides())
+    return matrix
+
+
+@router.put("/matrix")
+async def set_ppe_matrix_entry(entry: MatrixEntry, current_user: dict = Depends(require_role('manager'))):
+    """Set (upsert) the interval for one PPE type. Does NOT recalculate — call apply for that."""
+    try:
+        supabase.table("ppe_matrix").upsert({
+            "ppe_type": entry.ppe_type,
+            "interval_months": entry.interval_months,
+            "updated_at": datetime.utcnow().isoformat(),
+        }, on_conflict="ppe_type").execute()
+        return {"ppe_type": entry.ppe_type, "interval_months": entry.interval_months}
+    except Exception as e:
+        raise HTTPException(status_code=500,
+                            detail=f"Could not save matrix — has the ppe_matrix table been created? {e}")
+
+
+@router.post("/matrix/{ppe_type}/apply")
+async def apply_ppe_matrix(ppe_type: str, current_user: dict = Depends(require_role('manager'))):
+    """Recalculate expiry = issue_date + interval for every ACTIVE record of this type.
+    Overwrites existing expiry dates — this is the 'reset the matrix' control."""
+    interval = _matrix_overrides().get(ppe_type, PPE_MATRIX_DEFAULTS.get(ppe_type))
+    if not interval:
+        raise HTTPException(status_code=400, detail=f"No interval configured for '{ppe_type}'")
+    try:
+        recs = supabase.table("ppe_records").select("id, issue_date").eq("ppe_type", ppe_type).eq("status", "active").execute()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Could not load records: {e}")
+    updated = 0
+    for r in (recs.data or []):
+        new_exp = _add_months(r.get("issue_date"), interval)
+        if new_exp:
+            supabase.table("ppe_records").update({
+                "expiry_date": new_exp,
+                "updated_at": datetime.utcnow().isoformat(),
+            }).eq("id", r["id"]).execute()
+            updated += 1
+    return {"ppe_type": ppe_type, "interval_months": interval, "updated": updated}
