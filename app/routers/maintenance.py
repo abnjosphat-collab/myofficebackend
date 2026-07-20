@@ -8,6 +8,7 @@ from app.auth import get_current_user, require_role
 from app.cache import cached, cache_get, cache_set, build_key, invalidate_namespace
 import logging
 import json
+import re
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -303,44 +304,75 @@ async def get_work_orders(
         logger.error(f"Error fetching work orders: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Error fetching work orders: {str(e)}")
 
+def _generate_wo_number(offset: int = 0) -> str:
+    """Next work-order number, server-side: WO-<max trailing digits + 1 + offset>, 5-wide.
+    Matches the frontend format; the server is the source of truth (the client's number is
+    only optimistic). `offset` steps past a number a concurrent create just took."""
+    resp = supabase.table("work_orders").select("work_order_number").execute()
+    max_n = 0
+    for row in (resp.data or []):
+        m = re.search(r'(\d+)$', row.get("work_order_number") or "")
+        if m:
+            max_n = max(max_n, int(m.group(1)))
+    return f"WO-{str(max_n + 1 + offset).zfill(5)}"
+
+
+def _is_unique_violation(err: Exception) -> bool:
+    """True if the DB rejected the insert for the work_order_number unique index."""
+    s = str(err).lower()
+    return '23505' in s or 'duplicate key' in s or 'uq_work_orders_number' in s or 'unique constraint' in s
+
+
 @router.post("/work-orders")
 async def create_work_order(work_order: WorkOrderCreate, current_user: dict = Depends(get_current_user)):
     try:
         data_to_insert = work_order.dict()
-        
+
         # Set default title and description if not provided
         if not data_to_insert.get('title'):
             data_to_insert['title'] = data_to_insert['job_request_details'][:50] + '...' if len(data_to_insert['job_request_details']) > 50 else data_to_insert['job_request_details']
-        
+
         if not data_to_insert.get('description'):
             data_to_insert['description'] = data_to_insert['job_request_details']
-            
+
         if not data_to_insert.get('department'):
             data_to_insert['department'] = data_to_insert['to_department']
-            
+
         if not data_to_insert.get('equipment'):
             data_to_insert['equipment'] = data_to_insert['equipment_info']
-        
+
         # Handle optional manpower - ensure it's not None
         if data_to_insert.get('manpower') is None:
             data_to_insert['manpower'] = []
-        
+
         # Prepare data for database
         data_to_insert = prepare_data_for_db(data_to_insert)
         data_to_insert["created_at"] = datetime.utcnow().isoformat()
         data_to_insert["updated_at"] = datetime.utcnow().isoformat()
-        
-        logger.info(f"Creating work order with data: {data_to_insert}")
-        
-        response = supabase.table("work_orders").insert(data_to_insert).execute()
-        
-        if response.data:
-            result = prepare_data_for_response(response.data[0])
-            await invalidate_namespace("work_orders")
-            return result
-        else:
+
+        # Allocate the WO number server-side and insert with retry: if a concurrent create
+        # grabbed the same number, the unique index (uq_work_orders_number) rejects this
+        # insert — we regenerate the next free number and retry instead of erroring or
+        # silently duplicating. Backed by supabase_migration_work_order_number_unique.sql.
+        for attempt in range(6):
+            data_to_insert["work_order_number"] = _generate_wo_number(offset=attempt)
+            try:
+                response = supabase.table("work_orders").insert(data_to_insert).execute()
+            except Exception as insert_err:
+                if _is_unique_violation(insert_err) and attempt < 5:
+                    logger.warning(f"WO number {data_to_insert['work_order_number']} taken, retrying: {insert_err}")
+                    continue
+                raise
+            if response.data:
+                result = prepare_data_for_response(response.data[0])
+                await invalidate_namespace("work_orders")
+                return result
             raise HTTPException(status_code=500, detail="Failed to create work order")
-            
+
+        raise HTTPException(status_code=409, detail="Could not allocate a unique work order number — please retry.")
+
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Error creating work order: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Error creating work order: {str(e)}")
