@@ -293,11 +293,12 @@ async def get_ppe_stats():
 
 import calendar
 
+# interval 0 = no expiry (item doesn't expire / isn't replaced on a schedule).
 PPE_MATRIX_DEFAULTS = {
     "worksuit": 6, "gumboots": 6, "safety_shoes": 6,
     "helmet": 24, "Cap_lamp_belt": 24, "pneumo_jacket": 24, "harness": 24,
-    "vest": 12, "glasses": 12, "respirator": 12, "rainsuit": 12,
-    "gloves": 6, "overall": 6,
+    "vest": 3, "glasses": 3, "respirator": 1, "rainsuit": 6,
+    "gloves": 0, "overall": 6,
 }
 
 
@@ -328,7 +329,7 @@ def _matrix_overrides():
 
 class MatrixEntry(BaseModel):
     ppe_type: str = Field(..., min_length=1)
-    interval_months: int = Field(..., ge=1, le=120)
+    interval_months: int = Field(..., ge=0, le=120)   # 0 = no expiry
 
 
 @router.get("/matrix")
@@ -358,8 +359,12 @@ async def set_ppe_matrix_entry(entry: MatrixEntry, current_user: dict = Depends(
 async def apply_ppe_matrix(ppe_type: str, current_user: dict = Depends(require_role('manager'))):
     """Recalculate expiry = issue_date + interval for every ACTIVE record of this type.
     Overwrites existing expiry dates — this is the 'reset the matrix' control."""
-    interval = _matrix_overrides().get(ppe_type, PPE_MATRIX_DEFAULTS.get(ppe_type))
-    if not interval:
+    overrides = _matrix_overrides()
+    if ppe_type in overrides:
+        interval = overrides[ppe_type]
+    elif ppe_type in PPE_MATRIX_DEFAULTS:
+        interval = PPE_MATRIX_DEFAULTS[ppe_type]
+    else:
         raise HTTPException(status_code=400, detail=f"No interval configured for '{ppe_type}'")
     try:
         recs = supabase.table("ppe_records").select("id, issue_date").eq("ppe_type", ppe_type).eq("status", "active").execute()
@@ -367,8 +372,9 @@ async def apply_ppe_matrix(ppe_type: str, current_user: dict = Depends(require_r
         raise HTTPException(status_code=500, detail=f"Could not load records: {e}")
     updated = 0
     for r in (recs.data or []):
-        new_exp = _add_months(r.get("issue_date"), interval)
-        if new_exp:
+        # interval 0 = no expiry → clear the date; otherwise recompute from issue date.
+        new_exp = None if interval == 0 else _add_months(r.get("issue_date"), interval)
+        if interval == 0 or new_exp:
             supabase.table("ppe_records").update({
                 "expiry_date": new_exp,
                 "updated_at": datetime.utcnow().isoformat(),
