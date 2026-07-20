@@ -57,13 +57,20 @@ async def get_current_user(authorization: Optional[str] = Header(None)) -> dict:
         logger.warning(f'Token verification failed: {e}')
         raise HTTPException(status_code=401, detail='Invalid or expired session. Please sign in again.')
 
-    # Fetch role via security-definer function (bypasses RLS so the anon client can call it)
+    # Fetch role via security-definer function (bypasses RLS so the anon client can call it).
+    # A lookup that SUCCEEDS but returns nothing → the user simply has no elevated role yet,
+    # so 'user' is the correct default. A lookup that FAILS (RPC error) is different: silently
+    # falling back to 'user' would strip a manager's privileges on a transient blip and hide
+    # the outage. Fail loud with a retryable 503 instead of a silent downgrade.
     try:
         role_resp = supabase.rpc('get_user_role_by_id', {'user_id': str(user.id)}).execute()
         role = role_resp.data if role_resp.data else 'user'
     except Exception as e:
-        logger.warning(f'Role lookup failed for {user.id}: {e}')
-        role = 'user'
+        logger.error(f'Role lookup failed for {user.id}: {e}')
+        raise HTTPException(
+            status_code=503,
+            detail='Could not verify your permissions right now. Please try again in a moment.',
+        )
 
     return {'user_id': str(user.id), 'email': user.email or '', 'role': role}
 
