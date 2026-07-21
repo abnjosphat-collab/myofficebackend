@@ -29,6 +29,7 @@ class Employee(BaseModel):
     designation: str = Field(..., min_length=1, description="Job title / position")
     employee_class: Optional[str] = None  # Permanent, Contract, Internship, Part-Time
     employment_type: Optional[str] = None  # NEC or SALARIED
+    discipline: Optional[str] = None  # mechanical or electrical (trade discipline)
     supervisor: Optional[str] = None
     section: Optional[str] = None
     department: Optional[str] = None
@@ -264,3 +265,24 @@ async def delete_employee(id: int, current_user: dict = Depends(require_role('ma
         raise
     except Exception as e:
         raise HTTPException(500, detail=f"Error deleting employee: {e}")
+
+
+class BulkDisciplineRequest(BaseModel):
+    ids: List[int]
+    discipline: Optional[str] = None  # 'mechanical' | 'electrical' | None/'' to clear
+
+
+@router.post("/bulk-discipline")
+async def bulk_set_discipline(payload: BulkDisciplineRequest, current_user: dict = Depends(get_current_user)):
+    """Set the trade discipline on many employees in one call (bulk mechanical/electrical)."""
+    if payload.discipline not in (None, '', 'mechanical', 'electrical'):
+        raise HTTPException(400, detail="discipline must be 'mechanical', 'electrical', or empty")
+    if not payload.ids:
+        return {"updated": 0, "discipline": payload.discipline or None}
+    disc = payload.discipline or None
+    try:
+        supabase.table("employees").update({"discipline": disc}).in_("id", payload.ids).execute()
+        await invalidate_namespace("employees")
+        return {"updated": len(payload.ids), "discipline": disc}
+    except Exception as e:
+        raise HTTPException(500, detail=f"Could not set discipline — has the 'discipline' column been added? {e}")
