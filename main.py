@@ -731,7 +731,7 @@ except ImportError as e:
 
 # ===== OTHER ROUTERS (unchanged) =====
 routers_to_import = [
-    "signatures",
+    "signatures", "usage",
     "reports", "inventory", "overtime", "ppe", "documents",
     "training", "visualization", "leaves", "compressors",
     # Engineering modules

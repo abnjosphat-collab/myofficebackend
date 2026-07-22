@@ -120,3 +120,26 @@ async def test_require_role_unauthenticated_is_401(patch_supabase):
     with pytest.raises(HTTPException) as exc:
         await dep(None)
     assert exc.value.status_code == 401
+
+
+# ─── get_current_user_optional ─────────────────────────────────────────────────
+
+async def test_get_current_user_optional_no_header_returns_none():
+    assert await auth.get_current_user_optional(None) is None
+
+
+async def test_get_current_user_optional_missing_bearer_prefix_returns_none():
+    assert await auth.get_current_user_optional("Token abc123") is None
+
+
+async def test_get_current_user_optional_invalid_token_returns_none(patch_supabase):
+    # An expired/bad token must degrade to "anonymous", never raise — this is what
+    # lets unsigned-in visitors' usage events still be accepted.
+    patch_supabase(user=None, role=None)
+    assert await auth.get_current_user_optional("Bearer bad-token") is None
+
+
+async def test_get_current_user_optional_valid_token_returns_user(patch_supabase):
+    patch_supabase(user=_FakeUser("u-9", "x@y.com"), role="manager")
+    result = await auth.get_current_user_optional("Bearer good-token")
+    assert result == {"user_id": "u-9", "email": "x@y.com", "role": "manager"}

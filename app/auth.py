@@ -75,6 +75,21 @@ async def get_current_user(authorization: Optional[str] = Header(None)) -> dict:
     return {'user_id': str(user.id), 'email': user.email or '', 'role': role}
 
 
+async def get_current_user_optional(authorization: Optional[str] = Header(None)) -> Optional[dict]:
+    """
+    Same as get_current_user, but returns None instead of raising when there's no
+    (or an invalid/expired) token. For endpoints that must accept anonymous callers
+    - e.g. usage-event ingestion, which needs to record unsigned-in visitors too -
+    but still want to attribute the event to a user when one is signed in.
+    """
+    if not authorization or not authorization.startswith('Bearer '):
+        return None
+    try:
+        return await get_current_user(authorization)
+    except HTTPException:
+        return None
+
+
 def require_role(min_role: str):
     """
     Returns an async dependency requiring the caller to be signed in with at
