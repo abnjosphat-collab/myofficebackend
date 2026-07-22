@@ -1,5 +1,5 @@
 from fastapi import APIRouter, HTTPException, Header, Depends
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, validator
 from typing import Optional
 from app.supabase_client import supabase
 from app.auth import require_role, get_current_user
@@ -15,12 +15,22 @@ class OvertimeCreate(BaseModel):
     position: str = Field(..., min_length=1)
     overtime_type: str
     date: str
-    start_time: str
-    end_time: str
-    reason: str = Field(..., min_length=1)
-    contact_number: str = Field(..., min_length=1)
+    # Reason/contact/exact times are no longer mandatory — a fast path for when someone is
+    # pressed for time: either give start_time+end_time (hours computed from them) OR just
+    # `hours` directly. validate_has_duration below requires one or the other.
+    start_time: Optional[str] = None
+    end_time: Optional[str] = None
+    hours: Optional[float] = Field(None, gt=0, le=24)
+    reason: Optional[str] = None
+    contact_number: Optional[str] = None
     emergency_contact: Optional[str] = None
     hourly_rate: float = Field(25.0)
+
+    @validator('hours', always=True)
+    def validate_has_duration(cls, v, values):
+        if v is None and not (values.get('start_time') and values.get('end_time')):
+            raise ValueError('Provide either start_time and end_time, or hours directly.')
+        return v
 
 class OvertimeUpdate(BaseModel):
     employee_name: Optional[str] = None
@@ -30,6 +40,7 @@ class OvertimeUpdate(BaseModel):
     date: Optional[str] = None
     start_time: Optional[str] = None
     end_time: Optional[str] = None
+    hours: Optional[float] = Field(None, gt=0, le=24)
     reason: Optional[str] = None
     contact_number: Optional[str] = None
     emergency_contact: Optional[str] = None
@@ -81,6 +92,7 @@ async def create_overtime(overtime: OvertimeCreate, current_user: dict = Depends
             "date": overtime.date,
             "start_time": overtime.start_time,
             "end_time": overtime.end_time,
+            "hours": overtime.hours,
             "reason": overtime.reason,
             "contact_number": overtime.contact_number,
             "emergency_contact": overtime.emergency_contact,
