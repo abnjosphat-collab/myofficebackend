@@ -1,0 +1,38 @@
+# Runs the backend test suite on every push/PR to main. Nothing here deploys
+# anything (Render deploys on push to main independently of this workflow) —
+# this only answers "did this change break the tests," automatically, instead
+# of relying on whoever's working to have run pytest by hand.
+#
+# No Supabase/Redis credentials are configured here on purpose: app/supabase_client.py
+# and app/redis_client.py both degrade to a loud warning + empty/unreachable client
+# when their env vars are unset rather than crashing at import time, and the test
+# suite is entirely mocked-Supabase (see tests/test_endpoint_auth.py's own comment on
+# why it needs neither) — so the suite runs the same in CI as it does locally without
+# needing production secrets exposed to every PR.
+
+name: Backend CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt -r requirements-dev.txt
+
+      - name: Run tests
+        run: pytest -q
