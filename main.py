@@ -1,5 +1,5 @@
 # main.py - COMPLETE VERSION WITH STANDBY, SHEQ, NEAR MISS, WORK STOPPAGE, PTO, VFL, AND PACHEDU ROUTERS INTEGRATED
-from fastapi import FastAPI, APIRouter, HTTPException, Depends
+from fastapi import FastAPI, APIRouter, HTTPException, Depends, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
@@ -94,6 +94,24 @@ app.add_middleware(
     allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=["Content-Type", "Authorization", "Accept", "X-Requested-With"],
 )
+
+
+# Last-resort handler for exceptions no route handled. FastAPI already turns
+# HTTPException / RequestValidationError into proper responses (those have their own,
+# more-specific handlers and take precedence), so this only fires for genuinely
+# unexpected errors. Many handlers across the routers currently do
+# `raise HTTPException(500, detail=f"Error: {str(e)}")`, which leaks the raw internal
+# error string to the client; as those get simplified they can just let the exception
+# propagate to here, which logs the full detail server-side (and to Sentry if
+# configured) but returns a generic message — never an internal string or stack trace.
+@app.exception_handler(Exception)
+async def unhandled_exception_handler(request: Request, exc: Exception):
+    logger.error(f"Unhandled exception on {request.method} {request.url.path}: {exc}")
+    logger.error(traceback.format_exc())
+    return JSONResponse(
+        status_code=500,
+        content={"detail": "An unexpected error occurred. Please try again."},
+    )
 
 # ===== BASIC ENDPOINTS THAT SHOULD ALWAYS WORK =====
 @app.get("/")
