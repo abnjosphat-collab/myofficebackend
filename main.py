@@ -149,242 +149,71 @@ async def health_check():
 async def debug_test():
     return {"message": "Debug test - working", "status": "success"}
 
-# ===== STANDBY ROUTER =====
-logger.info("🔄 Loading standby router...")
-try:
-    from app.routers.standby import router as standby_router
-    app.include_router(standby_router)
-    logger.info("✅ STANDBY ROUTER SUCCESSFULLY LOADED at /api/standby")
-except ImportError as e:
-    logger.error(f"❌ Failed to import standby router: {e}")
-    @app.get("/api/standby")
-    async def standby_fallback():
-        return {"message": "Standby router not loaded", "status": "fallback"}
-    @app.post("/api/standby")
-    async def standby_post_fallback(current_user: dict = Depends(get_current_user)):
-        raise HTTPException(status_code=503, detail="Standby router not available")
-except Exception as e:
-    logger.error(f"❌ Error including standby router: {e}")
+# ===== ROUTER REGISTRATION =====
+# Every router below used to get its own ~15-line try/except block: import, register,
+# log success/failure, and on failure define hand-written GET/POST "fallback" endpoints
+# that returned a fake 200 (or a 503 with the wrong shape) — a real import failure was
+# invisible to callers, who'd see a plausible-looking response instead of an error.
+#
+# register_router() below is that same behavior, minus the fake success: a failure logs
+# loudly (ERROR + full traceback) and is skipped. The router's endpoints then simply
+# don't exist (a real 404), which is honest, instead of a fabricated 200. Every OTHER
+# router keeps working — this app serves many independent domains (timesheets, PPE,
+# SHEQ, maintenance...) and one broken router shouldn't take the rest down.
+def register_router(module_name: str, prefix: str | None = None, tags: list[str] | None = None, key: str | None = None):
+    # `key` is the loaded_routers dict key, when it needs to differ from the module
+    # name — e.g. the notices module registers under "noticeboard" because that's
+    # what the health-check/debug endpoints further down already look up.
+    dict_key = key or module_name
+    try:
+        module = __import__(f"app.routers.{module_name}", fromlist=[module_name])
+        router_obj = getattr(module, "router", None)
+        if router_obj is None:
+            raise ImportError(f"module app.routers.{module_name} has no 'router' attribute")
+        kwargs = {}
+        if prefix is not None:
+            kwargs["prefix"] = prefix
+        if tags is not None:
+            kwargs["tags"] = tags
+        app.include_router(router_obj, **kwargs)
+        loaded_routers[dict_key] = router_obj
+        logger.info(f"Router loaded: {dict_key}" + (f" at {prefix}" if prefix else ""))
+    except Exception as e:
+        logger.error(f"Failed to register router '{dict_key}': {e}")
+        logger.error(traceback.format_exc())
+        loaded_routers[dict_key] = None
 
-# ===== SHEQ INSPECTIONS ROUTER =====
-logger.info("🔄 Loading SHEQ inspections router...")
-try:
-    from app.routers.sheq_inspections import router as sheq_router
-    app.include_router(sheq_router)
-    logger.info("✅ SHEQ INSPECTIONS ROUTER SUCCESSFULLY LOADED at /api/sheq")
-except Exception as e:
-    logger.error(f"❌ Error including SHEQ router: {e}")
-    @app.get("/api/sheq")
-    async def sheq_fallback():
-        return {"message": "SHEQ router not loaded", "status": "fallback"}
 
-# ===== NEAR MISS REPORTS ROUTER =====
-logger.info("🔄 Loading near miss reports router...")
-try:
-    from app.routers.near_miss import router as nearmiss_router
-    app.include_router(nearmiss_router)
-    logger.info("✅ NEAR MISS REPORTS ROUTER SUCCESSFULLY LOADED at /api/nearmiss")
-    
-    # Log the routes for debugging
-    route_count = 0
-    for route in nearmiss_router.routes:
-        if hasattr(route, 'methods') and hasattr(route, 'path'):
-            methods = list(route.methods) if hasattr(route, 'methods') else []
-            path = route.path if route.path else "/"
-            logger.info(f"   ✅ Near Miss route: {methods} {path}")
-            route_count += 1
-    
-    logger.info(f"📊 Total Near Miss routes loaded: {route_count}")
-    
-except Exception as e:
-    logger.error(f"❌ Error including near miss router: {e}")
-    logger.error(f"Exception type: {type(e).__name__}")
-    logger.error(f"Exception details: {str(e)}")
-    logger.error(traceback.format_exc())
-    
-    # Add fallback endpoints
-    @app.get("/api/nearmiss")
-    async def nearmiss_fallback():
-        return {"message": "Near miss router not loaded", "error": str(e)}
-    @app.post("/api/nearmiss")
-    async def nearmiss_post_fallback(current_user: dict = Depends(get_current_user)):
-        raise HTTPException(status_code=503, detail="Near miss router not available")
-    @app.get("/api/nearmiss/{path:path}")
-    async def nearmiss_path_fallback(path: str):
-        raise HTTPException(status_code=503, detail=f"Near miss router not available: {path}")
+loaded_routers: dict = {}
 
-# ===== WORK STOPPAGE ROUTER =====
-logger.info("🔄 Loading work stoppage router...")
-try:
-    from app.routers.work_stoppage import router as work_stoppage_router
-    app.include_router(work_stoppage_router)
-    logger.info("✅ WORK STOPPAGE ROUTER LOADED at /api/work-stoppage")
-except Exception as e:
-    logger.error(f"❌ Error including work stoppage router: {e}")
-    @app.get("/api/work-stoppage")
-    async def work_stoppage_fallback():
-        return {"message": "Work stoppage router not loaded", "status": "fallback"}
-
-# ===== PTO ROUTER =====
-logger.info("🔄 Loading PTO router...")
-try:
-    from app.routers.pto import router as pto_router
-    app.include_router(pto_router)
-    logger.info("✅ PTO ROUTER LOADED at /api/pto")
-    
-    # Log the routes for debugging
-    route_count = 0
-    for route in pto_router.routes:
-        if hasattr(route, 'methods') and hasattr(route, 'path'):
-            methods = list(route.methods) if hasattr(route, 'methods') else []
-            path = route.path if route.path else "/"
-            logger.info(f"   ✅ PTO route: {methods} {path}")
-            route_count += 1
-    
-    logger.info(f"📊 Total PTO routes loaded: {route_count}")
-    
-except Exception as e:
-    logger.error(f"❌ Error including PTO router: {e}")
-    logger.error(f"Exception type: {type(e).__name__}")
-    logger.error(f"Exception details: {str(e)}")
-    logger.error(traceback.format_exc())
-    
-    # Add fallback endpoints
-    @app.get("/api/pto")
-    async def pto_fallback():
-        return {"message": "PTO router not loaded", "error": str(e)}
-    @app.post("/api/pto")
-    async def pto_post_fallback(current_user: dict = Depends(get_current_user)):
-        raise HTTPException(status_code=503, detail="PTO router not available")
-    @app.get("/api/pto/{path:path}")
-    async def pto_path_fallback(path: str):
-        raise HTTPException(status_code=503, detail=f"PTO router not available: {path}")
-
-# ===== VFL ROUTER =====
-logger.info("🔄 Loading VFL router...")
-try:
-    from app.routers.vfl import router as vfl_router
-    app.include_router(vfl_router)
-    logger.info("✅ VFL ROUTER LOADED at /api/vfl")
-    
-    # Log the routes for debugging
-    route_count = 0
-    for route in vfl_router.routes:
-        if hasattr(route, 'methods') and hasattr(route, 'path'):
-            methods = list(route.methods) if hasattr(route, 'methods') else []
-            path = route.path if route.path else "/"
-            logger.info(f"   ✅ VFL route: {methods} {path}")
-            route_count += 1
-    
-    logger.info(f"📊 Total VFL routes loaded: {route_count}")
-    
-except Exception as e:
-    logger.error(f"❌ Error including VFL router: {e}")
-    logger.error(f"Exception type: {type(e).__name__}")
-    logger.error(f"Exception details: {str(e)}")
-    logger.error(traceback.format_exc())
-    
-    # Add fallback endpoints
-    @app.get("/api/vfl")
-    async def vfl_fallback():
-        return {"message": "VFL router not loaded", "error": str(e)}
-    @app.post("/api/vfl")
-    async def vfl_post_fallback(current_user: dict = Depends(get_current_user)):
-        raise HTTPException(status_code=503, detail="VFL router not available")
-    @app.get("/api/vfl/{path:path}")
-    async def vfl_path_fallback(path: str):
-        raise HTTPException(status_code=503, detail=f"VFL router not available: {path}")
-
-# ===== PACHEDU ROUTER =====
-logger.info("🔄 Loading Pachedu router...")
-try:
-    from app.routers.pachedu import router as pachedu_router
-    app.include_router(pachedu_router)
-    logger.info("✅ PACHEDU ROUTER LOADED at /api/pachedu")
-    
-    # Log the routes for debugging
-    route_count = 0
-    for route in pachedu_router.routes:
-        if hasattr(route, 'methods') and hasattr(route, 'path'):
-            methods = list(route.methods) if hasattr(route, 'methods') else []
-            path = route.path if route.path else "/"
-            logger.info(f"   ✅ Pachedu route: {methods} {path}")
-            route_count += 1
-    
-    logger.info(f"📊 Total Pachedu routes loaded: {route_count}")
-    
-except Exception as e:
-    logger.error(f"❌ Error including Pachedu router: {e}")
-    logger.error(f"Exception type: {type(e).__name__}")
-    logger.error(f"Exception details: {str(e)}")
-    logger.error(traceback.format_exc())
-    
-    # Add fallback endpoints
-    @app.get("/api/pachedu")
-    async def pachedu_fallback():
-        return {"message": "Pachedu router not loaded", "error": str(e)}
-    @app.post("/api/pachedu")
-    async def pachedu_post_fallback(current_user: dict = Depends(get_current_user)):
-        raise HTTPException(status_code=503, detail="Pachedu router not available")
-    @app.get("/api/pachedu/{path:path}")
-    async def pachedu_path_fallback(path: str):
-        raise HTTPException(status_code=503, detail=f"Pachedu router not available: {path}")
-
-# ===== SAFETY COMPLAINTS ROUTER =====
-logger.info("🔄 Loading safety complaints router...")
-try:
-    from app.routers.safety_complaints import router as safety_complaints_router
-    app.include_router(safety_complaints_router)
-    logger.info("✅ SAFETY COMPLAINTS ROUTER LOADED at /api/safety-complaints")
-except Exception as e:
-    logger.error(f"❌ Error including safety complaints router: {e}")
-    @app.get("/api/safety-complaints")
-    async def safety_complaints_fallback():
-        return {"message": "Safety complaints router not loaded", "status": "fallback"}
-
-# ===== SERVICES TRACKER ROUTER =====
-logger.info("🔄 Loading services router...")
-try:
-    from app.routers.services import router as services_router
-    app.include_router(services_router)
-    logger.info("✅ SERVICES ROUTER LOADED at /api/services")
-except Exception as e:
-    logger.error(f"❌ Error including services router: {e}")
-    @app.get("/api/services")
-    async def services_fallback():
-        return {"message": "Services router not loaded", "status": "fallback"}
-
-# ===== DOCUMENTS ROUTER =====
-logger.info("🔄 Loading documents router...")
-try:
-    from app.routers.documents import router as documents_router
-    app.include_router(documents_router)
-    logger.info("✅ DOCUMENTS ROUTER LOADED at /api/documents")
-except Exception as e:
-    logger.error(f"❌ Error including documents router: {e}")
-    @app.get("/api/documents")
-    async def documents_fallback():
-        return {"message": "Documents router not loaded", "status": "fallback"}
-
-# ===== PHOTOS ROUTER (shared upload for SHEQ / Safety pages) =====
-logger.info("🔄 Loading photos router...")
-try:
-    from app.routers.photos import router as photos_router
-    app.include_router(photos_router, prefix="/api", tags=["Photos"])
-    logger.info("✅ PHOTOS ROUTER LOADED at /api/photos/upload")
-except Exception as e:
-    logger.error(f"❌ Error including photos router: {e}")
-
-# ===== AI SAFETY ANALYSIS ROUTER =====
-logger.info("🔄 Loading AI safety analysis router...")
-try:
-    from app.routers.ai_safety import router as ai_safety_router
-    app.include_router(ai_safety_router, prefix="/api", tags=["AI Safety"])
-    logger.info("✅ AI SAFETY ROUTER LOADED at /api/ai/safety-analysis")
-except Exception as e:
-    logger.error(f"❌ Error including AI safety router: {e}")
+# Registered before the mock availability endpoints below — order matters here (see
+# that section's comment) so it's preserved exactly as it was.
+for _name, _prefix, _tags in [
+    ("standby", None, None),
+    ("sheq_inspections", None, None),
+    ("near_miss", None, None),
+    ("work_stoppage", None, None),
+    ("pto", None, None),
+    ("vfl", None, None),
+    ("pachedu", None, None),
+    ("safety_complaints", None, None),
+    ("services", None, None),
+    ("documents", None, None),
+    ("photos", "/api", ["Photos"]),
+    ("ai_safety", "/api", ["AI Safety"]),
+]:
+    register_router(_name, _prefix, _tags)
 
 # ===== DIRECT AVAILABILITY ENDPOINTS (unchanged) =====
+# NOTE (found while consolidating the registration above, not fixed — changes live
+# route shapes and needs its own decision): these mock endpoints are registered
+# BEFORE the real `availability` router below, so for any path they share exactly,
+# these mock ones win and the real router's equivalent is unreachable. Also, in the
+# second registration loop further down, "documents" (and compressors/inventory/
+# training) get registered a second time with an /api/<name> prefix ON TOP OF a
+# router that already defines that same prefix internally, producing doubled paths
+# like /api/documents/api/documents/{id}. Both predate this cleanup and are
+# preserved as-is here; worth a follow-up decision, not a silent fix.
 class AvailabilityStats(BaseModel):
     totalEquipment: int = 0
     operational: int = 0
@@ -500,234 +329,26 @@ async def availability_health_check():
         "timestamp": datetime.utcnow().isoformat()
     }
 
-# ===== INITIALIZE LOADED ROUTERS DICTIONARY (keeping for other routers) =====
-loaded_routers = {}
-
-# ===== CRITICAL: SPARES ROUTER (unchanged) =====
-logger.info("🔄 CRITICAL: Loading spares router...")
-try:
-    from app.routers.spares import router as spares_router
-    app.include_router(spares_router, prefix="/api/spares", tags=["Spares"])
-    loaded_routers["spares"] = spares_router
-    logger.info("✅ SPARES ROUTER SUCCESSFULLY LOADED at /api/spares")
-    logger.info("📋 Spares routes registered:")
-    for route in spares_router.routes:
-        if hasattr(route, 'methods') and hasattr(route, 'path'):
-            methods = list(route.methods) if hasattr(route, 'methods') else []
-            path = route.path if route.path else "/"
-            logger.info(f"   {methods} /api/spares{path}")
-except ImportError as e:
-    logger.error(f"❌ CRITICAL ERROR: Failed to import spares router: {e}")
-    logger.error(traceback.format_exc())
-    loaded_routers["spares"] = None
-except Exception as e:
-    logger.error(f"❌ CRITICAL ERROR: Error including spares router: {e}")
-    logger.error(traceback.format_exc())
-    loaded_routers["spares"] = None
-
-# ===== CRITICAL: DAILY REPORTS ROUTER (unchanged) =====
-logger.info("🔄 CRITICAL: Loading daily_reports router...")
-try:
-    from app.routers.daily_reports import router as daily_report_router
-    app.include_router(daily_report_router, prefix="/api/daily-reports", tags=["Daily Reports"])
-    loaded_routers["daily_reports"] = daily_report_router
-    logger.info("✅ DAILY REPORTS ROUTER SUCCESSFULLY LOADED at /api/daily-reports")
-except ImportError as e:
-    logger.error(f"❌ Failed to import daily_reports router: {e}")
-    loaded_routers["daily_reports"] = None
-
-# ===== BREAKDOWNS ROUTER (unchanged) =====
-logger.info("🔄 Loading breakdowns router...")
-try:
-    from app.routers.breakdowns import router as breakdowns_router
-    app.include_router(breakdowns_router)
-    loaded_routers["breakdowns"] = breakdowns_router
-    logger.info("✅ BREAKDOWNS ROUTER SUCCESSFULLY LOADED at /api/breakdowns")
-except ImportError as e:
-    logger.error(f"❌ Failed to import breakdowns router: {e}")
-    loaded_routers["breakdowns"] = None
-
-# ===== NOTICEBOARD ROUTER (unchanged, but keep fallback) =====
-logger.info("🔄 CRITICAL: Loading noticeboard router...")
-try:
-    from app.routers.notices import router as noticeboard_router
-    app.include_router(noticeboard_router, prefix="/api/notices", tags=["Notices"])
-    loaded_routers["noticeboard"] = noticeboard_router
-    logger.info("✅ NOTICEBOARD ROUTER SUCCESSFULLY LOADED at /api/notices")
-    logger.info("📋 Noticeboard routes registered:")
-    for route in noticeboard_router.routes:
-        if hasattr(route, 'methods') and hasattr(route, 'path'):
-            methods = list(route.methods) if hasattr(route, 'methods') else []
-            path = route.path if route.path else "/"
-            logger.info(f"   {methods} /api/notices{path}")
-except ImportError as e:
-    logger.error(f"❌ CRITICAL ERROR: Failed to import noticeboard router: {e}")
-    logger.error(traceback.format_exc())
-    loaded_routers["noticeboard"] = None
-    # Add temporary notice models as fallback
-    class TempNoticeCreate(BaseModel):
-        title: str = Field(..., min_length=1)
-        content: str = Field(..., min_length=1)
-        date: date
-        category: str = Field(..., min_length=1)
-        priority: str = Field(default="Medium")
-        status: str = Field(default="Draft")
-        is_pinned: bool = Field(default=False)
-        author: Optional[str] = None
-        department: Optional[str] = None
-    
-    @app.get("/api/notices")
-    async def temp_get_notices():
-        return {"message": "Temporary notices endpoint - router not loaded", "notices": []}
-    
-    @app.post("/api/notices")
-    async def temp_create_notice(notice: TempNoticeCreate, current_user: dict = Depends(get_current_user)):
-        return {
-            "message": "Temporary notice created",
-            "data": notice.dict(),
-            "id": "temp-123",
-            "created_at": datetime.utcnow().isoformat()
-        }
-except Exception as e:
-    logger.error(f"❌ CRITICAL ERROR: Error including noticeboard router: {e}")
-    logger.error(traceback.format_exc())
-    loaded_routers["noticeboard"] = None
-
-# ===== AVAILABILITY ROUTER (unchanged) =====
-logger.info("🔄 Loading availability router...")
-try:
-    from app.routers.availability import router as availability_router
-    app.include_router(availability_router, prefix="/api", tags=["Availability"])
-    loaded_routers["availability"] = availability_router
-    logger.info("✅ AVAILABILITY ROUTER SUCCESSFULLY LOADED at /api/availabilities")
-except ImportError as e:
-    logger.warning(f"⚠️ Failed to import availability router: {e}")
-    logger.info("⚠️ Using direct availability endpoints instead")
-    loaded_routers["availability"] = None
-except Exception as e:
-    logger.error(f"❌ Error including availability router: {e}")
-    loaded_routers["availability"] = None
-
-# ===== EMPLOYEES ROUTER (unchanged) =====
-logger.info("🔄 Loading employees router...")
-try:
-    from app.routers.employees import router as employees_router
-    app.include_router(employees_router, prefix="/api/employees", tags=["Employees"])
-    loaded_routers["employees"] = employees_router
-    logger.info("✅ EMPLOYEES ROUTER SUCCESSFULLY LOADED at /api/employees")
-except ImportError as e:
-    logger.error(f"❌ Failed to import employees router: {e}")
-    loaded_routers["employees"] = None
-
-# ===== ADMIN ROUTER (user roles/permissions — moved off direct-Supabase-from-frontend) =====
-logger.info("🔄 Loading admin router...")
-try:
-    from app.routers.admin import router as admin_router
-    app.include_router(admin_router)
-    loaded_routers["admin"] = admin_router
-    logger.info("✅ ADMIN ROUTER SUCCESSFULLY LOADED at /api/admin")
-except ImportError as e:
-    logger.error(f"❌ Failed to import admin router: {e}")
-    loaded_routers["admin"] = None
-
-# ===== TIMESHEETS ROUTER (unchanged) =====
-logger.info("🔄 CRITICAL: Loading timesheets router...")
-try:
-    from app.routers.timesheets import router as timesheets_router
-    app.include_router(timesheets_router, prefix="/api/timesheets", tags=["Timesheets"])
-    loaded_routers["timesheets"] = timesheets_router
-    logger.info("✅ TIMESHEETS ROUTER SUCCESSFULLY LOADED at /api/timesheets")
-    logger.info("📋 Timesheets routes registered:")
-    for route in timesheets_router.routes:
-        if hasattr(route, 'methods') and hasattr(route, 'path'):
-            methods = list(route.methods) if hasattr(route, 'methods') else []
-            path = route.path if route.path else "/"
-            logger.info(f"   {methods} /api/timesheets{path}")
-except ImportError as e:
-    logger.error(f"❌ CRITICAL ERROR: Failed to import timesheets router: {e}")
-    logger.error(traceback.format_exc())
-    loaded_routers["timesheets"] = None
-except Exception as e:
-    logger.error(f"❌ CRITICAL ERROR: Error including timesheets router: {e}")
-    logger.error(traceback.format_exc())
-    loaded_routers["timesheets"] = None
-
-# ===== CRITICAL: REQUISITIONS ROUTER (unchanged) =====
-logger.info("🔄 CRITICAL: Loading requisitions router...")
-try:
-    from app.routers.requisitions import router as requisitions_router
-    app.include_router(requisitions_router, prefix="/api/requisitions", tags=["Requisitions"])
-    loaded_routers["requisitions"] = requisitions_router
-    logger.info("✅ REQUISITIONS ROUTER SUCCESSFULLY LOADED at /api/requisitions")
-    logger.info("📋 Requisitions routes registered:")
-    for route in requisitions_router.routes:
-        if hasattr(route, 'methods') and hasattr(route, 'path'):
-            methods = list(route.methods) if hasattr(route, 'methods') else []
-            path = route.path if route.path else "/"
-            logger.info(f"   {methods} /api/requisitions{path}")
-except ImportError as e:
-    logger.error(f"❌ CRITICAL ERROR: Failed to import requisitions router: {e}")
-    logger.error(f"❌ Make sure the file exists at: app/routers/requisitions.py")
-    logger.error(traceback.format_exc())
-    loaded_routers["requisitions"] = None
-except Exception as e:
-    logger.error(f"❌ CRITICAL ERROR: Error including requisitions router: {e}")
-    logger.error(traceback.format_exc())
-    loaded_routers["requisitions"] = None
-
-# ===== SCHEDULES ROUTER (unchanged) =====
-logger.info("🔄 Loading schedules router...")
-try:
-    from app.routers.schedules import router as schedules_router
-    app.include_router(schedules_router, prefix="/api/schedules", tags=["Schedules"])
-    loaded_routers["schedules"] = schedules_router
-    logger.info("✅ SCHEDULES ROUTER SUCCESSFULLY LOADED at /api/schedules")
-except ImportError as e:
-    logger.error(f"❌ Failed to import schedules router: {e}")
-    loaded_routers["schedules"] = None
-
-# ===== EQUIPMENT ROUTER (unchanged) =====
-logger.info("🔄 Loading equipment router...")
-try:
-    from app.routers.equipment import router as equipment_router
-    app.include_router(equipment_router, prefix="/api/equipment", tags=["Equipment"])
-    loaded_routers["equipment"] = equipment_router
-    logger.info("✅ EQUIPMENT ROUTER SUCCESSFULLY LOADED at /api/equipment")
-except ImportError as e:
-    logger.error(f"❌ Failed to import equipment router: {e}")
-    loaded_routers["equipment"] = None
-
-# ===== MAINTENANCE ROUTER (unchanged) =====
-logger.info("🔄 Loading maintenance router...")
-try:
-    from app.routers.maintenance import router as maintenance_router
-    app.include_router(maintenance_router, prefix="/api/maintenance", tags=["Maintenance"])
-    loaded_routers["maintenance"] = maintenance_router
-    logger.info("✅ MAINTENANCE ROUTER SUCCESSFULLY LOADED at /api/maintenance")
-except ImportError as e:
-    logger.error(f"❌ Failed to import maintenance router: {e}")
-    loaded_routers["maintenance"] = None
-
-# ===== STOCK ISSUES ROUTER =====
-logger.info("🔄 Loading stock issues router...")
-try:
-    from app.routers.issues import router as issues_router
-    app.include_router(issues_router, prefix="/api/issues", tags=["Stock Issues"])
-    loaded_routers["issues"] = issues_router
-    logger.info("✅ STOCK ISSUES ROUTER SUCCESSFULLY LOADED at /api/issues")
-except ImportError as e:
-    logger.error(f"❌ Failed to import issues router: {e}")
-    loaded_routers["issues"] = None
-
-logger.info("🔄 Loading drivers router...")
-try:
-    from app.routers.drivers import router as drivers_router
-    app.include_router(drivers_router, prefix="/api/drivers", tags=["Drivers"])
-    loaded_routers["drivers"] = drivers_router
-    logger.info("✅ DRIVERS ROUTER SUCCESSFULLY LOADED at /api/drivers")
-except ImportError as e:
-    logger.error(f"❌ Failed to import drivers router: {e}")
-    loaded_routers["drivers"] = None
+# Registered after the mock availability endpoints above — same preserved ordering.
+# "notices" registers under the "noticeboard" dict key — that's what the health-check
+# and debug endpoints further down already look up.
+for _name, _prefix, _tags, _key in [
+    ("spares", "/api/spares", ["Spares"], None),
+    ("daily_reports", "/api/daily-reports", ["Daily Reports"], None),
+    ("breakdowns", None, None, None),
+    ("notices", "/api/notices", ["Notices"], "noticeboard"),
+    ("availability", "/api", ["Availability"], None),
+    ("employees", "/api/employees", ["Employees"], None),
+    ("admin", None, None, None),
+    ("timesheets", "/api/timesheets", ["Timesheets"], None),
+    ("requisitions", "/api/requisitions", ["Requisitions"], None),
+    ("schedules", "/api/schedules", ["Schedules"], None),
+    ("equipment", "/api/equipment", ["Equipment"], None),
+    ("maintenance", "/api/maintenance", ["Maintenance"], None),
+    ("issues", "/api/issues", ["Stock Issues"], None),
+    ("drivers", "/api/drivers", ["Drivers"], None),
+]:
+    register_router(_name, _prefix, _tags, _key)
 
 # ===== OTHER ROUTERS (unchanged) =====
 routers_to_import = [
