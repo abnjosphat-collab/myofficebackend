@@ -340,36 +340,12 @@ async def get_ppe_matrix():
     return matrix
 
 
-@router.put("/matrix")
-async def set_ppe_matrix_entry(entry: MatrixEntry, current_user: dict = Depends(require_role('manager'))):
-    """Set (upsert) the interval for one PPE type. Does NOT recalculate — call apply for that."""
-    try:
-        supabase.table("ppe_matrix").upsert({
-            "ppe_type": entry.ppe_type,
-            "interval_months": entry.interval_months,
-            "updated_at": datetime.utcnow().isoformat(),
-        }, on_conflict="ppe_type").execute()
-        return {"ppe_type": entry.ppe_type, "interval_months": entry.interval_months}
-    except Exception as e:
-        raise HTTPException(status_code=500,
-                            detail=f"Could not save matrix — has the ppe_matrix table been created? {e}")
-
-
-@router.post("/matrix/{ppe_type}/apply")
-async def apply_ppe_matrix(ppe_type: str, current_user: dict = Depends(require_role('manager'))):
-    """Recalculate expiry = issue_date + interval for every ACTIVE record of this type.
-    Overwrites existing expiry dates — this is the 'reset the matrix' control."""
-    overrides = _matrix_overrides()
-    if ppe_type in overrides:
-        interval = overrides[ppe_type]
-    elif ppe_type in PPE_MATRIX_DEFAULTS:
-        interval = PPE_MATRIX_DEFAULTS[ppe_type]
-    else:
-        raise HTTPException(status_code=400, detail=f"No interval configured for '{ppe_type}'")
-    try:
-        recs = supabase.table("ppe_records").select("id, issue_date").eq("ppe_type", ppe_type).eq("status", "active").execute()
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Could not load records: {e}")
+def _apply_matrix_to_type(ppe_type: str, interval: int) -> int:
+    """Recalculate expiry = issue_date + interval for every ACTIVE record of this type,
+    overwriting whatever expiry_date is currently stored (including a manually-typed
+    one — the matrix is the source of truth once a type's interval is set/changed).
+    Returns the number of records updated."""
+    recs = supabase.table("ppe_records").select("id, issue_date").eq("ppe_type", ppe_type).eq("status", "active").execute()
     updated = 0
     for r in (recs.data or []):
         # interval 0 = no expiry → clear the date; otherwise recompute from issue date.
@@ -380,4 +356,62 @@ async def apply_ppe_matrix(ppe_type: str, current_user: dict = Depends(require_r
                 "updated_at": datetime.utcnow().isoformat(),
             }).eq("id", r["id"]).execute()
             updated += 1
+    return updated
+
+
+@router.put("/matrix")
+async def set_ppe_matrix_entry(entry: MatrixEntry, current_user: dict = Depends(require_role('manager'))):
+    """Set (upsert) the interval for one PPE type, then immediately recalculate expiry
+    for every active record of that type so the matrix and stored data never drift
+    apart — no separate 'apply' step needed."""
+    try:
+        supabase.table("ppe_matrix").upsert({
+            "ppe_type": entry.ppe_type,
+            "interval_months": entry.interval_months,
+            "updated_at": datetime.utcnow().isoformat(),
+        }, on_conflict="ppe_type").execute()
+    except Exception as e:
+        raise HTTPException(status_code=500,
+                            detail=f"Could not save matrix — has the ppe_matrix table been created? {e}")
+    try:
+        updated = _apply_matrix_to_type(entry.ppe_type, entry.interval_months)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Matrix saved, but recalculating existing records failed: {e}")
+    return {"ppe_type": entry.ppe_type, "interval_months": entry.interval_months, "updated": updated}
+
+
+@router.post("/matrix/{ppe_type}/apply")
+async def apply_ppe_matrix(ppe_type: str, current_user: dict = Depends(require_role('manager'))):
+    """Recalculate expiry for every ACTIVE record of this type against the current
+    matrix interval — the manual per-type control (PUT /matrix now does this
+    automatically on save, but this stays for re-running it standalone, e.g. after a
+    record's issue_date was edited)."""
+    overrides = _matrix_overrides()
+    if ppe_type in overrides:
+        interval = overrides[ppe_type]
+    elif ppe_type in PPE_MATRIX_DEFAULTS:
+        interval = PPE_MATRIX_DEFAULTS[ppe_type]
+    else:
+        raise HTTPException(status_code=400, detail=f"No interval configured for '{ppe_type}'")
+    try:
+        updated = _apply_matrix_to_type(ppe_type, interval)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Could not recalculate records: {e}")
     return {"ppe_type": ppe_type, "interval_months": interval, "updated": updated}
+
+
+@router.post("/matrix/apply-all")
+async def apply_ppe_matrix_all(current_user: dict = Depends(require_role('manager'))):
+    """Recalculate expiry for every ACTIVE record of every PPE type against the
+    current matrix — a one-shot fix for records left stale by a past interval change,
+    without clicking 'Recalculate' once per type."""
+    matrix = dict(PPE_MATRIX_DEFAULTS)
+    matrix.update(_matrix_overrides())
+    results = {}
+    for ppe_type, interval in matrix.items():
+        try:
+            results[ppe_type] = _apply_matrix_to_type(ppe_type, interval)
+        except Exception as e:
+            logger.error(f"Failed recalculating '{ppe_type}': {e}")
+            results[ppe_type] = None
+    return {"results": results, "total_updated": sum(v for v in results.values() if v)}
