@@ -74,7 +74,7 @@ def convert_dates_to_iso(record):
     return record
 
 # PPE Records Endpoints
-@router.get("")
+@router.get("", dependencies=[Depends(get_current_user)])
 async def get_ppe_records(
     status: Optional[str] = None,
     ppe_type: Optional[str] = None,
@@ -137,7 +137,7 @@ async def create_ppe_record(record: PPEIssueCreate, current_user: dict = Depends
         logger.error(f"Error creating PPE record: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Error creating PPE record: {str(e)}")
 
-@router.get("/{record_id:int}")
+@router.get("/{record_id:int}", dependencies=[Depends(get_current_user)])
 async def get_ppe_record(record_id: int):
     try:
         response = supabase.table("ppe_records").select("*").eq("id", record_id).execute()
@@ -204,7 +204,7 @@ async def delete_ppe_record(record_id: int, current_user: dict = Depends(require
         logger.error(f"Error deleting PPE record: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Error deleting PPE record: {str(e)}")
 
-@router.get("/employee/{employee_id}")
+@router.get("/employee/{employee_id}", dependencies=[Depends(get_current_user)])
 async def get_employee_ppe_records(employee_id: str):
     try:
         response = supabase.table("ppe_records").select("*").eq("employee_id", employee_id).order("issue_date", desc=True).execute()
@@ -221,7 +221,7 @@ async def get_employee_ppe_records(employee_id: str):
         raise HTTPException(status_code=500, detail=f"Error fetching employee PPE records: {str(e)}")
 
 # Statistics Endpoint
-@router.get("/stats/summary")
+@router.get("/stats/summary", dependencies=[Depends(get_current_user)])
 async def get_ppe_stats():
     try:
         # Get total records count
@@ -332,7 +332,7 @@ class MatrixEntry(BaseModel):
     interval_months: int = Field(..., ge=0, le=120)   # 0 = no expiry
 
 
-@router.get("/matrix")
+@router.get("/matrix", dependencies=[Depends(get_current_user)])
 async def get_ppe_matrix():
     """Effective matrix: company defaults with any saved overrides applied."""
     matrix = dict(PPE_MATRIX_DEFAULTS)

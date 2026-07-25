@@ -198,7 +198,7 @@ def parse_spares(record: dict) -> list:
 
 # ===== API ENDPOINTS =====
 
-@router.get("/")
+@router.get("/", dependencies=[Depends(get_current_user)])
 async def breakdowns_root():
     """Root endpoint"""
     return {
@@ -214,7 +214,7 @@ async def breakdowns_root():
         }
     }
 
-@router.get("/get-breakdowns")
+@router.get("/get-breakdowns", dependencies=[Depends(get_current_user)])
 async def get_breakdowns(
     status: Optional[str] = Query(None),
     breakdown_type: Optional[str] = Query(None),
@@ -337,7 +337,7 @@ async def create_breakdown(breakdown: BreakdownCreate, current_user: dict = Depe
         logger.error(f"Error creating breakdown: {e}")
         raise HTTPException(status_code=500, detail=f"Error creating breakdown: {str(e)}")
 
-@router.get("/{breakdown_id}")
+@router.get("/{breakdown_id}", dependencies=[Depends(get_current_user)])
 async def get_breakdown(breakdown_id: str):
     """Get breakdown by ID"""
     db = check_supabase()
@@ -545,7 +545,7 @@ async def health_check():
             "error": str(e)
         }
 
-@router.get("/analytics/heatmap")
+@router.get("/analytics/heatmap", dependencies=[Depends(get_current_user)])
 async def get_breakdown_heatmap(
     date_from: Optional[str] = Query(None, description="Start date (YYYY-MM-DD)"),
     date_to: Optional[str] = Query(None, description="End date (YYYY-MM-DD)"),

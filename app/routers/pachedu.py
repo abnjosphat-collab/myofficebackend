@@ -107,8 +107,8 @@ def map_db_pachedu_to_camel(db_item: dict) -> dict:
 # =============== API ENDPOINTS ===============
 
 # GET all Pachedu reports
-@router.get("")
-@router.get("/")
+@router.get("", dependencies=[Depends(get_current_user)])
+@router.get("/", dependencies=[Depends(get_current_user)])
 async def get_pachedu_reports(
     search: Optional[str] = Query(None, description="Search term"),
     section: Optional[str] = Query(None, description="Filter by section"),
@@ -168,7 +168,7 @@ async def get_pachedu_reports(
         raise HTTPException(status_code=500, detail=f"Error fetching reports: {str(e)}")
 
 # GET unique departments for auto-complete
-@router.get("/suggestions/departments")
+@router.get("/suggestions/departments", dependencies=[Depends(get_current_user)])
 async def get_department_suggestions(search: Optional[str] = Query(None)):
     try:
         query = supabase.table("pachedu_reports")\
@@ -194,7 +194,7 @@ async def get_department_suggestions(search: Optional[str] = Query(None)):
         return []
 
 # GET stats overview
-@router.get("/stats/overview")
+@router.get("/stats/overview", dependencies=[Depends(get_current_user)])
 async def get_pachedu_stats():
     try:
         logger.info("Fetching Pachedu stats...")
@@ -286,7 +286,7 @@ async def get_pachedu_stats():
         raise HTTPException(status_code=500, detail=f"Error fetching stats: {str(e)}")
 
 # GET single report
-@router.get("/{report_id}")
+@router.get("/{report_id}", dependencies=[Depends(get_current_user)])
 async def get_pachedu_report(report_id: str):
     try:
         logger.info(f"Fetching Pachedu report {report_id}")

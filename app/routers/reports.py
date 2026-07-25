@@ -304,7 +304,7 @@ def generate_pdf_report(report_type, data, summary):
     return pdf_content
 
 # Routes
-@router.get("/", response_model=List[ReportResponse])
+@router.get("/", response_model=List[ReportResponse], dependencies=[Depends(get_current_user)])
 async def get_reports():
     """Get all reports"""
     try:
@@ -313,7 +313,7 @@ async def get_reports():
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-@router.get("/{report_id}", response_model=ReportResponse)
+@router.get("/{report_id}", response_model=ReportResponse, dependencies=[Depends(get_current_user)])
 async def get_report(report_id: str):
     """Get specific report"""
     try:
@@ -327,7 +327,7 @@ async def get_report(report_id: str):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-@router.get("/{report_id}/download")
+@router.get("/{report_id}/download", dependencies=[Depends(get_current_user)])
 async def download_report(
     report_id: str,
     format: str = Query("json", description="Download format: json, csv, pdf")
@@ -371,7 +371,7 @@ async def download_report(
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-@router.get("/analytics/summary")
+@router.get("/analytics/summary", dependencies=[Depends(get_current_user)])
 async def get_analytics_summary_route():
     """Get analytics summary"""
     try:
@@ -438,7 +438,7 @@ async def delete_report(report_id: str, current_user: dict = Depends(require_rol
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-@router.get("/stats/summary")
+@router.get("/stats/summary", dependencies=[Depends(get_current_user)])
 async def get_reports_stats():
     """Get reports statistics"""
     try:

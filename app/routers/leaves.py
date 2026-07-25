@@ -134,7 +134,7 @@ async def get_leaves(status: Optional[str] = None, leave_type: Optional[str] = N
         raise HTTPException(status_code=500, detail=f"Error fetching leaves: {str(e)}")
 
 # ---------- GET leave stats ----------
-@router.get("/stats/summary")
+@router.get("/stats/summary")  # deliberately open — aggregate counts, not individual records
 async def get_leave_stats():
     try:
         response = supabase.table("leaves").select("*").execute()

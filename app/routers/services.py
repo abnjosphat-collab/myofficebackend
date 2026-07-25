@@ -82,8 +82,8 @@ def _serialize(data: dict) -> dict:
 
 # ── CRUD ───────────────────────────────────────────────────────────────────────
 
-@router.get("")
-@router.get("/")
+@router.get("", dependencies=[Depends(get_current_user)])
+@router.get("/", dependencies=[Depends(get_current_user)])
 async def list_services():
     try:
         r = supabase.table("services").select("*").order("created_at", desc=True).execute()
@@ -256,7 +256,7 @@ async def delete_service(service_id: str, current_user: dict = Depends(require_r
 BUCKET = "service-attachments"
 
 
-@router.get("/{service_id}/attachments")
+@router.get("/{service_id}/attachments", dependencies=[Depends(get_current_user)])
 async def list_attachments(service_id: str):
     try:
         r = (supabase.table("service_attachments")

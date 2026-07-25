@@ -164,7 +164,7 @@ def init_sample_data():
 # Initialize sample data
 init_sample_data()
 
-@router.get("/items", response_model=List[InventoryItem])
+@router.get("/items", response_model=List[InventoryItem], dependencies=[Depends(get_current_user)])
 async def get_inventory_items(
     category: Optional[str] = None,
     status: Optional[str] = None,
@@ -192,7 +192,7 @@ async def get_inventory_items(
     
     return items
 
-@router.get("/items/{item_id}", response_model=InventoryItem)
+@router.get("/items/{item_id}", response_model=InventoryItem, dependencies=[Depends(get_current_user)])
 async def get_inventory_item(item_id: str):
     """Get a specific inventory item by ID"""
     if item_id not in inventory_db:
@@ -288,7 +288,7 @@ async def restock_item(item_id: str, quantity: int, current_user: dict = Depends
         "item": item
     }
 
-@router.get("/stats")
+@router.get("/stats", dependencies=[Depends(get_current_user)])
 async def get_inventory_stats():
     """Get inventory statistics for dashboard"""
     items = list(inventory_db.values())
@@ -314,19 +314,19 @@ async def get_inventory_stats():
         "categoryDistribution": categories
     }
 
-@router.get("/categories")
+@router.get("/categories", dependencies=[Depends(get_current_user)])
 async def get_categories():
     """Get all inventory categories"""
     categories = set(item['category'] for item in inventory_db.values())
     return {"categories": sorted(list(categories))}
 
-@router.get("/suppliers")
+@router.get("/suppliers", dependencies=[Depends(get_current_user)])
 async def get_suppliers():
     """Get all suppliers"""
     suppliers = set(item['supplier'] for item in inventory_db.values())
     return {"suppliers": sorted(list(suppliers))}
 
-@router.get("/low-stock")
+@router.get("/low-stock", dependencies=[Depends(get_current_user)])
 async def get_low_stock_items():
     """Get all low stock and out-of-stock items"""
     items = list(inventory_db.values())

@@ -1,8 +1,9 @@
 from typing import Optional, List, Any
-from fastapi import HTTPException
+from fastapi import HTTPException, Depends
 from pydantic import BaseModel
 from app.crud_router import CrudRouter
 from app.supabase_client import supabase
+from app.auth import get_current_user
 
 
 class JobCardCreate(BaseModel):
@@ -59,7 +60,7 @@ router = CrudRouter(
 ).router
 
 
-@router.get("/{jc_id}")
+@router.get("/{jc_id}", dependencies=[Depends(get_current_user)])
 async def get_job_card(jc_id: int):
     r = supabase.table("job_cards").select("*").eq("id", jc_id).execute()
     if not r.data:

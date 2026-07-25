@@ -2,7 +2,8 @@ from typing import Optional
 from pydantic import BaseModel
 from app.crud_router import CrudRouter
 from app.supabase_client import supabase
-from fastapi import HTTPException
+from fastapi import HTTPException, Depends
+from app.auth import get_current_user
 import logging
 
 logger = logging.getLogger(__name__)
@@ -52,7 +53,7 @@ router = CrudRouter(
 ).router
 
 
-@router.get("/stats/summary")
+@router.get("/stats/summary", dependencies=[Depends(get_current_user)])
 async def production_summary():
     """Last 30 days summary stats."""
     try:

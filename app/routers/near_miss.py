@@ -68,8 +68,8 @@ def map_db_to_camel(db_item: dict) -> dict:
 # =============== API ENDPOINTS ===============
 
 # GET all near miss reports
-@router.get("")
-@router.get("/")
+@router.get("", dependencies=[Depends(get_current_user)])
+@router.get("/", dependencies=[Depends(get_current_user)])
 async def get_reports(
     search: Optional[str] = Query(None, description="Search term"),
     section: Optional[str] = Query(None, description="Filter by section"),
@@ -125,7 +125,7 @@ async def get_reports(
         raise HTTPException(status_code=500, detail=f"Error fetching reports: {str(e)}")
 
 # GET single report
-@router.get("/{report_id}")
+@router.get("/{report_id}", dependencies=[Depends(get_current_user)])
 async def get_report(report_id: str):
     try:
         logger.info(f"Fetching near miss report {report_id}")
@@ -273,7 +273,7 @@ async def delete_report(report_id: str, current_user: dict = Depends(require_rol
         raise HTTPException(status_code=500, detail=f"Error deleting report: {str(e)}")
 
 # GET stats
-@router.get("/stats/overview")
+@router.get("/stats/overview", dependencies=[Depends(get_current_user)])
 async def get_stats():
     try:
         logger.info("Fetching near miss stats...")

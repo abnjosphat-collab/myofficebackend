@@ -28,8 +28,8 @@ def _file_type(filename: str) -> str:
 
 # ── List ──────────────────────────────────────────────────────────────────────
 
-@router.get("")
-@router.get("/")
+@router.get("", dependencies=[Depends(get_current_user)])
+@router.get("/", dependencies=[Depends(get_current_user)])
 async def list_documents(category_id: str, folder_id: Optional[str] = None):
     try:
         q = supabase.table("documents").select("*").eq("category_id", category_id)

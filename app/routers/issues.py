@@ -40,7 +40,7 @@ class StockIssueCreate(BaseModel):
     items: List[IssueItem] = Field(..., min_length=1)
     notes: Optional[str] = None
 
-@router.get("")
+@router.get("", dependencies=[Depends(get_current_user)])
 async def get_issues(
     search: Optional[str] = Query(None),
     date_from: Optional[str] = Query(None),
@@ -104,7 +104,7 @@ async def delete_issue(issue_id: int, current_user: dict = Depends(require_role(
         logger.error(f"Error deleting issue: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-@router.get("/stats/summary")
+@router.get("/stats/summary", dependencies=[Depends(get_current_user)])
 async def get_stats():
     try:
         response = supabase.table("stock_issues").select("issued_at, recipient_name").execute()

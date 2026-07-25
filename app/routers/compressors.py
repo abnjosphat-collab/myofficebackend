@@ -267,7 +267,7 @@ async def recalculate_subsequent_readings(compressor_id: str, from_date: str, su
 
 # API Routes
 
-@router.get("/")
+@router.get("/", dependencies=[Depends(get_current_user)])
 async def root():
     return {
         "message": "Compressor Tracking System API",
@@ -287,7 +287,7 @@ async def health_check():
     return {"status": "healthy", "timestamp": datetime.utcnow().isoformat()}
 
 # Compressor CRUD Operations
-@router.get("/compressors", response_model=List[Dict[str, Any]])
+@router.get("/compressors", response_model=List[Dict[str, Any]], dependencies=[Depends(get_current_user)])
 async def get_compressors(
     status: Optional[str] = None,
     location: Optional[str] = None,
@@ -319,7 +319,7 @@ async def get_compressors(
         # Return empty array instead of throwing error for frontend
         return []
 
-@router.get("/compressors/{compressor_id}", response_model=Dict[str, Any])
+@router.get("/compressors/{compressor_id}", response_model=Dict[str, Any], dependencies=[Depends(get_current_user)])
 async def get_compressor_by_id(
     compressor_id: str,
     supabase_client = Depends(get_supabase)
@@ -661,7 +661,7 @@ async def create_daily_entry_cumulative(
         print(f"Error creating daily entry: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Error creating daily entry: {str(e)}")
 
-@router.get("/readings/{compressor_id}")
+@router.get("/readings/{compressor_id}", dependencies=[Depends(get_current_user)])
 async def get_compressor_readings(
     compressor_id: str,
     start_date: Optional[str] = None,
@@ -691,7 +691,7 @@ async def get_compressor_readings(
         print(f"Error fetching readings: {str(e)}")
         return {"success": False, "data": [], "error": str(e)}
 
-@router.get("/readings/{compressor_id}/detailed")
+@router.get("/readings/{compressor_id}/detailed", dependencies=[Depends(get_current_user)])
 async def get_detailed_readings(
     compressor_id: str,
     start_date: Optional[str] = None,
@@ -762,7 +762,7 @@ async def get_detailed_readings(
         print(f"Error fetching detailed readings: {str(e)}")
         return {"success": False, "data": [], "error": str(e)}
 
-@router.get("/readings/date/{date}")
+@router.get("/readings/date/{date}", dependencies=[Depends(get_current_user)])
 async def get_readings_by_date(
     date: str,
     supabase_client = Depends(get_supabase)
@@ -888,7 +888,7 @@ async def check_and_update_service_due(compressor_id: str, current_hours: float,
         print(f"Error checking service due: {str(e)}")
 
 # Statistics
-@router.get("/stats")
+@router.get("/stats", dependencies=[Depends(get_current_user)])
 async def get_stats(supabase_client = Depends(get_supabase)):
     """Get system statistics"""
     try:
@@ -949,7 +949,7 @@ async def get_stats(supabase_client = Depends(get_supabase)):
         print(f"Error calculating statistics: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Error calculating statistics: {str(e)}")
 
-@router.get("/service-due")
+@router.get("/service-due", dependencies=[Depends(get_current_user)])
 async def get_service_due(supabase_client = Depends(get_supabase)):
     """Get compressors with upcoming services"""
     try:
@@ -992,7 +992,7 @@ async def get_service_due(supabase_client = Depends(get_supabase)):
         raise HTTPException(status_code=500, detail=f"Error checking service due: {str(e)}")
 
 # Analytics endpoints
-@router.get("/analytics/performance-metrics")
+@router.get("/analytics/performance-metrics", dependencies=[Depends(get_current_user)])
 async def get_performance_metrics(
     period_days: int = Query(30, description="Period in days"),
     supabase_client = Depends(get_supabase)
@@ -1063,7 +1063,7 @@ async def get_performance_metrics(
         print(f"Error getting performance metrics: {str(e)}")
         return []
 
-@router.get("/analytics/trends")
+@router.get("/analytics/trends", dependencies=[Depends(get_current_user)])
 async def get_trend_analysis(
     period: str = Query('monthly', description="Period for trends: monthly, weekly, quarterly"),
     supabase_client = Depends(get_supabase)
@@ -1144,7 +1144,7 @@ async def get_trend_analysis(
             "has_data": False
         }
 
-@router.get("/analytics/comparison")
+@router.get("/analytics/comparison", dependencies=[Depends(get_current_user)])
 async def get_comparison_analytics(
     metric: str = Query('efficiency', description="Metric for comparison: efficiency, running_hours, loaded_hours"),
     supabase_client = Depends(get_supabase)
@@ -1217,7 +1217,7 @@ async def get_comparison_analytics(
             "count": 0
         }
 
-@router.get("/management/summary")
+@router.get("/management/summary", dependencies=[Depends(get_current_user)])
 async def get_management_summary(supabase_client = Depends(get_supabase)):
     """Get management summary"""
     try:

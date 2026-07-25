@@ -46,8 +46,8 @@ class ComplianceUpdate(BaseModel):
     document_url: Optional[str] = None
     notes: Optional[str] = None
 
-@router.get("")
-@router.get("/")
+@router.get("", dependencies=[Depends(get_current_user)])
+@router.get("/", dependencies=[Depends(get_current_user)])
 async def get_compliance(status: Optional[str] = None):
     try:
         r = supabase.table("compliance_register").select("*").order("expiry_date").execute()
@@ -61,7 +61,7 @@ async def get_compliance(status: Optional[str] = None):
     except Exception as e:
         raise HTTPException(500, str(e))
 
-@router.get("/{c_id}")
+@router.get("/{c_id}", dependencies=[Depends(get_current_user)])
 async def get_compliance_item(c_id: int):
     r = supabase.table("compliance_register").select("*").eq("id", c_id).execute()
     if not r.data:

@@ -121,7 +121,7 @@ async def health_check():
         }
 
 # GET reports endpoint - ONLY ONE GET "/" ENDPOINT
-@router.get("/")
+@router.get("/", dependencies=[Depends(get_current_user)])
 async def get_reports(
     start_date: Optional[str] = Query(None),
     end_date: Optional[str] = Query(None),
@@ -234,7 +234,7 @@ async def create_report(report: DailyReportCreate, current_user: dict = Depends(
         raise HTTPException(status_code=500, detail=f"Error creating report: {str(e)}")
 
 # Stats endpoint
-@router.get("/stats/summary")
+@router.get("/stats/summary", dependencies=[Depends(get_current_user)])
 async def get_stats_summary(
     start_date: Optional[str] = Query(None),
     end_date: Optional[str] = Query(None)
@@ -310,7 +310,7 @@ async def get_stats_summary(
         }
 
 # Trends endpoints
-@router.get("/trends/plant-availability")
+@router.get("/trends/plant-availability", dependencies=[Depends(get_current_user)])
 async def get_plant_availability_trend(
     start_date: Optional[str] = Query(None),
     end_date: Optional[str] = Query(None)
@@ -362,7 +362,7 @@ async def get_plant_availability_trend(
         logger.error(f"❌ Error in plant availability trend: {str(e)}")
         return {"dates": [], "plant_availability": [], "dam_levels": []}
 
-@router.get("/trends/equipment-performance")
+@router.get("/trends/equipment-performance", dependencies=[Depends(get_current_user)])
 async def get_equipment_performance_trend(
     start_date: Optional[str] = Query(None),
     end_date: Optional[str] = Query(None)
@@ -474,7 +474,7 @@ async def delete_all_reports(current_user: dict = Depends(require_role('manager'
         raise HTTPException(status_code=500, detail=f"Error deleting reports: {str(e)}")
 
 # Export endpoints
-@router.get("/export/excel")
+@router.get("/export/excel", dependencies=[Depends(get_current_user)])
 async def export_to_excel(
     start_date: Optional[str] = Query(None),
     end_date: Optional[str] = Query(None)
@@ -482,7 +482,7 @@ async def export_to_excel(
     """Export to Excel - placeholder"""
     return {"message": "Excel export endpoint", "start_date": start_date, "end_date": end_date}
 
-@router.get("/export/pdf/{report_id}")
+@router.get("/export/pdf/{report_id}", dependencies=[Depends(get_current_user)])
 async def export_to_pdf(report_id: int):
     """Export to PDF - placeholder"""
     return {"message": f"PDF export for report {report_id}"}

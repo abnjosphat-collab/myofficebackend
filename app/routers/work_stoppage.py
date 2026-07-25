@@ -111,8 +111,8 @@ def map_db_action_to_camel(db_item: dict) -> dict:
 # =============== API ENDPOINTS ===============
 
 # GET all work stoppage reports
-@router.get("")
-@router.get("/")
+@router.get("", dependencies=[Depends(get_current_user)])
+@router.get("/", dependencies=[Depends(get_current_user)])
 async def get_reports(
     search: Optional[str] = Query(None, description="Search term"),
     section: Optional[str] = Query(None, description="Filter by section"),
@@ -181,7 +181,7 @@ async def get_reports(
         raise HTTPException(status_code=500, detail=f"Error fetching reports: {str(e)}")
 
 # GET unique departments for auto-complete
-@router.get("/suggestions/departments")
+@router.get("/suggestions/departments", dependencies=[Depends(get_current_user)])
 async def get_department_suggestions(search: Optional[str] = Query(None)):
     try:
         query = supabase.table("work_stoppage_reports")\
@@ -207,7 +207,7 @@ async def get_department_suggestions(search: Optional[str] = Query(None)):
         return []
 
 # GET unique inspectors for auto-complete
-@router.get("/suggestions/inspectors")
+@router.get("/suggestions/inspectors", dependencies=[Depends(get_current_user)])
 async def get_inspector_suggestions(search: Optional[str] = Query(None)):
     try:
         query = supabase.table("work_stoppage_reports")\
@@ -233,7 +233,7 @@ async def get_inspector_suggestions(search: Optional[str] = Query(None)):
         return []
 
 # GET single report
-@router.get("/{report_id}")
+@router.get("/{report_id}", dependencies=[Depends(get_current_user)])
 async def get_report(report_id: str):
     try:
         logger.info(f"Fetching work stoppage report {report_id}")
@@ -478,7 +478,7 @@ async def delete_report(report_id: str, current_user: dict = Depends(require_rol
         raise HTTPException(status_code=500, detail=f"Error deleting report: {str(e)}")
 
 # GET stats
-@router.get("/stats/overview")
+@router.get("/stats/overview", dependencies=[Depends(get_current_user)])
 async def get_stats():
     try:
         logger.info("Fetching work stoppage stats...")

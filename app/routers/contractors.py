@@ -77,7 +77,7 @@ router = CrudRouter(
 ).router
 
 
-@router.get("/{c_id}")
+@router.get("/{c_id}", dependencies=[Depends(get_current_user)])
 async def get_contractor(c_id: int):
     r = supabase.table("contractors").select("*").eq("id", c_id).execute()
     if not r.data:
@@ -90,7 +90,7 @@ async def get_contractor(c_id: int):
 
 # ─── Contractor jobs ──────────────────────────────────────────────────────────
 
-@router.get("/jobs/all")
+@router.get("/jobs/all", dependencies=[Depends(get_current_user)])
 async def get_all_jobs(status: Optional[str] = None):
     q = supabase.table("contractor_jobs").select("*, contractors(company_name, trade)").order("start_date", desc=True)
     if status: q = q.eq("status", status)

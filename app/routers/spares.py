@@ -439,7 +439,7 @@ async def infer_spare_columns(file: UploadFile = File(...), current_user: dict =
 
 
 # GET all spares
-@router.get("")
+@router.get("", dependencies=[Depends(get_current_user)])
 async def get_spares(
     search: Optional[str] = Query(None, description="Search in stock code, description, or notes"),
     category: Optional[str] = Query(None, description="Filter by category (checks both category and categories array)"),
@@ -493,7 +493,7 @@ async def get_spares(
         raise HTTPException(status_code=500, detail=f"Error fetching spares: {str(e)}")
 
 # GET single spare
-@router.get("/{spare_id}")
+@router.get("/{spare_id}", dependencies=[Depends(get_current_user)])
 async def get_spare(spare_id: int):
     """Get a specific spare by ID"""
     try:
@@ -757,7 +757,7 @@ async def delete_spare(spare_id: int, current_user: dict = Depends(require_role(
         raise HTTPException(status_code=500, detail=f"Error deleting spare: {str(e)}")
 
 # GET suggestions for a field
-@router.get("/suggestions/{field}")
+@router.get("/suggestions/{field}", dependencies=[Depends(get_current_user)])
 async def get_suggestions(field: str):
     """Get unique values for a field for auto-suggestions"""
     allowed_fields = ['category', 'machine_type', 'priority', 'storage_location', 'supplier']
@@ -786,7 +786,7 @@ async def get_suggestions(field: str):
         return {"suggestions": []}
 
 # GET statistics
-@router.get("/stats/summary")
+@router.get("/stats/summary", dependencies=[Depends(get_current_user)])
 async def get_stats():
     """Get summary statistics"""
     try:
@@ -888,7 +888,7 @@ async def test_connection():
         return {"status": "error", "database": "disconnected", "error": str(e)}
 
 # Export data endpoint
-@router.get("/export/data")
+@router.get("/export/data", dependencies=[Depends(get_current_user)])
 async def export_spares():
     """Export all spares as JSON"""
     try:
@@ -935,7 +935,7 @@ class SavedSpareReqCreate(BaseModel):
     lines: List[dict] = Field(default_factory=list)
     grand_total: float = 0.0
 
-@router.get("/saved-requisitions")
+@router.get("/saved-requisitions", dependencies=[Depends(get_current_user)])
 async def get_saved_spare_requisitions():
     """Fetch all saved spare requisitions from Supabase"""
     try:

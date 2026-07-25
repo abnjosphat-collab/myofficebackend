@@ -253,7 +253,7 @@ def prepare_data_for_response(data: dict) -> dict:
     return result
 
 # ==================== WORK ORDERS ENDPOINTS ====================
-@router.get("/work-orders")
+@router.get("/work-orders", dependencies=[Depends(get_current_user)])
 async def get_work_orders(
     status: Optional[str] = None,
     priority: Optional[str] = None,
@@ -377,7 +377,7 @@ async def create_work_order(work_order: WorkOrderCreate, current_user: dict = De
         logger.error(f"Error creating work order: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Error creating work order: {str(e)}")
 
-@router.get("/work-orders/{work_order_id}")
+@router.get("/work-orders/{work_order_id}", dependencies=[Depends(get_current_user)])
 async def get_work_order(work_order_id: int):
     try:
         response = supabase.table("work_orders").select("*").eq("id", work_order_id).execute()
@@ -441,7 +441,7 @@ async def delete_work_order(work_order_id: int, current_user: dict = Depends(req
         logger.error(f"Error deleting work order: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Error deleting work order: {str(e)}")
 
-@router.get("/work-orders/allocated/{allocated_to}")
+@router.get("/work-orders/allocated/{allocated_to}", dependencies=[Depends(get_current_user)])
 async def get_work_orders_by_allocated(allocated_to: str):
     try:
         response = supabase.table("work_orders").select("*").eq("allocated_to", allocated_to).order("created_at", desc=True).execute()
@@ -536,7 +536,7 @@ async def get_work_order_stats():
         raise HTTPException(status_code=500, detail=f"Error fetching work order stats: {str(e)}")
 
 # ==================== PPE ENDPOINTS (if you want them consolidated here) ====================
-@router.get("/ppe")
+@router.get("/ppe", dependencies=[Depends(get_current_user)])
 async def get_ppe_records(
     status: Optional[str] = None,
     ppe_type: Optional[str] = None,
@@ -596,7 +596,7 @@ async def create_ppe_record(record: PPEIssueCreate, current_user: dict = Depends
         raise HTTPException(status_code=500, detail=f"Error creating PPE record: {str(e)}")
 
 # ==================== MAINTENANCE DASHBOARD STATS ====================
-@router.get("/dashboard/stats")
+@router.get("/dashboard/stats", dependencies=[Depends(get_current_user)])
 async def get_maintenance_dashboard_stats():
     """Combined stats for maintenance dashboard"""
     try:

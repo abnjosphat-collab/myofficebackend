@@ -152,8 +152,8 @@ def _require_exists(assignment_id: int) -> None:
 
 # ─── GET all ──────────────────────────────────────────────────────────────────
 
-@router.get("",  response_model=List[ShiftRosterResponse])
-@router.get("/", response_model=List[ShiftRosterResponse])
+@router.get("",  response_model=List[ShiftRosterResponse], dependencies=[Depends(get_current_user)])
+@router.get("/", response_model=List[ShiftRosterResponse], dependencies=[Depends(get_current_user)])
 async def list_assignments(active_only: bool = False):
     try:
         q = supabase.table(TABLE).select("*")
@@ -167,7 +167,7 @@ async def list_assignments(active_only: bool = False):
 
 # ─── GET one ──────────────────────────────────────────────────────────────────
 
-@router.get("/{assignment_id}", response_model=ShiftRosterResponse)
+@router.get("/{assignment_id}", response_model=ShiftRosterResponse, dependencies=[Depends(get_current_user)])
 async def get_assignment(assignment_id: int):
     try:
         rows = _rows(supabase.table(TABLE).select("*").eq("id", assignment_id).execute())

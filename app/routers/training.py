@@ -107,7 +107,7 @@ def find_record(record_id: str) -> Optional[CertificateRecord]:
 
 # --- API Endpoints ---
 
-@router.get("/", response_model=List[CertificateRecord])
+@router.get("/", response_model=List[CertificateRecord], dependencies=[Depends(get_current_user)])
 async def get_all_certifications():
     """Retrieves all certification records."""
     # Ensure statuses are calculated before sending
@@ -155,7 +155,7 @@ async def create_new_certification(
     
     return new_record
 
-@router.get("/{record_id}", response_model=CertificateRecord)
+@router.get("/{record_id}", response_model=CertificateRecord, dependencies=[Depends(get_current_user)])
 async def get_certification(record_id: str):
     """Get a specific certification record by ID."""
     record = find_record(record_id)
@@ -223,7 +223,7 @@ async def delete_certification(record_id: str, current_user: dict = Depends(requ
 
 # --- Compliance Reporting Features ---
 
-@router.get("/reports/compliance_rate")
+@router.get("/reports/compliance_rate", dependencies=[Depends(get_current_user)])
 async def get_compliance_rate():
     """Calculates and returns the overall compliance percentage."""
     total = len(CERTIFICATIONS_DB)
@@ -241,7 +241,7 @@ async def get_compliance_rate():
         "non_compliant": expired_count
     }
 
-@router.get("/reports/due_refreshers")
+@router.get("/reports/due_refreshers", dependencies=[Depends(get_current_user)])
 async def get_due_refreshers():
     """Returns a list of required refresher courses and the count of employees needing them."""
     refresher_counts: Dict[str, int] = {}
@@ -257,7 +257,7 @@ async def get_due_refreshers():
     # Return the top 3 most-needed refreshers
     return sorted(result, key=lambda x: x['employees_due'], reverse=True)[:3]
 
-@router.get("/employee/{employee_id}", response_model=List[CertificateRecord])
+@router.get("/employee/{employee_id}", response_model=List[CertificateRecord], dependencies=[Depends(get_current_user)])
 async def get_employee_certifications(employee_id: str):
     """Get all certifications for a specific employee."""
     employee_certs = [rec for rec in CERTIFICATIONS_DB if rec.employee_id == employee_id]
@@ -268,7 +268,7 @@ async def get_employee_certifications(employee_id: str):
     
     return employee_certs
 
-@router.get("/alerts/expiring")
+@router.get("/alerts/expiring", dependencies=[Depends(get_current_user)])
 async def get_expiring_certifications(days: int = 90):
     """Get certifications expiring within the specified number of days."""
     today = date.today()
@@ -290,7 +290,7 @@ async def get_expiring_certifications(days: int = 90):
         "certifications": expiring_certs
     }
 
-@router.get("/stats/summary")
+@router.get("/stats/summary", dependencies=[Depends(get_current_user)])
 async def get_training_stats():
     """Get training and certification statistics."""
     total_certifications = len(CERTIFICATIONS_DB)

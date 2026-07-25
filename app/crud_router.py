@@ -17,6 +17,7 @@ Behaviour is a faithful union of the hand-written routers it replaces:
 - **GET ""** and **GET "/"** — `select *`, optional `search` (ILIKE across `search_columns`),
   optional equality `filters` ({query_param: column}), `order(order_by, desc=order_desc)`,
   optional `default_limit` (also reads `?limit=`). Returns the row list. 500 on error.
+  Requires a signed-in user (this business data isn't public).
 - **POST ""** / **POST "/"** — insert `body.dict(exclude_none=True)`; 500 if the insert
   returns nothing; returns the created row. Requires a signed-in user.
 - **PATCH "/{item_id}"** — update `body.dict(exclude_unset=True)` (explicit nulls clear a
@@ -159,7 +160,10 @@ class CrudRouter:
 
         # Register both "" and "/" to match the hand-written routers, which decorated both.
         for path in ("", "/"):
-            self.router.add_api_route(path, list_items, methods=["GET"])
+            self.router.add_api_route(
+                path, list_items, methods=["GET"],
+                dependencies=[Depends(get_current_user)],
+            )
             self.router.add_api_route(
                 path, create_item, methods=["POST"],
                 dependencies=[Depends(get_current_user)],

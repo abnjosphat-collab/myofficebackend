@@ -1,8 +1,9 @@
 from typing import Optional, List, Any
-from fastapi import HTTPException
+from fastapi import HTTPException, Depends
 from pydantic import BaseModel
 from app.crud_router import CrudRouter
 from app.supabase_client import supabase
+from app.auth import get_current_user
 
 
 class HandoverCreate(BaseModel):
@@ -44,7 +45,7 @@ router = CrudRouter(
 ).router
 
 
-@router.get("/{h_id}")
+@router.get("/{h_id}", dependencies=[Depends(get_current_user)])
 async def get_handover(h_id: int):
     r = supabase.table("shift_handovers").select("*").eq("id", h_id).execute()
     if not r.data:

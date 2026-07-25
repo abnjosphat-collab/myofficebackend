@@ -57,7 +57,7 @@ def _clean(row: dict) -> dict:
     return row
 
 
-@router.get("")
+@router.get("", dependencies=[Depends(get_current_user)])
 async def get_drivers(
     search: Optional[str] = Query(None),
     department: Optional[str] = Query(None),

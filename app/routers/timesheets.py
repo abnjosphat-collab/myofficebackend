@@ -201,7 +201,7 @@ async def delete_timesheet_entry(entry_id: int, current_user: dict = Depends(req
         raise HTTPException(status_code=500, detail=str(e))
 
 # Statistics endpoint
-@router.get("/stats/summary")
+@router.get("/stats/summary")  # deliberately open — aggregate counts, not individual records
 async def get_timesheet_stats(
     start_date: Optional[date] = Query(None),
     end_date: Optional[date] = Query(None)

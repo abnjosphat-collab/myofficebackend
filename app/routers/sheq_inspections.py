@@ -120,8 +120,8 @@ def map_db_finding_to_camel(db_finding: dict) -> dict:
 # =============== API ENDPOINTS ===============
 
 # GET all inspections
-@router.get("")
-@router.get("/")
+@router.get("", dependencies=[Depends(get_current_user)])
+@router.get("/", dependencies=[Depends(get_current_user)])
 async def get_inspections(
     search: Optional[str] = Query(None, description="Search term"),
     section: Optional[str] = Query(None, description="Filter by section"),
@@ -193,7 +193,7 @@ async def get_inspections(
         raise HTTPException(status_code=500, detail=f"Error fetching inspections: {str(e)}")
 
 # GET stats overview
-@router.get("/stats/overview")
+@router.get("/stats/overview", dependencies=[Depends(get_current_user)])
 async def get_inspection_stats():
     try:
         logger.info("Fetching inspection stats...")
@@ -266,7 +266,7 @@ async def get_inspection_stats():
         raise HTTPException(status_code=500, detail=f"Error fetching stats: {str(e)}")
 
 # GET single inspection
-@router.get("/{inspection_id}")
+@router.get("/{inspection_id}", dependencies=[Depends(get_current_user)])
 async def get_inspection(inspection_id: str):
     try:
         logger.info(f"Fetching inspection {inspection_id}")
@@ -531,7 +531,7 @@ async def delete_inspection(inspection_id: str, current_user: dict = Depends(req
         raise HTTPException(status_code=500, detail=f"Error deleting inspection: {str(e)}")
 
 # GET findings for an inspection
-@router.get("/{inspection_id}/findings")
+@router.get("/{inspection_id}/findings", dependencies=[Depends(get_current_user)])
 async def get_findings(inspection_id: str):
     try:
         logger.info(f"Fetching findings for inspection {inspection_id}")

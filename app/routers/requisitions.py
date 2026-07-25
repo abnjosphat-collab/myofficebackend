@@ -130,8 +130,8 @@ async def create_requisition(requisition: RequisitionCreate, request: Request = 
         raise HTTPException(status_code=500, detail=str(e))
 
 # ============= GET ALL (handles both / and no trailing slash) =============
-@router.get("")
-@router.get("/")
+@router.get("", dependencies=[Depends(get_current_user)])
+@router.get("/", dependencies=[Depends(get_current_user)])
 async def get_requisitions(
     request: Request = None,
     status: Optional[str] = None,
@@ -170,7 +170,7 @@ async def get_requisitions(
         raise HTTPException(status_code=500, detail=str(e))
 
 # ============= GET SINGLE =============
-@router.get("/{requisition_id}")
+@router.get("/{requisition_id}", dependencies=[Depends(get_current_user)])
 async def get_requisition(requisition_id: int):
     try:
         response = supabase.table("requisitions").select("*, requisition_items(*)").eq("id", requisition_id).execute()
@@ -265,7 +265,7 @@ async def delete_requisition(requisition_id: int, current_user: dict = Depends(r
         raise HTTPException(status_code=500, detail=str(e))
 
 # ============= DAILY TOTAL =============
-@router.get("/daily-total/{date}")
+@router.get("/daily-total/{date}", dependencies=[Depends(get_current_user)])
 async def get_daily_total(date: date):
     try:
         reqs = supabase.table("requisitions").select("id").eq("date", date.isoformat()).execute()
@@ -279,7 +279,7 @@ async def get_daily_total(date: date):
         raise HTTPException(status_code=500, detail=str(e))
 
 # ============= STATISTICS =============
-@router.get("/stats/summary")
+@router.get("/stats/summary", dependencies=[Depends(get_current_user)])
 async def get_stats():
     try:
         reqs = supabase.table("requisitions").select("id, status, section").execute()

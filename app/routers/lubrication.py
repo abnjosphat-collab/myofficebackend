@@ -59,8 +59,8 @@ class LubeRecordCreate(BaseModel):
     technician: Optional[str] = None
     notes: Optional[str] = None
 
-@router.get("")
-@router.get("/")
+@router.get("", dependencies=[Depends(get_current_user)])
+@router.get("/", dependencies=[Depends(get_current_user)])
 async def get_schedules(status: Optional[str] = None, section: Optional[str] = None):
     try:
         q = supabase.table("lube_schedules").select("*").order("next_due_date")
@@ -108,7 +108,7 @@ async def delete_schedule(s_id: int, current_user: dict = Depends(require_role('
 
 # ─── Lube records (history) ───────────────────────────────────────────────────
 
-@router.get("/records")
+@router.get("/records", dependencies=[Depends(get_current_user)])
 async def get_lube_records(schedule_id: Optional[int] = None):
     q = supabase.table("lube_records").select("*").order("done_date", desc=True)
     if schedule_id:

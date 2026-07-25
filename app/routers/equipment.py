@@ -129,7 +129,7 @@ async def get_equipment():
         print(f"Error fetching equipment: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Error fetching equipment: {str(e)}")
 
-@router.get("/{equipment_id}")
+@router.get("/{equipment_id}", dependencies=[Depends(get_current_user)])
 async def get_equipment_item(equipment_id: int):
     """Retrieve a specific equipment item by ID."""
     try:

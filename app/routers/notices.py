@@ -31,7 +31,7 @@ class NoticeUpdate(NoticeCreate):
     pass
 
 # GET all notices
-@router.get("")
+@router.get("", dependencies=[Depends(get_current_user)])
 async def get_notices(
     category: Optional[str] = Query(None),
     priority: Optional[str] = Query(None),
@@ -84,7 +84,7 @@ async def create_notice(notice: NoticeCreate, current_user: dict = Depends(get_c
         raise HTTPException(status_code=500, detail=str(e))
 
 # GET single notice
-@router.get("/{notice_id}")
+@router.get("/{notice_id}", dependencies=[Depends(get_current_user)])
 async def get_notice(notice_id: str):
     try:
         response = supabase.table("notices").select("*").eq("id", notice_id).execute()
@@ -145,7 +145,7 @@ async def delete_notice(notice_id: str, current_user: dict = Depends(require_rol
         raise HTTPException(status_code=500, detail=str(e))
 
 # GET statistics
-@router.get("/stats/summary")
+@router.get("/stats/summary", dependencies=[Depends(get_current_user)])
 async def get_stats():
     try:
         # Get counts

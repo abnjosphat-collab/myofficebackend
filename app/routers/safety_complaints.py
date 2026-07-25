@@ -103,8 +103,8 @@ def map_row(row: dict) -> dict:
 
 # =============== ENDPOINTS ===============
 
-@router.get("")
-@router.get("/")
+@router.get("", dependencies=[Depends(get_current_user)])
+@router.get("/", dependencies=[Depends(get_current_user)])
 async def list_complaints(
     search: Optional[str] = Query(None),
     status: Optional[str] = Query(None),
@@ -150,7 +150,7 @@ async def list_complaints(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.get("/{complaint_id}")
+@router.get("/{complaint_id}", dependencies=[Depends(get_current_user)])
 async def get_complaint(complaint_id: str):
     try:
         result = supabase.table("safety_complaints").select("*").eq("id", complaint_id).single().execute()

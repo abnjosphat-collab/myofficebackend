@@ -104,7 +104,7 @@ async def get_availability_stats():
         raise HTTPException(status_code=500, detail=f"Error: {e}")
 
 
-@router.get("/availabilities/history/{equipment_id}")
+@router.get("/availabilities/history/{equipment_id}", dependencies=[Depends(get_current_user)])
 async def get_availability_history(equipment_id: int, days: int = 30):
     """Availability history for one piece of equipment."""
     try:
@@ -123,7 +123,7 @@ async def get_availability_history(equipment_id: int, days: int = 30):
 
 # ─── CRUD for availability records ────────────────────────────────────────────
 
-@router.get("/availability-records")
+@router.get("/availability-records", dependencies=[Depends(get_current_user)])
 async def list_availability_records(
     equipment_id: Optional[int] = None,
     date_from:    Optional[str] = None,
@@ -150,7 +150,7 @@ async def list_availability_records(
         raise HTTPException(500, str(e))
 
 
-@router.get("/availability-records/from-breakdowns")
+@router.get("/availability-records/from-breakdowns", dependencies=[Depends(get_current_user)])
 async def availability_from_breakdowns(
     equipment_id: Optional[int] = None,
     date_from:    Optional[str] = None,

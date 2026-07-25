@@ -259,8 +259,8 @@ def map_db_action_to_camel(db_item: dict) -> dict:
 # =============== API ENDPOINTS ===============
 
 # GET all PTO reports
-@router.get("")
-@router.get("/")
+@router.get("", dependencies=[Depends(get_current_user)])
+@router.get("/", dependencies=[Depends(get_current_user)])
 async def get_pto_reports(
     search: Optional[str] = Query(None, description="Search term"),
     section: Optional[str] = Query(None, description="Filter by section"),
@@ -334,7 +334,7 @@ async def get_pto_reports(
         raise HTTPException(status_code=500, detail=f"Error fetching reports: {str(e)}")
 
 # GET unique observers for auto-complete
-@router.get("/suggestions/observers")
+@router.get("/suggestions/observers", dependencies=[Depends(get_current_user)])
 async def get_observer_suggestions(search: Optional[str] = Query(None)):
     try:
         query = supabase.table("pto_reports")\
@@ -360,7 +360,7 @@ async def get_observer_suggestions(search: Optional[str] = Query(None)):
         return []
 
 # GET stats overview
-@router.get("/stats/overview")
+@router.get("/stats/overview", dependencies=[Depends(get_current_user)])
 async def get_pto_stats():
     try:
         logger.info("Fetching PTO stats...")
@@ -468,7 +468,7 @@ async def get_pto_stats():
         raise HTTPException(status_code=500, detail=f"Error fetching stats: {str(e)}")
 
 # GET single report
-@router.get("/{report_id}")
+@router.get("/{report_id}", dependencies=[Depends(get_current_user)])
 async def get_pto_report(report_id: str):
     try:
         logger.info(f"Fetching PTO report {report_id}")
