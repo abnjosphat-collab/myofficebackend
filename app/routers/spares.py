@@ -1,7 +1,8 @@
 """
 Spares Management Router - PostgreSQL/Supabase Version
 """
-from fastapi import APIRouter, HTTPException, Query, File, UploadFile, Depends
+from fastapi import APIRouter, HTTPException, Query, File, UploadFile, Depends, Request
+from app.rate_limit import limiter
 from pydantic import BaseModel, Field, validator
 from typing import Optional, List, Dict, Any
 from datetime import datetime, date
@@ -516,7 +517,8 @@ async def get_spare(spare_id: int):
 
 # POST bulk create spares
 @router.post("/bulk", status_code=201)
-async def bulk_create_spares(payload: BulkSpareCreate, current_user: dict = Depends(get_current_user)):
+@limiter.limit("10/minute")
+async def bulk_create_spares(request: Request, payload: BulkSpareCreate, current_user: dict = Depends(get_current_user)):
     """
     Bulk-insert spare parts efficiently:
     - One batched IN() query to find already-existing stock codes (no N+1)

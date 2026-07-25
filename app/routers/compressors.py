@@ -10,8 +10,9 @@ from enum import Enum
 from collections import defaultdict
 
 from dotenv import load_dotenv
-from fastapi import APIRouter, HTTPException, Depends, Query, Body, BackgroundTasks, Form, UploadFile, File
+from fastapi import APIRouter, HTTPException, Depends, Query, Body, BackgroundTasks, Form, UploadFile, File, Request
 from app.uploads import read_and_validate_upload
+from app.rate_limit import limiter
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 import asyncio
@@ -1298,7 +1299,9 @@ async def export_data(
         raise HTTPException(status_code=500, detail=f"Error exporting data: {str(e)}")
 
 @router.post("/import")
+@limiter.limit("10/minute")
 async def import_data(
+    request: Request,
     file: UploadFile = File(...),
     supabase_client = Depends(get_supabase)
 , current_user: dict = Depends(get_current_user)):

@@ -1,11 +1,12 @@
 # backend/app/routers/employees.py
-from fastapi import APIRouter, HTTPException, Query, Depends
+from fastapi import APIRouter, HTTPException, Query, Depends, Request
 from pydantic import BaseModel, Field, validator
 from typing import List, Optional
 from datetime import date
 from app.supabase_client import supabase
 from app.auth import get_current_user, require_role
 from app.cache import cached, invalidate_namespace
+from app.rate_limit import limiter
 
 router = APIRouter()
 
@@ -273,7 +274,8 @@ class BulkDisciplineRequest(BaseModel):
 
 
 @router.post("/bulk-discipline")
-async def bulk_set_discipline(payload: BulkDisciplineRequest, current_user: dict = Depends(get_current_user)):
+@limiter.limit("10/minute")
+async def bulk_set_discipline(request: Request, payload: BulkDisciplineRequest, current_user: dict = Depends(get_current_user)):
     """Set the trade discipline on many employees in one call (bulk mechanical/electrical)."""
     if payload.discipline not in (None, '', 'mechanical', 'electrical'):
         raise HTTPException(400, detail="discipline must be 'mechanical', 'electrical', or empty")
