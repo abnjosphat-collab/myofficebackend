@@ -201,23 +201,13 @@ async def update_requisition(requisition_id: int, update: RequisitionUpdate, cur
             if conflict.data:
                 raise HTTPException(status_code=400, detail=f"Requisition number '{update.requisition_number}' already exists")
 
-        update_data = {}
-        if update.date is not None:
-            update_data['date'] = update.date.isoformat()
-        if update.requester is not None:
-            update_data['requester'] = update.requester
-        if update.section is not None:
-            update_data['section'] = update.section
-        if update.required_for is not None:
-            update_data['required_for'] = update.required_for
-        if update.priority is not None:
-            update_data['priority'] = update.priority
-        if update.status is not None:
-            update_data['status'] = update.status
-        if update.requisition_number is not None:
-            update_data['requisition_number'] = update.requisition_number
-        if update.notes is not None:
-            update_data['notes'] = update.notes
+        # exclude_unset, not a None-filter: an explicitly-sent null must clear the
+        # field (e.g. required_for, notes), not be silently dropped like the old
+        # per-field `is not None` checks here did. See work_orders (backend edec24a).
+        update_data = update.dict(exclude_unset=True)
+        update_data.pop('items', None)  # items is a separate table, handled below
+        if update_data.get('date') is not None:
+            update_data['date'] = update_data['date'].isoformat()
 
         if update_data:
             update_data['updated_at'] = datetime.utcnow().isoformat()

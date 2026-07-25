@@ -237,11 +237,11 @@ async def update_inventory_item(item_id: str, item_update: InventoryItemUpdate, 
     
     existing_item = inventory_db[item_id]
     update_data = item_update.dict(exclude_unset=True)
-    
-    # Update fields
+
+    # Update fields. exclude_unset already limited this to explicitly-sent fields —
+    # re-filtering `is not None` here would silently drop an explicit null-clear.
     for field, value in update_data.items():
-        if value is not None:
-            existing_item[field] = value
+        existing_item[field] = value
     
     # Recalculate status if stock changed
     if 'currentStock' in update_data:
