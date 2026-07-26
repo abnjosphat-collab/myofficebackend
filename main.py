@@ -204,8 +204,6 @@ def register_router(module_name: str, prefix: str | None = None, tags: list[str]
 
 loaded_routers: dict = {}
 
-# Registered before the mock availability endpoints below — order matters here (see
-# that section's comment) so it's preserved exactly as it was.
 for _name, _prefix, _tags in [
     ("standby", None, None),
     ("sheq_inspections", None, None),
@@ -222,132 +220,6 @@ for _name, _prefix, _tags in [
 ]:
     register_router(_name, _prefix, _tags)
 
-# ===== DIRECT AVAILABILITY ENDPOINTS (unchanged) =====
-# NOTE (found while consolidating the registration above, not fixed — changes live
-# route shapes and needs its own decision): these mock endpoints are registered
-# BEFORE the real `availability` router below, so for any path they share exactly,
-# these mock ones win and the real router's equivalent is unreachable. Also, in the
-# second registration loop further down, "documents" (and compressors/inventory/
-# training) get registered a second time with an /api/<name> prefix ON TOP OF a
-# router that already defines that same prefix internally, producing doubled paths
-# like /api/documents/api/documents/{id}. Both predate this cleanup and are
-# preserved as-is here; worth a follow-up decision, not a silent fix.
-class AvailabilityStats(BaseModel):
-    totalEquipment: int = 0
-    operational: int = 0
-    inMaintenance: int = 0
-    inBreakdown: int = 0
-    overallAvailability: float = 0.0
-    avgUptime: float = 0.0
-    avgDowntime: float = 0.0
-    totalOperationalHours: float = 0.0
-    totalBreakdownHours: float = 0.0
-    monthAvailability: float = 0.0
-    weekAvailability: float = 0.0
-
-mock_equipment_db = [
-    {
-        "id": "1",
-        "name": "CNC Machine 1",
-        "category": "Machinery",
-        "department": "Production",
-        "operationalHours": 450.5,
-        "breakdownHours": 12.3,
-        "availability": 97.27,
-        "status": "operational",
-        "lastMaintenance": "2024-01-15",
-        "nextMaintenance": "2024-02-15",
-        "uptime": 438.2,
-        "downtime": 12.3,
-        "mtbf": 120.5,
-        "mttr": 2.5
-    },
-    {
-        "id": "2",
-        "name": "Forklift A",
-        "category": "Vehicles",
-        "department": "Logistics",
-        "operationalHours": 320.0,
-        "breakdownHours": 8.5,
-        "availability": 97.34,
-        "status": "operational",
-        "lastMaintenance": "2024-01-10",
-        "nextMaintenance": "2024-02-10",
-        "uptime": 311.5,
-        "downtime": 8.5,
-        "mtbf": 85.3,
-        "mttr": 3.2
-    },
-    {
-        "id": "3",
-        "name": "3D Printer",
-        "category": "Electronics",
-        "department": "R&D",
-        "operationalHours": 280.0,
-        "breakdownHours": 24.0,
-        "availability": 91.43,
-        "status": "maintenance",
-        "lastMaintenance": "2024-01-20",
-        "nextMaintenance": "2024-03-20",
-        "uptime": 256.0,
-        "downtime": 24.0,
-        "mtbf": 65.7,
-        "mttr": 6.5
-    }
-]
-
-@app.get("/api/availabilities")
-async def get_availabilities():
-    logger.info("Fetching equipment availabilities...")
-    return mock_equipment_db
-
-@app.get("/api/availabilities/stats")
-async def get_availability_stats():
-    logger.info("Calculating availability statistics...")
-    total_equipment = len(mock_equipment_db)
-    operational = sum(1 for e in mock_equipment_db if e["status"] == "operational")
-    in_maintenance = sum(1 for e in mock_equipment_db if e["status"] == "maintenance")
-    in_breakdown = sum(1 for e in mock_equipment_db if e["status"] == "breakdown")
-    
-    total_operational_hours = sum(e["operationalHours"] for e in mock_equipment_db)
-    total_breakdown_hours = sum(e["breakdownHours"] for e in mock_equipment_db)
-    
-    overall_availability = ((total_operational_hours - total_breakdown_hours) / total_operational_hours * 100) if total_operational_hours > 0 else 0
-    
-    avg_uptime = sum(e["uptime"] for e in mock_equipment_db) / total_equipment if total_equipment > 0 else 0
-    avg_downtime = sum(e["downtime"] for e in mock_equipment_db) / total_equipment if total_equipment > 0 else 0
-    
-    return AvailabilityStats(
-        totalEquipment=total_equipment,
-        operational=operational,
-        inMaintenance=in_maintenance,
-        inBreakdown=in_breakdown,
-        overallAvailability=round(overall_availability, 2),
-        avgUptime=round(avg_uptime, 2),
-        avgDowntime=round(avg_downtime, 2),
-        totalOperationalHours=round(total_operational_hours, 2),
-        totalBreakdownHours=round(total_breakdown_hours, 2),
-        monthAvailability=round(overall_availability * 0.95, 2),
-        weekAvailability=round(overall_availability * 0.98, 2)
-    )
-
-@app.get("/api/availabilities/{equipment_id}")
-async def get_equipment_availability(equipment_id: str):
-    for equipment in mock_equipment_db:
-        if equipment["id"] == equipment_id:
-            return equipment
-    raise HTTPException(status_code=404, detail="Equipment not found")
-
-@app.get("/api/availabilities/health/check")
-async def availability_health_check():
-    return {
-        "status": "healthy",
-        "service": "availability",
-        "equipment_count": len(mock_equipment_db),
-        "timestamp": datetime.utcnow().isoformat()
-    }
-
-# Registered after the mock availability endpoints above — same preserved ordering.
 # "notices" registers under the "noticeboard" dict key — that's what the health-check
 # and debug endpoints further down already look up.
 for _name, _prefix, _tags, _key in [
@@ -586,15 +458,11 @@ async def availability_health_check_endpoint():
     return {
         "status": "healthy",
         "service": "availability",
-        "direct_endpoints": [
+        "endpoints": [
             "GET /api/availabilities",
             "GET /api/availabilities/stats",
-            "GET /api/availabilities/{id}",
-            "GET /api/availabilities/health/check"
         ],
         "router_loaded": loaded_routers.get("availability") is not None,
-        "mock_data_count": len(mock_equipment_db),
-        "note": "Direct endpoints always available"
     }
 
 @app.get("/api/employees/health")
@@ -714,16 +582,12 @@ async def test_availability_connection():
     return {
         "status": "test",
         "message": "Availability connection test",
-        "direct_endpoints_active": True,
-        "equipment_count": len(mock_equipment_db),
+        "router_loaded": loaded_routers.get("availability") is not None,
         "backend": "FastAPI",
         "endpoints_available": [
             "GET /api/availabilities",
             "GET /api/availabilities/stats",
-            "GET /api/availabilities/{id}",
-            "GET /api/availabilities/health/check"
         ],
-        "note": "Availability system is working with mock data"
     }
 
 @app.get("/api/test-all-connections")
@@ -766,12 +630,10 @@ async def test_all_connections():
     
     # Test direct endpoints
     test_results["direct_availability"] = {
-        "available": True,
+        "available": loaded_routers.get("availability") is not None,
         "endpoints": [
             "GET /api/availabilities",
             "GET /api/availabilities/stats",
-            "GET /api/availabilities/{id}",
-            "GET /api/availabilities/health/check"
         ]
     }
     
@@ -911,7 +773,12 @@ async def startup_event():
     # Log standalone endpoints status
     logger.info("📊 Standalone Systems Status:")
     logger.info(f"   ✅ Availability endpoints available at /api/availabilities")
-    logger.info(f"   📋 Currently {len(mock_equipment_db)} equipment in availability system")
+    try:
+        eq_count_resp = supabase.table("equipment").select("*", count="exact", head=True).execute()
+        eq_count = eq_count_resp.count if hasattr(eq_count_resp, 'count') else 0
+        logger.info(f"   📋 Currently {eq_count} equipment in availability system")
+    except:
+        logger.info(f"   📋 Equipment count unavailable")
     logger.info(f"   ✅ Standby endpoints available at /api/standby")
     try:
         count_resp = supabase.table("standby_schedules").select("*", count="exact", head=True).execute()
