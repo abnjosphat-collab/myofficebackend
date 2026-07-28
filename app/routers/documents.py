@@ -44,6 +44,128 @@ async def list_documents(category_id: str, folder_id: Optional[str] = None):
         raise HTTPException(500, str(e))
 
 
+# ── Global search (across every category/folder) ─────────────────────────────
+
+@router.get("/search", dependencies=[Depends(get_current_user)])
+async def search_documents(q: str):
+    if not q or not q.strip():
+        return []
+    try:
+        r = (supabase.table("documents")
+             .select("*")
+             .or_(f"name.ilike.%{q}%,description.ilike.%{q}%,original_name.ilike.%{q}%")
+             .order("created_at", desc=True)
+             .limit(100)
+             .execute())
+        return r.data or []
+    except Exception as e:
+        logger.error("search_documents error: %s", e)
+        raise HTTPException(500, str(e))
+
+
+# ── Folders (custom subfolders within a category) ────────────────────────────
+
+class FolderCreate(BaseModel):
+    category_id: str
+    category_name: str = ""
+    name: str
+
+
+class FolderUpdate(BaseModel):
+    name: str
+
+
+@router.get("/folders", dependencies=[Depends(get_current_user)])
+async def list_folders(category_id: str):
+    try:
+        r = (supabase.table("document_folders")
+             .select("*")
+             .eq("category_id", category_id)
+             .order("name")
+             .execute())
+        return r.data or []
+    except Exception as e:
+        logger.error("list_folders error: %s", e)
+        raise HTTPException(500, str(e))
+
+
+@router.post("/folders")
+async def create_folder(body: FolderCreate, current_user: dict = Depends(get_current_user)):
+    name = body.name.strip()
+    if not name:
+        raise HTTPException(400, "Folder name is required")
+    try:
+        existing = (supabase.table("document_folders")
+                    .select("id")
+                    .eq("category_id", body.category_id)
+                    .eq("name", name)
+                    .maybe_single()
+                    .execute())
+        if existing.data:
+            raise HTTPException(409, "A folder with this name already exists")
+        r = supabase.table("document_folders").insert({
+            "category_id":   body.category_id,
+            "category_name": body.category_name,
+            "name":          name,
+        }).execute()
+        return r.data[0]
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("create_folder error: %s", e)
+        raise HTTPException(500, str(e))
+
+
+@router.put("/folders/{folder_id}")
+async def rename_folder(folder_id: str, body: FolderUpdate, current_user: dict = Depends(get_current_user)):
+    # Documents tag their folder by *name* (folder_id/folder_path are free-text
+    # fields, not a foreign key to this table — see upload_document above), so a
+    # rename has to cascade onto every document currently tagged with the old
+    # name or they'd silently vanish from the folder's file list.
+    name = body.name.strip()
+    if not name:
+        raise HTTPException(400, "Folder name is required")
+    try:
+        existing = (supabase.table("document_folders")
+                    .select("*")
+                    .eq("id", folder_id)
+                    .maybe_single()
+                    .execute())
+        if not existing.data:
+            raise HTTPException(404, "Folder not found")
+        old_name = existing.data["name"]
+        category_id = existing.data["category_id"]
+
+        r = (supabase.table("document_folders")
+             .update({"name": name})
+             .eq("id", folder_id)
+             .execute())
+
+        if old_name != name:
+            (supabase.table("documents")
+             .update({"folder_id": name, "folder_path": name})
+             .eq("category_id", category_id)
+             .eq("folder_id", old_name)
+             .execute())
+
+        return r.data[0]
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("rename_folder error: %s", e)
+        raise HTTPException(500, str(e))
+
+
+@router.delete("/folders/{folder_id}")
+async def delete_folder(folder_id: str, current_user: dict = Depends(require_role('manager'))):
+    try:
+        supabase.table("document_folders").delete().eq("id", folder_id).execute()
+        return {"ok": True}
+    except Exception as e:
+        logger.error("delete_folder error: %s", e)
+        raise HTTPException(500, str(e))
+
+
 # ── Upload ────────────────────────────────────────────────────────────────────
 
 @router.post("/upload")
