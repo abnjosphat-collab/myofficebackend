@@ -9,6 +9,7 @@ from datetime import datetime, date
 from app.supabase_client import supabase
 from app.auth import get_current_user, require_role
 from app.uploads import read_and_validate_upload, SPREADSHEET_EXTS
+from app.serialization import convert_dates_to_iso
 import logging
 import json
 import io
@@ -86,14 +87,6 @@ class BulkSpareCreate(BaseModel):
     upsert: bool = Field(False, description="Update existing records instead of skipping them")
 
 # Helper function to convert dates in records
-def convert_dates_to_iso(record):
-    """Convert date objects to ISO format strings for JSON serialization"""
-    if isinstance(record, dict):
-        for key, value in record.items():
-            if isinstance(value, (date, datetime)):
-                record[key] = value.isoformat()
-    return record
-
 # Columns confirmed to exist in the Supabase spares table.
 # Add more here once you run: ALTER TABLE spares ADD COLUMN IF NOT EXISTS ...
 _DB_COLUMNS = {

@@ -6,7 +6,9 @@ from datetime import date
 from app.supabase_client import supabase
 from app.auth import get_current_user, require_role
 from app.cache import cached, invalidate_namespace
+import logging
 
+logger = logging.getLogger(__name__)
 router = APIRouter()
 
 class Equipment(BaseModel):
@@ -88,7 +90,7 @@ def process_dates_from_db(data: dict) -> dict:
                 if isinstance(processed_data[field], str):
                     processed_data[field] = date.fromisoformat(processed_data[field])
             except (ValueError, TypeError) as e:
-                print(f"Error parsing {field}: {e}")
+                logger.error(f"Error parsing {field}: {e}")
                 processed_data[field] = None
     
     # Ensure tags is always a list
@@ -126,7 +128,7 @@ async def get_equipment():
         processed_equipment = [process_dates_from_db(item) for item in data]
         return processed_equipment
     except Exception as e:
-        print(f"Error fetching equipment: {str(e)}")
+        logger.error(f"Error fetching equipment: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Error fetching equipment: {str(e)}")
 
 @router.get("/{equipment_id}", dependencies=[Depends(get_current_user)])
@@ -144,7 +146,7 @@ async def get_equipment_item(equipment_id: int):
     except HTTPException:
         raise
     except Exception as e:
-        print(f"Error fetching equipment {equipment_id}: {str(e)}")
+        logger.error(f"Error fetching equipment {equipment_id}: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Error fetching equipment: {str(e)}")
 
 @router.post("")
@@ -160,7 +162,7 @@ async def create_equipment(equipment: Equipment, current_user: dict = Depends(ge
         
         data_to_insert = process_dates_for_db(data_to_insert)
         
-        print(f"Inserting equipment data: {data_to_insert}")  # Debug log
+        logger.debug(f"Inserting equipment data: {data_to_insert}")
         
         result = supabase.table("equipment").insert(data_to_insert).execute()
         created_data = get_supabase_data(result)
@@ -175,7 +177,7 @@ async def create_equipment(equipment: Equipment, current_user: dict = Depends(ge
     except HTTPException:
         raise
     except Exception as e:
-        print(f"Error creating equipment: {str(e)}")
+        logger.error(f"Error creating equipment: {str(e)}")
         # Return more detailed error info
         error_detail = str(e)
         if hasattr(e, 'message'):
@@ -215,7 +217,7 @@ async def update_equipment(equipment_id: int, updated: Equipment, current_user: 
     except HTTPException:
         raise
     except Exception as e:
-        print(f"Error updating equipment {equipment_id}: {str(e)}")
+        logger.error(f"Error updating equipment {equipment_id}: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Error updating equipment: {str(e)}")
 
 @router.delete("/{equipment_id}")
@@ -245,7 +247,7 @@ async def delete_equipment(equipment_id: int, current_user: dict = Depends(requi
     except HTTPException:
         raise
     except Exception as e:
-        print(f"Error deleting equipment {equipment_id}: {str(e)}")
+        logger.error(f"Error deleting equipment {equipment_id}: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Error deleting equipment: {str(e)}")
 
 @router.get("/health/status", tags=["Health"])

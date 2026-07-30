@@ -4,6 +4,7 @@ from typing import Optional
 from datetime import datetime, date
 from app.supabase_client import supabase
 from app.auth import get_current_user, require_role
+from app.serialization import convert_dates_to_iso
 import logging
 import json
 
@@ -65,14 +66,6 @@ class PPEIssueUpdate(BaseModel):
         }
 
 # Helper function to convert dates in records
-def convert_dates_to_iso(record):
-    """Convert date objects to ISO format strings for JSON serialization"""
-    if isinstance(record, dict):
-        for key, value in record.items():
-            if isinstance(value, (date, datetime)):
-                record[key] = value.isoformat()
-    return record
-
 # PPE Records Endpoints
 @router.get("", dependencies=[Depends(get_current_user)])
 async def get_ppe_records(

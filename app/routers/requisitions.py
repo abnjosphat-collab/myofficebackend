@@ -63,14 +63,7 @@ async def health_check():
 @router.post("")
 @router.post("/")
 async def create_requisition(requisition: RequisitionCreate, request: Request = None, current_user: dict = Depends(get_current_user)):
-    print("\n" + "="*60)
-    print("✅✅✅ POST /api/requisitions - HIT ✅✅✅")
-    print(f"📦 Requisition Number: {requisition.requisition_number}")
-    print(f"📦 Requester: {requisition.requester}")
-    print(f"📦 Items: {len(requisition.items)}")
-    if request:
-        print(f"📦 Request URL: {request.url}")
-    print("="*60 + "\n")
+    logger.info(f"Creating requisition {requisition.requisition_number} for {requisition.requester} ({len(requisition.items)} items)")
 
     try:
         # Check unique requisition_number
@@ -120,13 +113,13 @@ async def create_requisition(requisition: RequisitionCreate, request: Request = 
         all_reqs = supabase.table("requisitions").select("id").execute()
         new_requisition['line_number'] = len(all_reqs.data)
 
-        print(f"✅ Successfully created requisition {requisition_id}")
+        logger.info(f"Successfully created requisition {requisition_id}")
         return new_requisition
 
     except HTTPException:
         raise
     except Exception as e:
-        print(f"❌ Error: {e}")
+        logger.error(f"Error creating requisition: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 # ============= GET ALL (handles both / and no trailing slash) =============

@@ -6,6 +6,7 @@ from datetime import datetime, date
 from app.supabase_client import supabase
 from app.auth import get_current_user, require_role
 from app.cache import cached, cache_get, cache_set, build_key, invalidate_namespace
+from app.serialization import convert_dates_to_iso
 import logging
 import json
 import re
@@ -200,14 +201,6 @@ class DateTimeEncoder(json.JSONEncoder):
         if isinstance(obj, (date, datetime)):
             return obj.isoformat()
         return super().default(obj)
-
-def convert_dates_to_iso(record):
-    """Convert date objects to ISO format strings for JSON serialization"""
-    if isinstance(record, dict):
-        for key, value in record.items():
-            if isinstance(value, (date, datetime)):
-                record[key] = value.isoformat()
-    return record
 
 # Columns that are date/time types in Supabase — empty strings must become NULL
 _DATE_FIELDS = {'date_raised', 'artisan_date', 'foreman_date', 'due_date'}

@@ -4,6 +4,7 @@
 import os
 import json
 import uuid
+import logging
 from datetime import datetime, timedelta
 from typing import List, Dict, Optional, Any, Tuple
 from enum import Enum
@@ -24,6 +25,8 @@ import csv
 
 # Load environment variables
 load_dotenv()
+
+logger = logging.getLogger(__name__)
 
 # Database table names - MAKE SURE THESE MATCH YOUR SUPABASE TABLES
 COMPRESSORS_TABLE = "compressors"
@@ -264,7 +267,7 @@ async def recalculate_subsequent_readings(compressor_id: str, from_date: str, su
                 .execute()
             
     except Exception as e:
-        print(f"Error recalculating subsequent readings: {str(e)}")
+        logger.error(f"Error recalculating subsequent readings: {str(e)}")
 
 # API Routes
 
@@ -316,7 +319,7 @@ async def get_compressors(
         
         return compressors
     except Exception as e:
-        print(f"Error fetching compressors: {str(e)}")
+        logger.error(f"Error fetching compressors: {str(e)}")
         # Return empty array instead of throwing error for frontend
         return []
 
@@ -379,7 +382,7 @@ async def create_compressor(
                 "message": "Compressor created successfully (mock)"
             }
     except Exception as e:
-        print(f"Error creating compressor: {str(e)}")
+        logger.error(f"Error creating compressor: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Error creating compressor: {str(e)}")
 
 @router.put("/compressors/{compressor_id}", response_model=Dict[str, Any])
@@ -659,7 +662,7 @@ async def create_daily_entry_cumulative(
     except HTTPException:
         raise
     except Exception as e:
-        print(f"Error creating daily entry: {str(e)}")
+        logger.error(f"Error creating daily entry: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Error creating daily entry: {str(e)}")
 
 @router.get("/readings/{compressor_id}", dependencies=[Depends(get_current_user)])
@@ -689,7 +692,7 @@ async def get_compressor_readings(
             "count": len(result.data) if result.data else 0
         }
     except Exception as e:
-        print(f"Error fetching readings: {str(e)}")
+        logger.error(f"Error fetching readings: {str(e)}")
         return {"success": False, "data": [], "error": str(e)}
 
 @router.get("/readings/{compressor_id}/detailed", dependencies=[Depends(get_current_user)])
@@ -760,7 +763,7 @@ async def get_detailed_readings(
             "overall_efficiency": calculate_efficiency(total_running_hours, total_loaded_hours) if total_running_hours > 0 else 0
         }
     except Exception as e:
-        print(f"Error fetching detailed readings: {str(e)}")
+        logger.error(f"Error fetching detailed readings: {str(e)}")
         return {"success": False, "data": [], "error": str(e)}
 
 @router.get("/readings/date/{date}", dependencies=[Depends(get_current_user)])
@@ -786,7 +789,7 @@ async def get_readings_by_date(
     except HTTPException:
         raise
     except Exception as e:
-        print(f"Error fetching readings by date: {str(e)}")
+        logger.error(f"Error fetching readings by date: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Error fetching readings: {str(e)}")
 
 async def check_and_update_service_due(compressor_id: str, current_hours: float, supabase_client):
@@ -886,7 +889,7 @@ async def check_and_update_service_due(compressor_id: str, current_hours: float,
             supabase_client.table(ALERTS_TABLE).insert(alert_data).execute()
             
     except Exception as e:
-        print(f"Error checking service due: {str(e)}")
+        logger.error(f"Error checking service due: {str(e)}")
 
 # Statistics
 @router.get("/stats", dependencies=[Depends(get_current_user)])
@@ -947,7 +950,7 @@ async def get_stats(supabase_client = Depends(get_supabase)):
             "urgent_alerts": 0  # Placeholder
         }
     except Exception as e:
-        print(f"Error calculating statistics: {str(e)}")
+        logger.error(f"Error calculating statistics: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Error calculating statistics: {str(e)}")
 
 @router.get("/service-due", dependencies=[Depends(get_current_user)])
@@ -989,7 +992,7 @@ async def get_service_due(supabase_client = Depends(get_supabase)):
         
         return service_due_list
     except Exception as e:
-        print(f"Error checking service due: {str(e)}")
+        logger.error(f"Error checking service due: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Error checking service due: {str(e)}")
 
 # Analytics endpoints
@@ -1061,7 +1064,7 @@ async def get_performance_metrics(
         
         return metrics
     except Exception as e:
-        print(f"Error getting performance metrics: {str(e)}")
+        logger.error(f"Error getting performance metrics: {str(e)}")
         return []
 
 @router.get("/analytics/trends", dependencies=[Depends(get_current_user)])
@@ -1137,7 +1140,7 @@ async def get_trend_analysis(
         }
         
     except Exception as e:
-        print(f"Error getting trend analysis: {str(e)}")
+        logger.error(f"Error getting trend analysis: {str(e)}")
         return {
             "success": False,
             "data": [],
@@ -1210,7 +1213,7 @@ async def get_comparison_analytics(
         }
 
     except Exception as e:
-        print(f"Error getting comparison analytics: {str(e)}")
+        logger.error(f"Error getting comparison analytics: {str(e)}")
         return {
             "success": False,
             "data": [],
@@ -1254,7 +1257,7 @@ async def get_management_summary(supabase_client = Depends(get_supabase)):
             "message": "Management summary loaded successfully"
         }
     except Exception as e:
-        print(f"Error getting management summary: {str(e)}")
+        logger.error(f"Error getting management summary: {str(e)}")
         return {
             "success": False,
             "message": f"Error getting management summary: {str(e)}"
@@ -1295,7 +1298,7 @@ async def export_data(
         )
         
     except Exception as e:
-        print(f"Error exporting data: {str(e)}")
+        logger.error(f"Error exporting data: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Error exporting data: {str(e)}")
 
 @router.post("/import")
@@ -1356,7 +1359,7 @@ async def import_data(
     except HTTPException:
         raise
     except Exception as e:
-        print(f"Error importing data: {str(e)}")
+        logger.error(f"Error importing data: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Error importing data: {str(e)}")
 
 @router.post("/service-records")
@@ -1382,7 +1385,7 @@ async def create_service_record(
         }
         
     except Exception as e:
-        print(f"Error creating service record: {str(e)}")
+        logger.error(f"Error creating service record: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Error creating service record: {str(e)}")
 
 @router.get("/test")
@@ -1395,6 +1398,6 @@ async def on_startup():
     try:
         supabase_client = get_supabase()
         # No mock data - system starts clean
-        print("✅ Compressors system ready - starting with clean database")
+        logger.info("Compressors system ready - starting with clean database")
     except Exception as e:
-        print(f"Error during compressors startup: {e}")
+        logger.error(f"Error during compressors startup: {e}")

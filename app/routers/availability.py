@@ -86,6 +86,19 @@ async def get_availability_stats():
         total_bd      = sum(e.get("breakdown_hours", 0) or 0 for e in equipment)
         overall_av    = ((total_op - total_bd) / total_op * 100) if total_op > 0 else 0
 
+        # `operational_hours`/`breakdown_hours` on the equipment table are lifetime
+        # running totals, not time-series data, so there's no way to derive a real
+        # month-scoped figure from them either — "monthAvailability" is the same
+        # overall figure by design, not a separate calculation. Week availability
+        # CAN be computed for real, the same way availability_from_breakdowns()
+        # does it: 24 possible hours/day per machine, minus that machine's actual
+        # breakdown downtime in the window, from the breakdowns table.
+        week_start = (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d")
+        week_bd_resp = supabase.table("breakdowns").select("downtime_minutes").gte("breakdown_date", week_start).execute()
+        week_bd_hours = sum((b.get("downtime_minutes") or 0) for b in (week_bd_resp.data or [])) / 60.0
+        week_possible_hours = total * 24 * 7
+        week_availability = round(((week_possible_hours - week_bd_hours) / week_possible_hours) * 100, 2) if week_possible_hours > 0 else 0
+
         return {
             "totalEquipment":        total,
             "operational":           operational,
@@ -97,7 +110,7 @@ async def get_availability_stats():
             "totalOperationalHours": round(total_op, 2),
             "totalBreakdownHours":   round(total_bd, 2),
             "monthAvailability":     round(overall_av, 2),
-            "weekAvailability":      round(overall_av * 0.98, 2),
+            "weekAvailability":      week_availability,
         }
     except Exception as e:
         logger.error(f"Error calculating stats: {e}")

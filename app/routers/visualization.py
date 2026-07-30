@@ -19,9 +19,8 @@ import dash_bootstrap_components as dbc
 import polars as pl
 import pandas as pd
 import numpy as np
-from transformers import pipeline, AutoTokenizer, AutoModelForSequenceClassification
+from transformers import pipeline
 from sentence_transformers import SentenceTransformer
-import torch
 import matplotlib.pyplot as plt
 import seaborn as sns
 from typing import Dict, List, Optional, Any, Union, Tuple

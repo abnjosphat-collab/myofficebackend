@@ -17,6 +17,8 @@ logger = logging.getLogger(__name__)
 # Initialize router
 router = APIRouter(prefix="/api/breakdowns", tags=["breakdowns"])
 
+DAY_NAMES = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday']
+
 # Supabase configuration
 SUPABASE_URL = os.environ.get("SUPABASE_URL")
 SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
@@ -476,18 +478,23 @@ async def get_dashboard_overview():
         open_count = sum(1 for r in records if r.get('status') in ['logged', 'in_progress'])
         high_priority = sum(1 for r in records if r.get('priority') == 'high')
         critical_priority = sum(1 for r in records if r.get('priority') == 'critical')
-        
+
         # Get today's breakdowns
-        today = datetime.utcnow().strftime('%Y-%m-%d')
+        now = datetime.utcnow()
+        today = now.strftime('%Y-%m-%d')
         today_breakdowns = sum(1 for r in records if r.get('breakdown_date') == today)
-        
+
         # Calculate today's downtime
         today_downtime = sum(r.get('downtime_minutes', 0) for r in records if r.get('breakdown_date') == today)
-        
+
+        # This week's breakdowns (Monday through today, UTC)
+        week_start = (now - timedelta(days=now.weekday())).strftime('%Y-%m-%d')
+        week_breakdowns = sum(1 for r in records if r.get('breakdown_date', '') >= week_start)
+
         return {
             "metrics": {
                 "total_breakdowns": total,
-                "week_breakdowns": total,  # Simplified for now
+                "week_breakdowns": week_breakdowns,
                 "open_breakdowns": open_count,
                 "high_priority": high_priority,
                 "critical_priority": critical_priority,
@@ -636,24 +643,33 @@ async def get_breakdown_heatmap(
                 except:
                     day_of_week = 0
             
+            # Fields read by several sections below — extracted once up front so
+            # every section (including the hour/day heatmaps, which run first)
+            # sees them already defined, instead of relying on a later section
+            # to have assigned them first.
+            dept = record.get('department', 'Unknown')
+            loc = record.get('location', 'Unknown')
+            artisan_name = record.get('artisan_name', 'Unknown')
+            resp_time = record.get('response_time_minutes', 0)
+
             # Update heatmap
             if 0 <= hour < 24 and 0 <= day_of_week < 7:
                 hour_day_heatmap[hour][day_of_week] += 1
-            
+
             # Track hourly breakdowns
             hourly_breakdowns[hour] += 1
-            
+
             # Track daily breakdowns
             daily_breakdowns[day_of_week] += 1
-            
+
             # Track breakdown type
             btype = record.get('breakdown_type', 'Unknown')
             breakdown_type_counts[btype] += 1
-            
+
             # Track priority
             priority = record.get('priority', 'medium')
             priority_counts[priority] += 1
-            
+
             # Richer heatmaps: type x hour/day
             if 0 <= hour < 24:
                 breakdown_type_hour_heatmap[btype][hour] += 1
@@ -686,12 +702,10 @@ async def get_breakdown_heatmap(
             status_counts[status] += 1
             
             # Track department
-            dept = record.get('department', 'Unknown')
             department_counts[dept]['count'] += 1
             department_counts[dept]['downtime'] += record.get('downtime_minutes', 0)
-            
+
             # Track location
-            loc = record.get('location', 'Unknown')
             location_counts[loc] += 1
             
             # Track machine breakdowns
@@ -708,7 +722,6 @@ async def get_breakdown_heatmap(
             machine_breakdowns[machine_name]['count'] += 1
             machine_breakdowns[machine_name]['total_downtime'] += record.get('downtime_minutes', 0)
             machine_breakdowns[machine_name]['total_repair_time'] += record.get('repair_time_minutes', 0)
-            resp_time = record.get('response_time_minutes', 0)
             if resp_time > 0:
                 machine_breakdowns[machine_name]['response_times'].append(resp_time)
             
@@ -716,7 +729,6 @@ async def get_breakdown_heatmap(
             downtime_by_machine[machine_name].append(record.get('downtime_minutes', 0))
             
             # Track artisan breakdowns
-            artisan_name = record.get('artisan_name', 'Unknown')
             if artisan_name not in artisan_breakdowns:
                 artisan_breakdowns[artisan_name] = {
                     'count': 0,
@@ -891,7 +903,7 @@ async def get_breakdown_heatmap(
         type_day_heatmap_formatted = {}
         for btype, days_list in breakdown_type_day_heatmap.items():
             type_day_heatmap_formatted[btype] = [
-                {'day': day_names[d], 'count': days_list[d]}
+                {'day': DAY_NAMES[d], 'count': days_list[d]}
                 for d in range(7)
             ]
         
@@ -939,14 +951,12 @@ async def get_breakdown_heatmap(
                 for d in range(31)
             ]
         
-        day_names = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday']
-        
         return {
             "heatmap": {
                 "hour_day": hour_day_heatmap,
                 "labels": {
                     "hours": [f"{h:02d}:00" for h in range(24)],
-                    "days": day_names
+                    "days": DAY_NAMES
                 }
             },
             "hourly_distribution": [
@@ -954,7 +964,7 @@ async def get_breakdown_heatmap(
                 for h in range(24)
             ],
             "daily_distribution": [
-                {"day": day_names[d], "count": daily_breakdowns[d]}
+                {"day": DAY_NAMES[d], "count": daily_breakdowns[d]}
                 for d in range(7)
             ],
             "top_problem_machines": top_machines,
