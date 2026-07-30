@@ -5,6 +5,7 @@ from typing import Optional
 from datetime import datetime, date
 from app.supabase_client import supabase
 from app.auth import get_current_user, require_role
+from app.aggregation import count_by
 
 router = APIRouter()
 
@@ -154,31 +155,15 @@ async def get_stats():
         
         stats = {
             "total_notices": len(notices),
-            "status_breakdown": {},
-            "priority_breakdown": {},
-            "category_breakdown": {},
-            "pinned_count": 0,
+            "status_breakdown": count_by(notices, 'status', default='Draft'),
+            "priority_breakdown": count_by(notices, 'priority', default='Medium'),
+            "category_breakdown": count_by(notices, 'category', default='General'),
+            "pinned_count": sum(1 for n in notices if n.get('is_pinned')),
             "expired_count": 0,
             "expiring_soon_count": 0
         }
-        
+
         for notice in notices:
-            # Count statuses
-            status = notice.get('status', 'Draft')
-            stats["status_breakdown"][status] = stats["status_breakdown"].get(status, 0) + 1
-            
-            # Count priorities
-            priority = notice.get('priority', 'Medium')
-            stats["priority_breakdown"][priority] = stats["priority_breakdown"].get(priority, 0) + 1
-            
-            # Count categories
-            category = notice.get('category', 'General')
-            stats["category_breakdown"][category] = stats["category_breakdown"].get(category, 0) + 1
-            
-            # Count pinned
-            if notice.get('is_pinned'):
-                stats["pinned_count"] += 1
-            
             # Expiry calculations
             expires_at = notice.get('expires_at')
             if expires_at:

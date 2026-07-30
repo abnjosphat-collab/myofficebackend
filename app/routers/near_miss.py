@@ -5,6 +5,7 @@ from pydantic import BaseModel, Field
 from typing import Optional, List
 from app.supabase_client import supabase
 from app.auth import get_current_user, require_role
+from app.aggregation import count_by
 import logging
 from datetime import datetime
 import uuid
@@ -294,18 +295,14 @@ async def get_stats():
             "General": 0
         }
         
-        # Count by reporter
-        by_reporter = {}
-        
         for report in reports:
             section = report.get("section")
             if section in by_section:
                 by_section[section] += 1
-            
-            reporter = report.get("reportername")
-            if reporter:
-                by_reporter[reporter] = by_reporter.get(reporter, 0) + 1
-        
+
+        # Count by reporter
+        by_reporter = count_by((r.get("reportername") for r in reports if r.get("reportername")), lambda name: name)
+
         return {
             "total": total,
             "bySection": by_section,

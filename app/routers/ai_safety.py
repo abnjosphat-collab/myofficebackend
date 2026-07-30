@@ -2,6 +2,7 @@
 # SHEQ Safety Analysis — Polars-powered, no external AI API required
 from fastapi import APIRouter, HTTPException, Depends
 from app.auth import get_current_user, require_role
+from app.aggregation import count_by
 from pydantic import BaseModel
 from typing import Any, Optional
 from datetime import datetime, timezone, timedelta
@@ -34,11 +35,8 @@ class SafetyDataInput(BaseModel):
 
 def _top(records: list[dict], col: str, n: int = 5) -> list[dict]:
     """Return top-n values for a column, sorted by count desc. Pure Python fallback."""
-    counts: dict[str, int] = {}
-    for r in records:
-        v = str(r.get(col) or "").strip()
-        if v:
-            counts[v] = counts.get(v, 0) + 1
+    values = (str(r.get(col) or "").strip() for r in records)
+    counts = count_by((v for v in values if v), lambda v: v)
     return [{"value": k, "count": v} for k, v in sorted(counts.items(), key=lambda x: -x[1])[:n]]
 
 
@@ -167,26 +165,21 @@ def analyse(data: SafetyDataInput) -> dict:
     # Top locations across all modules
     all_records = nm + ws + vfl + pto + pach
     location_cols = ("location", "place", "area")
-    top_locations: dict[str, int] = {}
-    for r in all_records:
+
+    def _first_location(r: dict) -> str:
         for col in location_cols:
             v = str(r.get(col) or "").strip()
             if v and v.lower() not in {"", "n/a", "na", "unknown"}:
-                top_locations[v] = top_locations.get(v, 0) + 1
-                break
-    # Also count from findings
-    for f in findings:
-        v = str(f.get("_place") or "").strip()
-        if v:
-            top_locations[v] = top_locations.get(v, 0) + 1
+                return v
+        return ""
+
+    location_values = [_first_location(r) for r in all_records] + [str(f.get("_place") or "").strip() for f in findings]
+    top_locations = count_by((v for v in location_values if v), lambda v: v)
     sorted_locations = sorted(top_locations.items(), key=lambda x: -x[1])[:6]
 
     # Top departments
-    dept_counts: dict[str, int] = {}
-    for r in all_records + findings:
-        v = str(r.get("department") or r.get("dept") or r.get("_dept") or "").strip()
-        if v and v.lower() not in {"", "n/a"}:
-            dept_counts[v] = dept_counts.get(v, 0) + 1
+    dept_values = (str(r.get("department") or r.get("dept") or r.get("_dept") or "").strip() for r in all_records + findings)
+    dept_counts = count_by((v for v in dept_values if v and v.lower() not in {"", "n/a"}), lambda v: v)
     sorted_depts = sorted(dept_counts.items(), key=lambda x: -x[1])[:5]
 
     # Top NM locations

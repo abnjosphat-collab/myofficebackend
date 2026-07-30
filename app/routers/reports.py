@@ -1,6 +1,7 @@
 # app/routers/reports.py
 from fastapi import APIRouter, HTTPException, Query, Depends
 from app.auth import get_current_user, require_role
+from app.aggregation import count_by
 from pydantic import BaseModel
 from typing import Optional, List, Dict, Any
 from datetime import datetime, timedelta
@@ -446,16 +447,11 @@ async def get_reports_stats():
         
         stats = {
             'totalReports': len(reports),
-            'reportsByType': {},
-            'reportsByStatus': {},
+            'reportsByType': count_by(reports, 'type'),
+            'reportsByStatus': count_by(reports, 'status'),
             'recentActivity': len([r for r in reports if datetime.fromisoformat(r['generatedAt'].replace('Z', '')) > datetime.utcnow() - timedelta(days=7)])
         }
-        
-        # Count by type
-        for report in reports:
-            stats['reportsByType'][report['type']] = stats['reportsByType'].get(report['type'], 0) + 1
-            stats['reportsByStatus'][report['status']] = stats['reportsByStatus'].get(report['status'], 0) + 1
-        
+
         return stats
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

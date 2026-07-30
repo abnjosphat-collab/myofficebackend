@@ -4,6 +4,7 @@ from typing import Optional, List
 from datetime import datetime, date
 from app.supabase_client import supabase
 from app.auth import get_current_user, require_role
+from app.aggregation import count_by
 import logging
 
 logger = logging.getLogger(__name__)
@@ -268,13 +269,11 @@ async def get_stats():
         reqs = supabase.table("requisitions").select("id, status, section").execute()
         items = supabase.table("requisition_items").select("cost_per_unit, quantity").execute()
         total_cost = sum(item['cost_per_unit'] * item['quantity'] for item in items.data) if items.data else 0
-        status_counts = {}
-        section_counts = {}
-        for r in reqs.data or []:
-            status_counts[r['status']] = status_counts.get(r['status'], 0) + 1
-            section_counts[r['section']] = section_counts.get(r['section'], 0) + 1
+        req_rows = reqs.data or []
+        status_counts = count_by(req_rows, 'status')
+        section_counts = count_by(req_rows, 'section')
         return {
-            "total_requisitions": len(reqs.data or []),
+            "total_requisitions": len(req_rows),
             "total_cost": round(total_cost, 2),
             "status_breakdown": status_counts,
             "section_breakdown": section_counts

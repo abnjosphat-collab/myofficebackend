@@ -4,6 +4,7 @@ from typing import Optional, List, Dict, Any
 from datetime import datetime, date
 from app.supabase_client import supabase
 from app.auth import get_current_user, require_role
+from app.aggregation import count_by
 import logging
 import json
 
@@ -227,10 +228,7 @@ async def get_timesheet_stats(
         total_hours = sum(r.get('total_hours', 0) for r in records)
         
         # Count by status
-        status_counts = {}
-        for record in records:
-            status = record.get('status', 'unknown')
-            status_counts[status] = status_counts.get(status, 0) + 1
+        status_counts = count_by(records, 'status')
         
         # Get unique employees
         employee_ids = set(record['employee_id'] for record in records if 'employee_id' in record)

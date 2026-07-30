@@ -5,6 +5,7 @@ from pydantic import BaseModel, Field
 from typing import Optional, List
 from app.supabase_client import supabase
 from app.auth import get_current_user, require_role
+from app.aggregation import count_by
 import logging
 from datetime import datetime
 import uuid
@@ -229,14 +230,17 @@ async def get_inspection_stats():
             section = inspection.get("section")
             if section in stats["bySection"]:
                 stats["bySection"][section] += 1
-            
-            # Count by inspector
-            inspectors_list = inspection.get("inspectors", "").split(",")
-            for inspector in inspectors_list:
-                name = inspector.strip()
-                if name:
-                    stats["byInspector"][name] = stats["byInspector"].get(name, 0) + 1
-        
+
+        # Count by inspector — each inspection can list several, comma-separated
+        all_inspectors = (
+            name.strip()
+            for insp in inspections
+            for name in insp.get("inspectors", "").split(",")
+            if name.strip()
+        )
+        stats["byInspector"] = count_by(all_inspectors, lambda n: n)
+
+
         # Count findings by status and priority
         for finding in findings:
             status = finding.get("status")

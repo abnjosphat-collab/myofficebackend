@@ -14,6 +14,7 @@ from dotenv import load_dotenv
 from fastapi import APIRouter, HTTPException, Depends, Query, Body, BackgroundTasks, Form, UploadFile, File, Request
 from app.uploads import read_and_validate_upload
 from app.rate_limit import limiter
+from app.aggregation import count_by
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 import asyncio
@@ -1229,15 +1230,8 @@ async def get_management_summary(supabase_client = Depends(get_supabase)):
         compressors = compressors_result.data if compressors_result.data else []
         
         # Calculate statistics
-        status_counts = {}
-        location_counts = {}
-        
-        for compressor in compressors:
-            status = compressor.get("status", "unknown")
-            location = compressor.get("location", "Unknown")
-            
-            status_counts[status] = status_counts.get(status, 0) + 1
-            location_counts[location] = location_counts.get(location, 0) + 1
+        status_counts = count_by(compressors, 'status', default='unknown')
+        location_counts = count_by(compressors, 'location', default='Unknown')
         
         return {
             "success": True,

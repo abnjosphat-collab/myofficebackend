@@ -8,6 +8,7 @@ from pydantic import BaseModel, Field, validator
 from typing import Optional, List, Dict, Any
 from app.supabase_client import supabase
 from app.auth import get_current_user, require_role
+from app.aggregation import count_by
 import logging
 from datetime import datetime
 import uuid
@@ -502,8 +503,8 @@ async def get_stats():
         }
         
         # Count by inspector
-        by_inspector = {}
-        
+        by_inspector = count_by((r.get("stoppage_by") for r in reports if r.get("stoppage_by")), lambda name: name)
+
         # Count actions by status
         pending_actions = 0
         in_progress_actions = 0
@@ -513,11 +514,7 @@ async def get_stats():
             section = report.get("section")
             if section in by_section:
                 by_section[section] += 1
-            
-            inspector = report.get("stoppage_by")
-            if inspector:
-                by_inspector[inspector] = by_inspector.get(inspector, 0) + 1
-        
+
         for action in actions:
             status = action.get("status")
             if status == "Pending":

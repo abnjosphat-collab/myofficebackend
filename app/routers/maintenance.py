@@ -7,6 +7,7 @@ from app.supabase_client import supabase
 from app.auth import get_current_user, require_role
 from app.cache import cached, cache_get, cache_set, build_key, invalidate_namespace
 from app.serialization import convert_dates_to_iso
+from app.aggregation import count_by
 import logging
 import json
 import re
@@ -460,21 +461,11 @@ async def get_work_order_stats():
         records_response = supabase.table("work_orders").select("id", count="exact").execute()
         total_records = len(records_response.data) if records_response.data else 0
         
-        # Get records by status
-        status_response = supabase.table("work_orders").select("status").execute()
-        status_counts = {}
-        if status_response.data:
-            for record in status_response.data:
-                status = record.get('status', 'unknown')
-                status_counts[status] = status_counts.get(status, 0) + 1
-        
-        # Get records by priority
-        priority_response = supabase.table("work_orders").select("priority").execute()
-        priority_counts = {}
-        if priority_response.data:
-            for record in priority_response.data:
-                priority = record.get('priority', 'unknown')
-                priority_counts[priority] = priority_counts.get(priority, 0) + 1
+        # Get records by status + priority (one query — both come off the same rows)
+        status_priority_response = supabase.table("work_orders").select("status, priority").execute()
+        rows = status_priority_response.data or []
+        status_counts = count_by(rows, 'status')
+        priority_counts = count_by(rows, 'priority')
         
         # Count overdue work orders
         today = date.today()

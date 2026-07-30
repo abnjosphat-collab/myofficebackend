@@ -5,6 +5,7 @@ from datetime import datetime, date
 from app.supabase_client import supabase
 from app.auth import get_current_user, require_role
 from app.serialization import convert_dates_to_iso
+from app.aggregation import count_by
 import logging
 import json
 
@@ -221,21 +222,11 @@ async def get_ppe_stats():
         records_response = supabase.table("ppe_records").select("id", count="exact").execute()
         total_records = len(records_response.data) if records_response.data else 0
         
-        # Get records by status
-        status_response = supabase.table("ppe_records").select("status").execute()
-        status_counts = {}
-        if status_response.data:
-            for record in status_response.data:
-                status = record.get('status', 'unknown')
-                status_counts[status] = status_counts.get(status, 0) + 1
-        
-        # Get records by condition
-        condition_response = supabase.table("ppe_records").select("condition").execute()
-        condition_counts = {}
-        if condition_response.data:
-            for record in condition_response.data:
-                condition = record.get('condition', 'unknown')
-                condition_counts[condition] = condition_counts.get(condition, 0) + 1
+        # Get records by status + condition (one query — both come off the same rows)
+        status_condition_response = supabase.table("ppe_records").select("status, condition").execute()
+        status_condition_rows = status_condition_response.data or []
+        status_counts = count_by(status_condition_rows, 'status')
+        condition_counts = count_by(status_condition_rows, 'condition')
         
         # Count expiring soon (within 30 days) and expired
         today = date.today()

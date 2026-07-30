@@ -6,6 +6,7 @@ from pydantic import BaseModel, Field, validator
 from typing import Optional, List, Dict, Any
 from app.supabase_client import supabase
 from app.auth import get_current_user, require_role
+from app.aggregation import count_by
 import logging
 from datetime import datetime
 import uuid
@@ -302,7 +303,7 @@ async def get_vfl_stats():
         closed_count = 0
         
         # Count by observer
-        by_observer = {}
+        by_observer = count_by((r.get("observer_name") for r in reports if r.get("observer_name")), lambda name: name)
         
         for report in reports:
             # Section
@@ -335,12 +336,7 @@ async def get_vfl_stats():
                 reviewed_count += 1
             elif status == "closed":
                 closed_count += 1
-            
-            # Observer
-            observer = report.get("observer_name")
-            if observer:
-                by_observer[observer] = by_observer.get(observer, 0) + 1
-        
+
         # Count actions by status
         pending_actions = 0
         in_progress_actions = 0

@@ -2,8 +2,9 @@
 
 from fastapi import APIRouter, HTTPException, UploadFile, File, Form, Depends
 from app.auth import get_current_user, require_role
+from app.aggregation import count_by
 from pydantic import BaseModel, Field
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Any
 from datetime import date, timedelta
 import uuid
 import random
@@ -244,14 +245,10 @@ async def get_compliance_rate():
 @router.get("/reports/due_refreshers", dependencies=[Depends(get_current_user)])
 async def get_due_refreshers():
     """Returns a list of required refresher courses and the count of employees needing them."""
-    refresher_counts: Dict[str, int] = {}
-    
-    for rec in CERTIFICATIONS_DB:
-        # Count non-expired records that require a refresher
-        if check_status(rec.expiry_date) != 'Expired' and rec.required_refresher not in ('N/A', '', None):
-            refresher = rec.required_refresher
-            refresher_counts[refresher] = refresher_counts.get(refresher, 0) + 1
-            
+    due = [rec.required_refresher for rec in CERTIFICATIONS_DB
+           if check_status(rec.expiry_date) != 'Expired' and rec.required_refresher not in ('N/A', '', None)]
+    refresher_counts = count_by(due, lambda r: r)
+
     result = [{"refresher": k, "employees_due": v} for k, v in refresher_counts.items()]
     
     # Return the top 3 most-needed refreshers
@@ -294,22 +291,13 @@ async def get_expiring_certifications(days: int = 90):
 async def get_training_stats():
     """Get training and certification statistics."""
     total_certifications = len(CERTIFICATIONS_DB)
-    
-    status_counts = {}
-    department_counts = {}
-    
+
     for cert in CERTIFICATIONS_DB:
-        # Update status first
         cert.update_status()
-        
-        # Count by status
-        status = cert.status
-        status_counts[status] = status_counts.get(status, 0) + 1
-        
-        # Count by department
-        department = cert.department
-        department_counts[department] = department_counts.get(department, 0) + 1
-    
+
+    status_counts = count_by(CERTIFICATIONS_DB, lambda c: c.status)
+    department_counts = count_by(CERTIFICATIONS_DB, lambda c: c.department)
+
     return {
         "totalCertifications": total_certifications,
         "statusDistribution": status_counts,

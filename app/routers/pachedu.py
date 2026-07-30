@@ -6,6 +6,7 @@ from pydantic import BaseModel, Field, validator
 from typing import Optional, List, Dict, Any
 from app.supabase_client import supabase
 from app.auth import get_current_user, require_role
+from app.aggregation import count_by
 import logging
 from datetime import datetime
 import uuid
@@ -219,7 +220,7 @@ async def get_pachedu_stats():
         }
         
         # Count by department
-        by_dept = {}
+        by_dept = count_by((r.get("dept") for r in reports if r.get("dept")), lambda name: name)
         
         # Count by status
         draft_count = 0
@@ -241,11 +242,6 @@ async def get_pachedu_stats():
             behaviour = report.get("behaviour_type")
             if behaviour in by_behaviour:
                 by_behaviour[behaviour] += 1
-            
-            # Department
-            dept = report.get("dept")
-            if dept:
-                by_dept[dept] = by_dept.get(dept, 0) + 1
             
             # Status
             status = report.get("status", "draft")
