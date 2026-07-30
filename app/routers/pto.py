@@ -714,22 +714,3 @@ async def delete_pto_report(report_id: str, current_user: dict = Depends(require
     except Exception as e:
         logger.error(f"Error deleting report: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Error deleting report: {str(e)}")
-
-# Debug endpoint
-@router.get("/debug/test")
-async def debug_test():
-    try:
-        # Test select
-        select_result = supabase.table("pto_reports").select("*").execute()
-        
-        return {
-            "status": "success",
-            "table_exists": True,
-            "current_records": len(select_result.data) if select_result.data else 0,
-            "endpoint": "/api/pto"
-        }
-    except Exception as e:
-        return {
-            "status": "error",
-            "error": str(e)
-        }

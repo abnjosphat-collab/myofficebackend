@@ -169,36 +169,3 @@ async def delete_overtime(overtime_id: int, current_user: dict = Depends(get_cur
     except Exception as e:
         logger.error(f"Error deleting overtime: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Error deleting overtime: {str(e)}")
-
-# Debug endpoint to test connection
-@router.get("/debug/test")
-async def debug_test():
-    try:
-        # Test select
-        select_result = supabase.table("overtime").select("*").execute()
-        # Test insert
-        test_data = {
-            "employee_name": "Debug Test",
-            "employee_id": "DEBUG001",
-            "position": "Debugger",
-            "overtime_type": "regular",
-            "date": "2024-01-15",
-            "start_time": "10:00",
-            "end_time": "11:00",
-            "reason": "Testing connection",
-            "contact_number": "+263770000000",
-            "hourly_rate": 25.00
-        }
-        insert_result = supabase.table("overtime").insert(test_data).execute()
-        
-        return {
-            "status": "success",
-            "table_exists": True,
-            "current_records": len(select_result.data) if select_result.data else 0,
-            "insert_test": "success" if insert_result.data else "failed"
-        }
-    except Exception as e:
-        return {
-            "status": "error",
-            "error": str(e)
-        }

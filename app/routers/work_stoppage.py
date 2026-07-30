@@ -484,22 +484,3 @@ async def get_stats():
     except Exception as e:
         logger.error(f"Error fetching stats: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Error fetching stats: {str(e)}")
-
-# Debug endpoint
-@router.get("/debug/test")
-async def debug_test():
-    try:
-        # Test select
-        select_result = supabase.table("work_stoppage_reports").select("*").execute()
-        
-        return {
-            "status": "success",
-            "table_exists": True,
-            "current_records": len(select_result.data) if select_result.data else 0,
-            "endpoint": "/api/work-stoppage"
-        }
-    except Exception as e:
-        return {
-            "status": "error",
-            "error": str(e)
-        }

@@ -96,3 +96,26 @@ def test_read_endpoints_stay_open(path):
 def test_invalid_token_is_rejected():
     resp = client.post("/api/employees", headers={"Authorization": "Bearer not-a-real-token"}, json={})
     assert resp.status_code == 401
+
+
+# Leftover dev scaffolding, unauthenticated, discovered 2026-07-30: each did a live
+# select("*") and three (near_miss, overtime, sheq_inspections) also did a live INSERT
+# — overtime's never cleaned up after itself, leaving a permanent "Debug Test"/
+# "DEBUG001" row in production (id=981, created 2026-07-13). Removed entirely rather
+# than just gated, since a GET with write side effects has no legitimate authenticated
+# use either. This test guards against the pattern quietly coming back.
+REMOVED_DEBUG_ENDPOINTS = [
+    "/api/nearmiss/debug/test",
+    "/api/overtime/debug/test",
+    "/api/pachedu/debug/test",
+    "/api/pto/debug/test",
+    "/sheq/debug/test",
+    "/api/vfl/debug/test",
+    "/api/work-stoppage/debug/test",
+]
+
+
+@pytest.mark.parametrize("path", REMOVED_DEBUG_ENDPOINTS)
+def test_debug_test_endpoints_removed(path):
+    resp = client.get(path)
+    assert resp.status_code == 404, f"GET {path} should be gone (404), got {resp.status_code}"
