@@ -6,6 +6,7 @@ from datetime import date
 from app.supabase_client import supabase
 from app.auth import get_current_user, require_role
 from app.cache import cached, invalidate_namespace
+from app.db_helpers import get_or_404
 import logging
 
 logger = logging.getLogger(__name__)
@@ -135,13 +136,8 @@ async def get_equipment():
 async def get_equipment_item(equipment_id: int):
     """Retrieve a specific equipment item by ID."""
     try:
-        response = supabase.table("equipment").select("*").eq("id", equipment_id).execute()
-        data = get_supabase_data(response)
-            
-        if not data:
-            raise HTTPException(status_code=404, detail=f"Equipment with ID {equipment_id} not found")
-        
-        equipment_data = process_dates_from_db(data[0])
+        row = get_or_404(supabase, "equipment", equipment_id, detail=f"Equipment with ID {equipment_id} not found")
+        equipment_data = process_dates_from_db(row)
         return equipment_data
     except HTTPException:
         raise

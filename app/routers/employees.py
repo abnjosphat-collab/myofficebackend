@@ -6,6 +6,7 @@ from datetime import date
 from app.supabase_client import supabase
 from app.auth import get_current_user, require_role
 from app.cache import cached, invalidate_namespace
+from app.db_helpers import get_or_404
 
 router = APIRouter()
 
@@ -144,10 +145,8 @@ async def get_employees():
 async def get_employee(id: int):
     """Return a single employee by their database ID."""
     try:
-        rows = _data(supabase.table("employees").select("*").eq("id", id).execute())
-        if not rows:
-            raise HTTPException(404, detail=f"Employee #{id} not found")
-        return _dates_from_db(rows[0])
+        row = get_or_404(supabase, "employees", id, detail=f"Employee #{id} not found")
+        return _dates_from_db(row)
     except HTTPException:
         raise
     except Exception as e:

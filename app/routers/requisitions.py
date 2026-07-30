@@ -5,6 +5,7 @@ from datetime import datetime, date
 from app.supabase_client import supabase
 from app.auth import get_current_user, require_role
 from app.aggregation import count_by
+from app.db_helpers import apply_date_range, get_or_404
 import logging
 
 logger = logging.getLogger(__name__)
@@ -147,10 +148,7 @@ async def get_requisitions(
             query = query.eq("section", section)
         if requester and requester != 'all':
             query = query.eq("requester", requester)
-        if date_from:
-            query = query.gte("date", date_from.isoformat())
-        if date_to:
-            query = query.lte("date", date_to.isoformat())
+        query = apply_date_range(query, "date", date_from.isoformat() if date_from else None, date_to.isoformat() if date_to else None)
 
         response = query.order("created_at", desc=True).execute()
         requisitions = response.data or []
@@ -186,9 +184,7 @@ async def get_requisition(requisition_id: int):
 @router.patch("/{requisition_id}")
 async def update_requisition(requisition_id: int, update: RequisitionUpdate, current_user: dict = Depends(get_current_user)):
     try:
-        existing = supabase.table("requisitions").select("*").eq("id", requisition_id).execute()
-        if not existing.data:
-            raise HTTPException(status_code=404, detail="Requisition not found")
+        get_or_404(supabase, "requisitions", requisition_id, detail="Requisition not found")
 
         if update.requisition_number:
             conflict = supabase.table("requisitions").select("id").eq("requisition_number", update.requisition_number).neq("id", requisition_id).execute()
@@ -237,9 +233,7 @@ async def update_requisition(requisition_id: int, update: RequisitionUpdate, cur
 @router.delete("/{requisition_id}")
 async def delete_requisition(requisition_id: int, current_user: dict = Depends(require_role('manager'))):
     try:
-        existing = supabase.table("requisitions").select("*").eq("id", requisition_id).execute()
-        if not existing.data:
-            raise HTTPException(status_code=404, detail="Requisition not found")
+        get_or_404(supabase, "requisitions", requisition_id, detail="Requisition not found")
         supabase.table("requisition_items").delete().eq("requisition_id", requisition_id).execute()
         supabase.table("requisitions").delete().eq("id", requisition_id).execute()
         return {"success": True, "message": "Requisition deleted successfully"}

@@ -3,6 +3,7 @@ from pydantic import BaseModel
 from typing import Optional
 from app.supabase_client import supabase
 from app.auth import get_current_user, require_role
+from app.db_helpers import get_or_404
 from datetime import date
 import logging
 
@@ -63,10 +64,7 @@ async def get_compliance(status: Optional[str] = None):
 
 @router.get("/{c_id}", dependencies=[Depends(get_current_user)])
 async def get_compliance_item(c_id: int):
-    r = supabase.table("compliance_register").select("*").eq("id", c_id).execute()
-    if not r.data:
-        raise HTTPException(404, "Item not found")
-    item = r.data[0]
+    item = get_or_404(supabase, "compliance_register", c_id, detail="Item not found")
     item["status"] = _compute_status(item.get("expiry_date"))
     return item
 

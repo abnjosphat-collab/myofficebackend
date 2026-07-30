@@ -3,6 +3,7 @@ from pydantic import BaseModel, Field, validator
 from typing import Optional
 from app.supabase_client import supabase
 from app.auth import require_role, get_current_user
+from app.db_helpers import get_or_404
 import logging
 from datetime import datetime
 
@@ -131,9 +132,7 @@ async def update_overtime(overtime_id: int, updated: OvertimeUpdate, authorizati
         logger.info(f"Updating overtime {overtime_id}")
         
         # Check if exists
-        existing = supabase.table("overtime").select("*").eq("id", overtime_id).execute()
-        if not existing.data:
-            raise HTTPException(status_code=404, detail="Overtime not found")
+        get_or_404(supabase, "overtime", overtime_id, detail="Overtime not found")
         
         # exclude_unset, not a None-filter: an explicitly-sent null must clear the
         # field, not be silently dropped. See work_orders (backend edec24a).
@@ -159,9 +158,7 @@ async def delete_overtime(overtime_id: int, current_user: dict = Depends(get_cur
         logger.info(f"Deleting overtime {overtime_id}")
         
         # Check if exists
-        existing = supabase.table("overtime").select("*").eq("id", overtime_id).execute()
-        if not existing.data:
-            raise HTTPException(status_code=404, detail="Overtime not found")
+        get_or_404(supabase, "overtime", overtime_id, detail="Overtime not found")
         
         supabase.table("overtime").delete().eq("id", overtime_id).execute()
         

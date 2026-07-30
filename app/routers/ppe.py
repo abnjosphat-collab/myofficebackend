@@ -6,6 +6,7 @@ from app.supabase_client import supabase
 from app.auth import get_current_user, require_role
 from app.serialization import convert_dates_to_iso
 from app.aggregation import count_by
+from app.db_helpers import get_or_404
 import logging
 import json
 
@@ -134,14 +135,11 @@ async def create_ppe_record(record: PPEIssueCreate, current_user: dict = Depends
 @router.get("/{record_id:int}", dependencies=[Depends(get_current_user)])
 async def get_ppe_record(record_id: int):
     try:
-        response = supabase.table("ppe_records").select("*").eq("id", record_id).execute()
-        if not response.data:
-            raise HTTPException(status_code=404, detail="PPE record not found")
-        
-        result = response.data[0]
+        result = get_or_404(supabase, "ppe_records", record_id, detail="PPE record not found")
         convert_dates_to_iso(result)
         return result
-        
+
+
     except HTTPException:
         raise
     except Exception as e:
@@ -151,9 +149,7 @@ async def get_ppe_record(record_id: int):
 @router.patch("/{record_id}")
 async def update_ppe_record(record_id: int, updated: PPEIssueUpdate, current_user: dict = Depends(get_current_user)):
     try:
-        existing = supabase.table("ppe_records").select("*").eq("id", record_id).execute()
-        if not existing.data:
-            raise HTTPException(status_code=404, detail="PPE record not found")
+        get_or_404(supabase, "ppe_records", record_id, detail="PPE record not found")
         
         # exclude_unset, not a None-filter: an explicitly-sent null must clear the
         # field, not be silently dropped. See work_orders (backend edec24a).
@@ -185,9 +181,7 @@ async def update_ppe_record(record_id: int, updated: PPEIssueUpdate, current_use
 @router.delete("/{record_id}")
 async def delete_ppe_record(record_id: int, current_user: dict = Depends(require_role('manager'))):
     try:
-        existing = supabase.table("ppe_records").select("*").eq("id", record_id).execute()
-        if not existing.data:
-            raise HTTPException(status_code=404, detail="PPE record not found")
+        get_or_404(supabase, "ppe_records", record_id, detail="PPE record not found")
         
         supabase.table("ppe_records").delete().eq("id", record_id).execute()
         return {"success": True, "message": "PPE record deleted successfully"}

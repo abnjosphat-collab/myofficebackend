@@ -6,6 +6,7 @@ from datetime import datetime, date
 from app.supabase_client import supabase
 from app.auth import get_current_user, require_role
 from app.aggregation import count_by
+from app.db_helpers import or_ilike, get_or_404
 
 router = APIRouter()
 
@@ -55,7 +56,7 @@ async def get_notices(
         if is_pinned is not None:
             query = query.eq("is_pinned", is_pinned)
         if search:
-            query = query.or_(f"title.ilike.%{search}%,content.ilike.%{search}%")
+            query = query.or_(or_ilike(["title", "content"], search))
             
         response = query.order("date", desc=True).execute()
         return response.data
@@ -88,13 +89,9 @@ async def create_notice(notice: NoticeCreate, current_user: dict = Depends(get_c
 @router.get("/{notice_id}", dependencies=[Depends(get_current_user)])
 async def get_notice(notice_id: str):
     try:
-        response = supabase.table("notices").select("*").eq("id", notice_id).execute()
-        
-        if not response.data:
-            raise HTTPException(status_code=404, detail="Notice not found")
-        
-        return response.data[0]
-        
+        return get_or_404(supabase, "notices", notice_id, detail="Notice not found")
+
+
     except HTTPException:
         raise
     except Exception as e:

@@ -15,6 +15,7 @@ from fastapi import APIRouter, HTTPException, Depends, Query, Body, BackgroundTa
 from app.uploads import read_and_validate_upload
 from app.rate_limit import limiter
 from app.aggregation import count_by
+from app.db_helpers import apply_date_range
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 import asyncio
@@ -680,10 +681,7 @@ async def get_compressor_readings(
             .eq("compressor_id", compressor_id)\
             .order("date", asc=True)
         
-        if start_date:
-            query = query.gte("date", start_date)
-        if end_date:
-            query = query.lte("date", end_date)
+        query = apply_date_range(query, "date", start_date, end_date)
         
         result = query.execute()
         
@@ -710,10 +708,7 @@ async def get_detailed_readings(
             .eq("compressor_id", compressor_id)\
             .order("date", asc=True)
         
-        if start_date:
-            query = query.gte("date", start_date)
-        if end_date:
-            query = query.lte("date", end_date)
+        query = apply_date_range(query, "date", start_date, end_date)
         
         result = query.execute()
         

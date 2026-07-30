@@ -9,6 +9,7 @@ from typing import Optional, List, Dict, Any
 from app.supabase_client import supabase
 from app.auth import get_current_user, require_role
 from app.aggregation import count_by
+from app.db_helpers import get_or_404, apply_date_range, or_ilike, distinct_suggestions, status_choice_validator
 import logging
 from datetime import datetime
 import uuid
@@ -25,11 +26,8 @@ class CorrectiveActionBase(BaseModel):
     byWhen: str = Field(..., min_length=1)
     status: str = "Pending"
 
-    @validator('status')
-    def validate_status(cls, v):
-        if v not in ['Pending', 'In Progress', 'Completed']:
-            raise ValueError('Status must be Pending, In Progress, or Completed')
-        return v
+    _validate_status = validator('status')(status_choice_validator(
+        ['Pending', 'In Progress', 'Completed'], 'Status must be Pending, In Progress, or Completed'))
 
 class CorrectiveActionCreate(CorrectiveActionBase):
     pass
@@ -131,24 +129,16 @@ async def get_reports(
         
         # Apply filters
         if search:
-            query = query.or_(
-                f"department.ilike.%{search}%," +
-                f"description.ilike.%{search}%," +
-                f"stoppage_by.ilike.%{search}%"
-            )
-        
+            query = query.or_(or_ilike(["department", "description", "stoppage_by"], search))
+
         if section:
             query = query.eq("section", section)
-        
+
         if inspector:
             query = query.ilike("stoppage_by", f"%{inspector}%")
-        
-        if from_date:
-            query = query.gte("date", from_date)
-        
-        if to_date:
-            query = query.lte("date", to_date)
-        
+
+        query = apply_date_range(query, "date", from_date, to_date)
+
         # Order by most recent
         query = query.order("submitted_at", desc=True)
         query = query.range(offset, offset + limit - 1)
@@ -184,54 +174,12 @@ async def get_reports(
 # GET unique departments for auto-complete
 @router.get("/suggestions/departments", dependencies=[Depends(get_current_user)])
 async def get_department_suggestions(search: Optional[str] = Query(None)):
-    try:
-        query = supabase.table("work_stoppage_reports")\
-            .select("department")\
-            .neq("department", "")\
-            .not_.is_("department", "null")\
-            .order("department")
-        
-        if search:
-            query = query.ilike("department", f"%{search}%")
-        
-        response = query.execute()
-        
-        if hasattr(response, 'data'):
-            # Get unique departments
-            departments = list(set(item["department"] for item in response.data if item.get("department")))
-            return sorted(departments)
-        
-        return []
-        
-    except Exception as e:
-        logger.error(f"Error fetching department suggestions: {str(e)}")
-        return []
+    return await distinct_suggestions(supabase, "work_stoppage_reports", "department", search, "department")
 
 # GET unique inspectors for auto-complete
 @router.get("/suggestions/inspectors", dependencies=[Depends(get_current_user)])
 async def get_inspector_suggestions(search: Optional[str] = Query(None)):
-    try:
-        query = supabase.table("work_stoppage_reports")\
-            .select("stoppage_by")\
-            .neq("stoppage_by", "")\
-            .not_.is_("stoppage_by", "null")\
-            .order("stoppage_by")
-        
-        if search:
-            query = query.ilike("stoppage_by", f"%{search}%")
-        
-        response = query.execute()
-        
-        if hasattr(response, 'data'):
-            # Get unique inspectors
-            inspectors = list(set(item["stoppage_by"] for item in response.data if item.get("stoppage_by")))
-            return sorted(inspectors)
-        
-        return []
-        
-    except Exception as e:
-        logger.error(f"Error fetching inspector suggestions: {str(e)}")
-        return []
+    return await distinct_suggestions(supabase, "work_stoppage_reports", "stoppage_by", search, "inspector")
 
 # GET single report
 @router.get("/{report_id}", dependencies=[Depends(get_current_user)])

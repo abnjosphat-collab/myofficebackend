@@ -6,6 +6,7 @@ from typing import Optional, List
 from app.supabase_client import supabase
 from app.auth import get_current_user, require_role
 from app.aggregation import count_by
+from app.db_helpers import get_or_404, apply_date_range, or_ilike
 import logging
 from datetime import datetime
 import uuid
@@ -139,27 +140,19 @@ async def get_inspections(
         
         # Apply filters
         if search:
-            query = query.or_(
-                f"title.ilike.%{search}%," +
-                f"inspectors.ilike.%{search}%," +
-                f"place.ilike.%{search}%"
-            )
-        
+            query = query.or_(or_ilike(["title", "inspectors", "place"], search))
+
         if section:
             query = query.eq("section", section)
-        
+
         if status:
             query = query.eq("status", status)
-        
+
         if inspector:
             query = query.ilike("inspectors", f"%{inspector}%")
-        
-        if from_date:
-            query = query.gte("date", from_date)
-        
-        if to_date:
-            query = query.lte("date", to_date)
-        
+
+        query = apply_date_range(query, "date", from_date, to_date)
+
         # Order by most recent
         query = query.order("created_at", desc=True)
         

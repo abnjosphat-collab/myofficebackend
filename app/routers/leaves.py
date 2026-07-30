@@ -5,6 +5,7 @@ from typing import Optional, List
 from datetime import date, datetime
 from app.supabase_client import supabase
 from app.auth import require_role, get_current_user
+from app.db_helpers import get_or_404
 import logging
 import traceback
 
@@ -162,11 +163,7 @@ async def get_leave_stats():
 @router.get("/{leave_id}", response_model=LeaveResponse, dependencies=[Depends(get_current_user)])
 async def get_leave(leave_id: int):
     try:
-        resp = supabase.table("leaves").select("*").eq("id", leave_id).execute()
-        data = get_supabase_data(resp)
-        if not data:
-            raise HTTPException(status_code=404, detail="Leave not found")
-        return data[0]
+        return get_or_404(supabase, "leaves", leave_id, detail="Leave not found")
     except Exception as e:
         logger.error(f"Error fetching leave {leave_id}: {str(e)}\n{traceback.format_exc()}")
         raise HTTPException(status_code=500, detail="Internal server error")
@@ -180,17 +177,13 @@ async def update_leave(leave_id: int, updated: LeaveUpdate, authorization: Optio
         approver = await require_role('manager')(authorization)
         logger.info(f"Leave approval '{updated.status}' by {approver['email']} (role: {approver['role']})")
     try:
-        existing_resp = supabase.table("leaves").select("*").eq("id", leave_id).execute()
-        existing = get_supabase_data(existing_resp)
-        if not existing:
-            raise HTTPException(status_code=404, detail=f"Leave with ID {leave_id} not found")
+        existing = get_or_404(supabase, "leaves", leave_id, detail=f"Leave with ID {leave_id} not found")
 
         data_to_update = updated.dict(exclude_unset=True)
 
         if 'start_date' in data_to_update or 'end_date' in data_to_update:
-            current = existing[0]
-            start = data_to_update.get('start_date', date.fromisoformat(current['start_date']))
-            end = data_to_update.get('end_date', date.fromisoformat(current['end_date']))
+            start = data_to_update.get('start_date', date.fromisoformat(existing['start_date']))
+            end = data_to_update.get('end_date', date.fromisoformat(existing['end_date']))
             data_to_update['total_days'] = calculate_total_days(start, end)
 
         if 'start_date' in data_to_update and isinstance(data_to_update['start_date'], date):
@@ -199,7 +192,7 @@ async def update_leave(leave_id: int, updated: LeaveUpdate, authorization: Optio
             data_to_update['end_date'] = data_to_update['end_date'].isoformat()
 
         if not data_to_update:
-            return existing[0]
+            return existing
 
         result = supabase.table("leaves").update(data_to_update).eq("id", leave_id).execute()
         updated_data = get_supabase_data(result)

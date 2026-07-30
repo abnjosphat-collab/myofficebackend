@@ -7,6 +7,7 @@ from typing import Optional, List, Dict, Any
 from app.supabase_client import supabase
 from app.auth import get_current_user, require_role
 from app.aggregation import count_by
+from app.db_helpers import get_or_404, apply_date_range, or_ilike, distinct_suggestions, status_choice_validator
 import logging
 from datetime import datetime
 import uuid
@@ -33,11 +34,8 @@ class PacheduReportBase(BaseModel):
     checklist: List[str] = []
     status: str = "draft"
 
-    @validator('status')
-    def validate_status(cls, v):
-        if v not in ['draft', 'submitted', 'reviewed', 'closed']:
-            raise ValueError('Status must be draft, submitted, reviewed, or closed')
-        return v
+    _validate_status = validator('status')(status_choice_validator(
+        ['draft', 'submitted', 'reviewed', 'closed'], 'Status must be draft, submitted, reviewed, or closed'))
 
 class PacheduReportCreate(PacheduReportBase):
     pass
@@ -128,29 +126,19 @@ async def get_pachedu_reports(
         
         # Apply filters
         if search:
-            query = query.or_(
-                f"observer_name.ilike.%{search}%," +
-                f"location.ilike.%{search}%," +
-                f"activity_observed.ilike.%{search}%," +
-                f"what_did_you_see.ilike.%{search}%," +
-                f"dept.ilike.%{search}%"
-            )
-        
+            query = query.or_(or_ilike(["observer_name", "location", "activity_observed", "what_did_you_see", "dept"], search))
+
         if section:
             query = query.eq("section_choice", section)
-        
+
         if dept:
             query = query.ilike("dept", f"%{dept}%")
-        
+
         if status:
             query = query.eq("status", status)
-        
-        if from_date:
-            query = query.gte("date", from_date)
-        
-        if to_date:
-            query = query.lte("date", to_date)
-        
+
+        query = apply_date_range(query, "date", from_date, to_date)
+
         # Order by most recent
         query = query.order("created_at", desc=True)
         query = query.range(offset, offset + limit - 1)
@@ -171,28 +159,7 @@ async def get_pachedu_reports(
 # GET unique departments for auto-complete
 @router.get("/suggestions/departments", dependencies=[Depends(get_current_user)])
 async def get_department_suggestions(search: Optional[str] = Query(None)):
-    try:
-        query = supabase.table("pachedu_reports")\
-            .select("dept")\
-            .neq("dept", "")\
-            .not_.is_("dept", "null")\
-            .order("dept")
-        
-        if search:
-            query = query.ilike("dept", f"%{search}%")
-        
-        response = query.execute()
-        
-        if hasattr(response, 'data'):
-            # Get unique departments
-            departments = list(set(item["dept"] for item in response.data if item.get("dept")))
-            return sorted(departments)
-        
-        return []
-        
-    except Exception as e:
-        logger.error(f"Error fetching department suggestions: {str(e)}")
-        return []
+    return await distinct_suggestions(supabase, "pachedu_reports", "dept", search, "department")
 
 # GET stats overview
 @router.get("/stats/overview", dependencies=[Depends(get_current_user)])

@@ -4,6 +4,7 @@ from pydantic import BaseModel
 from app.crud_router import CrudRouter
 from app.supabase_client import supabase
 from app.auth import get_current_user
+from app.db_helpers import get_or_404
 
 
 class JobCardCreate(BaseModel):
@@ -62,7 +63,4 @@ router = CrudRouter(
 
 @router.get("/{jc_id}", dependencies=[Depends(get_current_user)])
 async def get_job_card(jc_id: int):
-    r = supabase.table("job_cards").select("*").eq("id", jc_id).execute()
-    if not r.data:
-        raise HTTPException(404, "Job card not found")
-    return r.data[0]
+    return get_or_404(supabase, "job_cards", jc_id, detail="Job card not found")

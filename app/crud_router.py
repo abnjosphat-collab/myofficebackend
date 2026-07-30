@@ -44,6 +44,7 @@ from pydantic import BaseModel
 
 from app.supabase_client import supabase
 from app.auth import get_current_user, require_role
+from app.db_helpers import or_ilike
 import logging
 
 logger = logging.getLogger(__name__)
@@ -109,7 +110,7 @@ class CrudRouter:
                 params = request.query_params
                 search = params.get("search")
                 if search and search_columns:
-                    q = q.or_(",".join(f"{c}.ilike.%{search}%" for c in search_columns))
+                    q = q.or_(or_ilike(search_columns, search))
                 for param, column in filters.items():
                     value = params.get(param)
                     if value is not None and value != "":

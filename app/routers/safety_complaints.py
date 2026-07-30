@@ -5,6 +5,7 @@ from pydantic import BaseModel, Field, validator
 from typing import Optional, List
 from app.supabase_client import supabase
 from app.auth import get_current_user, require_role
+from app.db_helpers import apply_date_range
 import logging
 from datetime import datetime, date
 import uuid
@@ -126,10 +127,7 @@ async def list_complaints(
             q = q.eq("priority", priority)
         if category:
             q = q.eq("category", category)
-        if from_date:
-            q = q.gte("date", from_date)
-        if to_date:
-            q = q.lte("date", to_date)
+        q = apply_date_range(q, "date", from_date, to_date)
         q = q.range(offset, offset + limit - 1)
         result = q.execute()
         rows = result.data or []

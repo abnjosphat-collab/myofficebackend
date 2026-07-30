@@ -10,6 +10,7 @@ from app.supabase_client import supabase
 from app.auth import get_current_user, require_role
 from app.uploads import read_and_validate_upload, SPREADSHEET_EXTS
 from app.serialization import convert_dates_to_iso
+from app.db_helpers import get_or_404
 import logging
 import json
 import io
@@ -491,12 +492,7 @@ async def get_spares(
 async def get_spare(spare_id: int):
     """Get a specific spare by ID"""
     try:
-        response = supabase.table("spares").select("*").eq("id", spare_id).execute()
-        
-        if not response.data:
-            raise HTTPException(status_code=404, detail="Spare part not found")
-        
-        result = response.data[0]
+        result = get_or_404(supabase, "spares", spare_id, detail="Spare part not found")
         convert_dates_to_iso(result)
         if 'categories' not in result or result['categories'] is None:
             result['categories'] = []
@@ -645,11 +641,8 @@ async def update_spare(spare_id: int, spare_update: SpareUpdate, current_user: d
     """Update an existing spare part"""
     try:
         # Check if spare exists
-        existing = supabase.table("spares").select("*").eq("id", spare_id).execute()
-        
-        if not existing.data:
-            raise HTTPException(status_code=404, detail="Spare part not found")
-        
+        get_or_404(supabase, "spares", spare_id, detail="Spare part not found")
+
         # Check stock code conflict if updating
         if spare_update.stock_code:
             conflict = supabase.table("spares") \
@@ -727,13 +720,9 @@ async def delete_spare(spare_id: int, current_user: dict = Depends(require_role(
     """Delete a spare part"""
     try:
         # Check if spare exists
-        existing = supabase.table("spares").select("*").eq("id", spare_id).execute()
-        
-        if not existing.data:
-            raise HTTPException(status_code=404, detail="Spare part not found")
-        
-        spare_data = existing.data[0]
-        
+        spare_data = get_or_404(supabase, "spares", spare_id, detail="Spare part not found")
+
+
         # Delete from database
         supabase.table("spares").delete().eq("id", spare_id).execute()
         

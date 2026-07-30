@@ -7,6 +7,7 @@ from typing import Optional, List, Dict, Any
 from app.supabase_client import supabase
 from app.auth import get_current_user, require_role
 from app.aggregation import count_by
+from app.db_helpers import get_or_404, apply_date_range, or_ilike, distinct_suggestions, status_choice_validator
 import logging
 from datetime import datetime
 import uuid
@@ -25,11 +26,8 @@ class ActionItemBase(BaseModel):
     completedDate: Optional[str] = None
     remarks: Optional[str] = ""
 
-    @validator('status')
-    def validate_status(cls, v):
-        if v not in ['Pending', 'In Progress', 'Completed']:
-            raise ValueError('Status must be Pending, In Progress, or Completed')
-        return v
+    _validate_status = validator('status')(status_choice_validator(
+        ['Pending', 'In Progress', 'Completed'], 'Status must be Pending, In Progress, or Completed'))
 
 class ActionItemCreate(ActionItemBase):
     pass
@@ -60,11 +58,8 @@ class VFLReportBase(BaseModel):
     coachingTechnique: str = Field(..., pattern="^(SBR|CC)$")
     status: str = "draft"
 
-    @validator('status')
-    def validate_status(cls, v):
-        if v not in ['draft', 'submitted', 'reviewed', 'closed']:
-            raise ValueError('Status must be draft, submitted, reviewed, or closed')
-        return v
+    _validate_status = validator('status')(status_choice_validator(
+        ['draft', 'submitted', 'reviewed', 'closed'], 'Status must be draft, submitted, reviewed, or closed'))
 
 class VFLReportCreate(VFLReportBase):
     actions: List[ActionItemCreate] = []
@@ -170,31 +165,22 @@ async def get_vfl_reports(
         
         # Apply filters
         if search:
-            query = query.or_(
-                f"observer_name.ilike.%{search}%," +
-                f"designation.ilike.%{search}%," +
-                f"description.ilike.%{search}%," +
-                f"department_section.ilike.%{search}%"
-            )
-        
+            query = query.or_(or_ilike(["observer_name", "designation", "description", "department_section"], search))
+
         if section:
             query = query.eq("section_choice", section)
-        
+
         if observer:
             query = query.ilike("observer_name", f"%{observer}%")
-        
+
         if status:
             query = query.eq("status", status)
-        
+
         if behaviour:
             query = query.eq("behaviour_category", behaviour)
-        
-        if from_date:
-            query = query.gte("date", from_date)
-        
-        if to_date:
-            query = query.lte("date", to_date)
-        
+
+        query = apply_date_range(query, "date", from_date, to_date)
+
         # Order by most recent
         query = query.order("created_at", desc=True)
         query = query.range(offset, offset + limit - 1)
@@ -230,28 +216,7 @@ async def get_vfl_reports(
 # GET unique observers for auto-complete
 @router.get("/suggestions/observers", dependencies=[Depends(get_current_user)])
 async def get_observer_suggestions(search: Optional[str] = Query(None)):
-    try:
-        query = supabase.table("vfl_reports")\
-            .select("observer_name")\
-            .neq("observer_name", "")\
-            .not_.is_("observer_name", "null")\
-            .order("observer_name")
-        
-        if search:
-            query = query.ilike("observer_name", f"%{search}%")
-        
-        response = query.execute()
-        
-        if hasattr(response, 'data'):
-            # Get unique observers
-            observers = list(set(item["observer_name"] for item in response.data if item.get("observer_name")))
-            return sorted(observers)
-        
-        return []
-        
-    except Exception as e:
-        logger.error(f"Error fetching observer suggestions: {str(e)}")
-        return []
+    return await distinct_suggestions(supabase, "vfl_reports", "observer_name", search, "observer")
 
 # GET stats overview
 @router.get("/stats/overview", dependencies=[Depends(get_current_user)])

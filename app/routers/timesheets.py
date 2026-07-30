@@ -5,6 +5,7 @@ from datetime import datetime, date
 from app.supabase_client import supabase
 from app.auth import get_current_user, require_role
 from app.aggregation import count_by
+from app.db_helpers import apply_date_range, get_or_404
 import logging
 import json
 
@@ -57,10 +58,7 @@ async def get_timesheets(
         
         if employee_id:
             query = query.eq("employee_id", employee_id)
-        if start_date:
-            query = query.gte("date", start_date.isoformat())
-        if end_date:
-            query = query.lte("date", end_date.isoformat())
+        query = apply_date_range(query, "date", start_date.isoformat() if start_date else None, end_date.isoformat() if end_date else None)
             
         response = query.order("date", desc=True).execute()
         return response.data or []
@@ -127,21 +125,17 @@ async def create_timesheet_entry(entry: TimesheetEntryCreate, current_user: dict
 async def get_timesheet_entry(entry_id: int):
     """Get a specific timesheet entry by ID"""
     try:
-        response = supabase.table("timesheets").select("*").eq("id", entry_id).execute()
-        
-        if not response.data:
-            raise HTTPException(status_code=404, detail="Timesheet entry not found")
-        
-        result = response.data[0]
+        result = get_or_404(supabase, "timesheets", entry_id, detail="Timesheet entry not found")
         # Parse JSON fields
         if result.get('overtime_periods'):
             try:
                 result['overtime_periods'] = json.loads(result['overtime_periods'])
             except:
                 result['overtime_periods'] = []
-        
+
         return result
-        
+
+
     except Exception as e:
         logger.error(f"Error fetching timesheet entry: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -151,9 +145,7 @@ async def update_timesheet_entry(entry_id: int, updated: TimesheetEntryUpdate, c
     """Update a timesheet entry"""
     try:
         # Check if entry exists
-        existing = supabase.table("timesheets").select("*").eq("id", entry_id).execute()
-        if not existing.data:
-            raise HTTPException(status_code=404, detail="Timesheet entry not found")
+        get_or_404(supabase, "timesheets", entry_id, detail="Timesheet entry not found")
         
         # exclude_unset, not a None-filter: an explicitly-sent null must clear the
         # field, not be silently dropped. See work_orders (backend edec24a).
@@ -188,9 +180,7 @@ async def delete_timesheet_entry(entry_id: int, current_user: dict = Depends(req
     """Delete a timesheet entry"""
     try:
         # Check if entry exists
-        existing = supabase.table("timesheets").select("*").eq("id", entry_id).execute()
-        if not existing.data:
-            raise HTTPException(status_code=404, detail="Timesheet entry not found")
+        get_or_404(supabase, "timesheets", entry_id, detail="Timesheet entry not found")
         
         supabase.table("timesheets").delete().eq("id", entry_id).execute()
         
@@ -211,10 +201,7 @@ async def get_timesheet_stats(
     try:
         query = supabase.table("timesheets").select("*")
         
-        if start_date:
-            query = query.gte("date", start_date.isoformat())
-        if end_date:
-            query = query.lte("date", end_date.isoformat())
+        query = apply_date_range(query, "date", start_date.isoformat() if start_date else None, end_date.isoformat() if end_date else None)
             
         response = query.execute()
         records = response.data or []

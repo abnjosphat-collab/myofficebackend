@@ -6,6 +6,7 @@ from typing import Optional, List
 from app.supabase_client import supabase
 from app.auth import get_current_user, require_role
 from app.aggregation import count_by
+from app.db_helpers import get_or_404, apply_date_range, or_ilike, distinct_suggestions
 import logging
 from datetime import datetime
 import uuid
@@ -88,24 +89,16 @@ async def get_reports(
         
         # Apply filters
         if search:
-            query = query.or_(
-                f"department.ilike.%{search}%," +
-                f"location.ilike.%{search}%," +
-                f"description.ilike.%{search}%"
-            )
-        
+            query = query.or_(or_ilike(["department", "location", "description"], search))
+
         if section:
             query = query.eq("section", section)
-        
+
         if reporter:
             query = query.ilike("reportername", f"%{reporter}%")
-        
-        if from_date:
-            query = query.gte("date", from_date)
-        
-        if to_date:
-            query = query.lte("date", to_date)
-        
+
+        query = apply_date_range(query, "date", from_date, to_date)
+
         # Order by most recent
         query = query.order("submitted_at", desc=True)
         query = query.range(offset, offset + limit - 1)

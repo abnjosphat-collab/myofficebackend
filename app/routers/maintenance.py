@@ -8,6 +8,7 @@ from app.auth import get_current_user, require_role
 from app.cache import cached, cache_get, cache_set, build_key, invalidate_namespace
 from app.serialization import convert_dates_to_iso
 from app.aggregation import count_by
+from app.db_helpers import get_or_404
 import logging
 import json
 import re
@@ -374,13 +375,10 @@ async def create_work_order(work_order: WorkOrderCreate, current_user: dict = De
 @router.get("/work-orders/{work_order_id}", dependencies=[Depends(get_current_user)])
 async def get_work_order(work_order_id: int):
     try:
-        response = supabase.table("work_orders").select("*").eq("id", work_order_id).execute()
-        if not response.data:
-            raise HTTPException(status_code=404, detail="Work order not found")
-        
-        result = prepare_data_for_response(response.data[0])
-        return result
-        
+        row = get_or_404(supabase, "work_orders", work_order_id, detail="Work order not found")
+        return prepare_data_for_response(row)
+
+
     except HTTPException:
         raise
     except Exception as e:
@@ -390,10 +388,8 @@ async def get_work_order(work_order_id: int):
 @router.patch("/work-orders/{work_order_id}")
 async def update_work_order(work_order_id: int, updated: WorkOrderUpdate, current_user: dict = Depends(get_current_user)):
     try:
-        existing = supabase.table("work_orders").select("*").eq("id", work_order_id).execute()
-        if not existing.data:
-            raise HTTPException(status_code=404, detail="Work order not found")
-        
+        get_or_404(supabase, "work_orders", work_order_id, detail="Work order not found")
+
         # exclude_unset, not "drop every None": fields the client didn't send are
         # omitted either way (identical behaviour for normal partial updates), but
         # a field the client explicitly sent as null now actually clears instead of
@@ -421,10 +417,8 @@ async def update_work_order(work_order_id: int, updated: WorkOrderUpdate, curren
 @router.delete("/work-orders/{work_order_id}")
 async def delete_work_order(work_order_id: int, current_user: dict = Depends(require_role('manager'))):
     try:
-        existing = supabase.table("work_orders").select("*").eq("id", work_order_id).execute()
-        if not existing.data:
-            raise HTTPException(status_code=404, detail="Work order not found")
-        
+        get_or_404(supabase, "work_orders", work_order_id, detail="Work order not found")
+
         supabase.table("work_orders").delete().eq("id", work_order_id).execute()
         await invalidate_namespace("work_orders")
         return {"success": True, "message": "Work order deleted successfully"}

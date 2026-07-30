@@ -6,6 +6,7 @@ from datetime import datetime
 from app.supabase_client import supabase
 from app.auth import get_current_user, require_role
 from app.uploads import read_and_validate_upload, DOCUMENT_EXTS
+from app.db_helpers import or_ilike
 import logging, uuid as uuid_module
 
 logger = logging.getLogger(__name__)
@@ -53,7 +54,7 @@ async def search_documents(q: str):
     try:
         r = (supabase.table("documents")
              .select("*")
-             .or_(f"name.ilike.%{q}%,description.ilike.%{q}%,original_name.ilike.%{q}%")
+             .or_(or_ilike(["name", "description", "original_name"], q))
              .order("created_at", desc=True)
              .limit(100)
              .execute())

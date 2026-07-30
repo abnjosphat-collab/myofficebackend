@@ -4,6 +4,7 @@ from pydantic import BaseModel
 from app.crud_router import CrudRouter
 from app.supabase_client import supabase
 from app.auth import get_current_user, require_role
+from app.db_helpers import get_or_404
 import logging
 
 logger = logging.getLogger(__name__)
@@ -79,10 +80,7 @@ router = CrudRouter(
 
 @router.get("/{c_id}", dependencies=[Depends(get_current_user)])
 async def get_contractor(c_id: int):
-    r = supabase.table("contractors").select("*").eq("id", c_id).execute()
-    if not r.data:
-        raise HTTPException(404, "Contractor not found")
-    contractor = r.data[0]
+    contractor = get_or_404(supabase, "contractors", c_id, detail="Contractor not found")
     jobs = supabase.table("contractor_jobs").select("*").eq("contractor_id", c_id).execute()
     contractor["jobs"] = jobs.data or []
     return contractor

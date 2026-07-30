@@ -1,6 +1,7 @@
 # backend/app/routers/daily_report.py
 from fastapi import APIRouter, HTTPException, Query, Request, Depends
 from app.auth import get_current_user, require_role
+from app.db_helpers import apply_date_range
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from typing import List, Optional
@@ -153,10 +154,7 @@ async def get_reports(
         # Build query
         query = supabase.table("daily_reports").select("*")
         
-        if start_date:
-            query = query.gte("date", start_date)
-        if end_date:
-            query = query.lte("date", end_date)
+        query = apply_date_range(query, "date", start_date, end_date)
         
         # Execute query
         result = query.order("date", desc=True).limit(limit).execute()
@@ -252,10 +250,7 @@ async def get_stats_summary(
         
         # Get reports
         query = supabase.table("daily_reports").select("*")
-        if start_date:
-            query = query.gte("date", start_date)
-        if end_date:
-            query = query.lte("date", end_date)
+        query = apply_date_range(query, "date", start_date, end_date)
         
         result = query.execute()
         reports = format_supabase_response(result)
@@ -330,10 +325,7 @@ async def get_plant_availability_trend(
             .order("date", desc=True) \
             .limit(30)
         
-        if start_date:
-            query = query.gte("date", start_date)
-        if end_date:
-            query = query.lte("date", end_date)
+        query = apply_date_range(query, "date", start_date, end_date)
         
         result = query.execute()
         reports = format_supabase_response(result)
@@ -378,10 +370,7 @@ async def get_equipment_performance_trend(
             .order("date", desc=True) \
             .limit(30)
         
-        if start_date:
-            query = query.gte("date", start_date)
-        if end_date:
-            query = query.lte("date", end_date)
+        query = apply_date_range(query, "date", start_date, end_date)
         
         result = query.execute()
         reports = format_supabase_response(result)

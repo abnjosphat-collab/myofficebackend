@@ -48,6 +48,7 @@ from typing import Optional, List
 from datetime import date, datetime
 from app.supabase_client import supabase
 from app.auth import get_current_user, require_role
+from app.db_helpers import get_or_404
 import logging
 
 logger = logging.getLogger(__name__)
@@ -170,10 +171,7 @@ async def list_assignments(active_only: bool = False):
 @router.get("/{assignment_id}", response_model=ShiftRosterResponse, dependencies=[Depends(get_current_user)])
 async def get_assignment(assignment_id: int):
     try:
-        rows = _rows(supabase.table(TABLE).select("*").eq("id", assignment_id).execute())
-        if not rows:
-            raise HTTPException(status_code=404, detail=f"Assignment {assignment_id} not found")
-        return rows[0]
+        return get_or_404(supabase, TABLE, assignment_id, detail=f"Assignment {assignment_id} not found")
     except HTTPException:
         raise
     except Exception as e:
