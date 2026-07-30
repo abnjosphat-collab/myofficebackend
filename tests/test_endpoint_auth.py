@@ -63,6 +63,19 @@ PROTECTED_WRITES = [
     ("get", "/api/leaves"),
     ("get", "/api/leaves/1"),
     ("get", "/api/overtime"),
+    # Accounting — the whole router is manager+-gated at mount time (main.py), on
+    # top of each route's own get_current_user/require_role. No token at all must
+    # still be 401 here (the 403-for-insufficient-role case is covered separately
+    # in test_accounting_router.py, since it needs a valid-but-low-role token).
+    ("get", "/api/accounting/transactions"),
+    ("post", "/api/accounting/transactions"),
+    ("patch", "/api/accounting/transactions/1"),
+    ("delete", "/api/accounting/transactions/1"),
+    ("get", "/api/accounting/expenses"),
+    ("post", "/api/accounting/expenses"),
+    ("get", "/api/accounting/assets"),
+    ("get", "/api/accounting/liabilities"),
+    ("get", "/api/accounting/summary"),
 ]
 
 

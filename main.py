@@ -178,10 +178,12 @@ async def debug_test():
 # don't exist (a real 404), which is honest, instead of a fabricated 200. Every OTHER
 # router keeps working — this app serves many independent domains (timesheets, PPE,
 # SHEQ, maintenance...) and one broken router shouldn't take the rest down.
-def register_router(module_name: str, prefix: str | None = None, tags: list[str] | None = None, key: str | None = None):
+def register_router(module_name: str, prefix: str | None = None, tags: list[str] | None = None, key: str | None = None, dependencies: list | None = None):
     # `key` is the loaded_routers dict key, when it needs to differ from the module
     # name — e.g. the notices module registers under "noticeboard" because that's
     # what the health-check/debug endpoints further down already look up.
+    # `dependencies` gates every route the router contributes (including nested
+    # include_router() mounts) — e.g. accounting's manager+-only gate below.
     dict_key = key or module_name
     try:
         module = __import__(f"app.routers.{module_name}", fromlist=[module_name])
@@ -193,6 +195,8 @@ def register_router(module_name: str, prefix: str | None = None, tags: list[str]
             kwargs["prefix"] = prefix
         if tags is not None:
             kwargs["tags"] = tags
+        if dependencies is not None:
+            kwargs["dependencies"] = dependencies
         app.include_router(router_obj, **kwargs)
         loaded_routers[dict_key] = router_obj
         logger.info(f"Router loaded: {dict_key}" + (f" at {prefix}" if prefix else ""))
@@ -239,6 +243,12 @@ for _name, _prefix, _tags, _key in [
     ("drivers", "/api/drivers", ["Drivers"], None),
 ]:
     register_router(_name, _prefix, _tags, _key)
+
+# Manager+ only, whole router — company financials. Can't go in the generic
+# routers_to_import list below (that loop only derives prefix/tags, no support
+# for extra kwargs like dependencies).
+register_router("accounting", "/api/accounting", ["Accounting"],
+                 dependencies=[Depends(require_role('manager'))])
 
 # ===== OTHER ROUTERS (unchanged) =====
 routers_to_import = [
