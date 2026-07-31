@@ -10,7 +10,6 @@
 # comment, which admin/page.tsx was the one exception to).
 from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel
-from typing import Dict, List, Optional
 from datetime import datetime, timezone
 import logging
 
@@ -25,7 +24,6 @@ TABLE = "user_profiles"
 
 class UserProfileUpdate(BaseModel):
     role: str
-    permissions: Dict[str, List[str]] = {}
 
 
 @router.get("/users")
@@ -76,7 +74,6 @@ async def update_user(
     try:
         result = supabase.table(TABLE).update({
             "role": updated.role,
-            "permissions": updated.permissions,
             "updated_at": datetime.now(timezone.utc).isoformat(),
         }).eq("id", user_id).execute()
         if not result.data:
