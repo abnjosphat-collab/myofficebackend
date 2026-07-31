@@ -50,6 +50,9 @@ PROTECTED_WRITES = [
     ("delete", "/api/job-cards/1"),
     ("get", "/api/admin/users"),          # admin read is deliberately protected
     ("patch", "/api/admin/users/abc"),
+    ("post", "/api/admin/users/invite"),
+    ("patch", "/api/admin/users/abc/active"),
+    ("post", "/api/admin/users/abc/reset-password"),
     # PPE matrix writes (interval save + recalculate) are manager-gated.
     ("put", "/api/ppe/matrix"),
     ("post", "/api/ppe/matrix/worksuit/apply"),
