@@ -25,7 +25,6 @@ class OvertimeCreate(BaseModel):
     reason: Optional[str] = None
     contact_number: Optional[str] = None
     emergency_contact: Optional[str] = None
-    hourly_rate: float = Field(25.0)
 
     @validator('hours', always=True)
     def validate_has_duration(cls, v, values):
@@ -45,7 +44,6 @@ class OvertimeUpdate(BaseModel):
     reason: Optional[str] = None
     contact_number: Optional[str] = None
     emergency_contact: Optional[str] = None
-    hourly_rate: Optional[float] = None
     status: Optional[str] = None
 
 # GET all overtime
@@ -97,7 +95,6 @@ async def create_overtime(overtime: OvertimeCreate, current_user: dict = Depends
             "reason": overtime.reason,
             "contact_number": overtime.contact_number,
             "emergency_contact": overtime.emergency_contact,
-            "hourly_rate": overtime.hourly_rate,
             "status": "pending",
             "applied_date": datetime.utcnow().isoformat()
         }
