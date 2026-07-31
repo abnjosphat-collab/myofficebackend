@@ -19,6 +19,30 @@ except ImportError:
     logger.warning("polars not installed — falling back to pure-Python aggregation")
 
 
+# ── Risk score weights ───────────────────────────────────────────────────────
+# The 0-100 risk score is a weighted sum of 6 components, each independently
+# capped so no single metric can dominate the total. These are a safety-policy
+# choice (how much each signal should count), not a code-correctness question —
+# extracted here so they're a named, documented, easy-to-find/tune block instead
+# of magic numbers buried inline in the formula. Changing a weight still needs a
+# code change + deploy; this doesn't make them runtime-configurable, just visible.
+RISK_WEIGHTS = {
+    # Near-miss reports still open, as a % of all near-misses this period.
+    "near_miss_open_ratio":      {"weight": 0.20, "cap": 20},
+    # Each open critical-priority SHEQ inspection finding.
+    "critical_finding_points":   {"per_item": 5,  "cap": 20},
+    # Each finding that's gone overdue.
+    "overdue_finding_points":    {"per_item": 4,  "cap": 20},
+    # Corrective/action-plan items still pending, as a % of all actions tracked.
+    "pending_action_ratio":      {"weight": 0.15, "cap": 15},
+    # Each logged work-stoppage incident this period.
+    "work_stoppage_points":      {"per_item": 3,  "cap": 15},
+    # VFL (visible-felt-leadership) observations flagged unsafe, as a % of total.
+    "vfl_unsafe_ratio":          {"weight": 0.10, "cap": 10},
+}
+# Caps above sum to 100 by design — the score is always in [0, 100].
+
+
 # ── Input schema ───────────────────────────────────────────────────────────────
 
 class SafetyDataInput(BaseModel):
@@ -152,13 +176,15 @@ def analyse(data: SafetyDataInput) -> dict:
     pach_intentional  = sum(1 for r in pach if r.get("behaviourType") == "Intentional")
 
     # ── Risk score (0–100, higher = more risk) ────────────────────────────────
-    # Each component capped to avoid domination by one metric
-    nm_risk   = min(int((nm_open / max(nm_total, 1)) * 100 * 0.20), 20)
-    crit_risk = min(len(critical_findings) * 5, 20)
-    over_risk = min(len(overdue_findings) * 4, 20)
-    act_risk  = min(int((act_pending / max(len(all_actions), 1)) * 100 * 0.15), 15)
-    ws_risk   = min(ws_total * 3, 15)
-    vfl_risk  = min(int((vfl_unsafe / max(vfl_total, 1)) * 100 * 0.10), 10)
+    # See RISK_WEIGHTS above for what each component measures and why it's
+    # weighted/capped the way it is.
+    W = RISK_WEIGHTS
+    nm_risk   = min(int((nm_open / max(nm_total, 1)) * 100 * W["near_miss_open_ratio"]["weight"]), W["near_miss_open_ratio"]["cap"])
+    crit_risk = min(len(critical_findings) * W["critical_finding_points"]["per_item"], W["critical_finding_points"]["cap"])
+    over_risk = min(len(overdue_findings) * W["overdue_finding_points"]["per_item"], W["overdue_finding_points"]["cap"])
+    act_risk  = min(int((act_pending / max(len(all_actions), 1)) * 100 * W["pending_action_ratio"]["weight"]), W["pending_action_ratio"]["cap"])
+    ws_risk   = min(ws_total * W["work_stoppage_points"]["per_item"], W["work_stoppage_points"]["cap"])
+    vfl_risk  = min(int((vfl_unsafe / max(vfl_total, 1)) * 100 * W["vfl_unsafe_ratio"]["weight"]), W["vfl_unsafe_ratio"]["cap"])
     risk_score = nm_risk + crit_risk + over_risk + act_risk + ws_risk + vfl_risk
 
     # ── Hotspot discovery ─────────────────────────────────────────────────────
