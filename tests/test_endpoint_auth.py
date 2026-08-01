@@ -84,6 +84,8 @@ PROTECTED_WRITES = [
     ("post", "/api/tasks-events"),
     ("patch", "/api/tasks-events/1"),
     ("delete", "/api/tasks-events/1"),
+    ("get", "/api/tasks-events/1/comments"),
+    ("post", "/api/tasks-events/1/comments"),
 ]
 
 
