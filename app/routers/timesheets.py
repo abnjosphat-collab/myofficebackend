@@ -23,6 +23,7 @@ class TimesheetEntryCreate(BaseModel):
     holiday_overtime_hours: float = 0
     nightshift_hours: float = 0
     standby_allowance: bool = False
+    nightshift_allowance: bool = False
     total_hours: float = 0
     status: str = "work"
     notes: Optional[str] = None
@@ -38,6 +39,7 @@ class TimesheetEntryUpdate(BaseModel):
     holiday_overtime_hours: Optional[float] = None
     nightshift_hours: Optional[float] = None
     standby_allowance: Optional[bool] = None
+    nightshift_allowance: Optional[bool] = None
     total_hours: Optional[float] = None
     status: Optional[str] = None
     notes: Optional[str] = None
