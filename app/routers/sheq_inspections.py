@@ -12,7 +12,7 @@ from datetime import datetime
 import uuid
 
 logger = logging.getLogger(__name__)
-router = APIRouter(prefix="/sheq", tags=["SHEQ Inspections"])
+router = APIRouter(prefix="/api/sheq", tags=["SHEQ Inspections"])
 
 # =============== PYDANTIC MODELS ===============
 

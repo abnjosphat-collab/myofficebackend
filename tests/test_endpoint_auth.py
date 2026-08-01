@@ -79,6 +79,11 @@ PROTECTED_WRITES = [
     ("get", "/api/accounting/assets"),
     ("get", "/api/accounting/liabilities"),
     ("get", "/api/accounting/summary"),
+    # Tasks & Events — same whole-router manager+-gate shape as accounting.
+    ("get", "/api/tasks-events"),
+    ("post", "/api/tasks-events"),
+    ("patch", "/api/tasks-events/1"),
+    ("delete", "/api/tasks-events/1"),
 ]
 
 
@@ -125,7 +130,7 @@ REMOVED_DEBUG_ENDPOINTS = [
     "/api/overtime/debug/test",
     "/api/pachedu/debug/test",
     "/api/pto/debug/test",
-    "/sheq/debug/test",
+    "/api/sheq/debug/test",
     "/api/vfl/debug/test",
     "/api/work-stoppage/debug/test",
 ]

@@ -2,14 +2,12 @@
 from fastapi import FastAPI, APIRouter, HTTPException, Depends, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, Field
 from typing import Optional, List
 from datetime import datetime, date
 import logging
 import traceback
 import os
 import sys
-import uuid
 from contextlib import asynccontextmanager
 
 # Import supabase client (used only for health check, standby router uses its own import)
@@ -250,6 +248,10 @@ for _name, _prefix, _tags, _key in [
 register_router("accounting", "/api/accounting", ["Accounting"],
                  dependencies=[Depends(require_role('manager'))])
 
+# Manager+ only, whole router — same shape as accounting above.
+register_router("tasks_events", "/api/tasks-events", ["Tasks & Events"],
+                 dependencies=[Depends(require_role('manager'))])
+
 # ===== OTHER ROUTERS (unchanged) =====
 routers_to_import = [
     "signatures", "usage",
@@ -287,89 +289,6 @@ for router_name in routers_to_import:
     except Exception as e:
         logger.error(f"❌ Failed to import {router_name} router: {e}")
         loaded_routers[router_name] = None
-
-# ===== DIRECT NOTICE ENDPOINTS AS FALLBACK =====
-logger.info("🔄 Adding direct notice endpoints as guaranteed fallback...")
-
-class DirectNoticeCreate(BaseModel):
-    title: str = Field(..., min_length=1)
-    content: str = Field(..., min_length=1)
-    date: date
-    category: str = Field(..., min_length=1)
-    priority: str = Field(default="Medium")
-    status: str = Field(default="Draft")
-    is_pinned: bool = Field(default=False)
-    author: Optional[str] = None
-    department: Optional[str] = None
-    expires_at: Optional[date] = None
-    target_audience: Optional[str] = None
-    notification_type: Optional[str] = None
-    requires_acknowledgment: bool = Field(default=False)
-    attachment_name: Optional[str] = None
-    attachment_url: Optional[str] = None
-    attachment_size: Optional[str] = None
-
-# In-memory storage for notices as fallback
-notices_db = []
-
-@app.get("/api/direct-notices")
-async def get_direct_notices():
-    return notices_db
-
-@app.post("/api/direct-notices")
-async def create_direct_notice(notice: DirectNoticeCreate, current_user: dict = Depends(get_current_user)):
-    notice_id = str(uuid.uuid4())
-    new_notice = {
-        "id": notice_id,
-        **notice.dict(),
-        "created_at": datetime.utcnow().isoformat(),
-        "updated_at": datetime.utcnow().isoformat()
-    }
-    notices_db.append(new_notice)
-    return new_notice
-
-@app.get("/api/direct-notices/{notice_id}")
-async def get_direct_notice(notice_id: str):
-    for notice in notices_db:
-        if notice.get("id") == notice_id:
-            return notice
-    raise HTTPException(status_code=404, detail="Notice not found")
-
-# ===== FALLBACK ROUTES FOR CRITICAL ENDPOINTS =====
-@app.get("/api/spares")
-@app.get("/api/spares/")
-async def spares_fallback():
-    if loaded_routers.get("spares"):
-        return {
-            "message": "Spares router is loaded",
-            "use_endpoint": "/api/spares for full functionality"
-        }
-    else:
-        return {
-            "message": "Spares router not loaded",
-            "status": "fallback_mode",
-            "fix_steps": [
-                "1. Check that app/routers/spares.py exists",
-                "2. Check for syntax errors in spares.py",
-                "3. Check supabase_client.py connection",
-                "4. Restart the backend server"
-            ]
-        }
-
-@app.get("/api/employees")
-@app.get("/api/employees/")
-async def employees_fallback():
-    if loaded_routers.get("employees"):
-        return {
-            "message": "Employees router is loaded",
-            "use_endpoint": "/api/employees for full functionality"
-        }
-    else:
-        return {
-            "message": "Employees router not loaded",
-            "status": "fallback_mode",
-            "note": "Check app/routers/employees.py for errors"
-        }
 
 # ===== DEBUG ENDPOINTS =====
 @app.get("/api/debug-all-routes")
