@@ -557,15 +557,22 @@ async def get_breakdown_heatmap(
     date_from: Optional[str] = Query(None, description="Start date (YYYY-MM-DD)"),
     date_to: Optional[str] = Query(None, description="End date (YYYY-MM-DD)"),
     department: Optional[str] = Query(None),
-    machine_id: Optional[str] = Query(None)
+    machine_id: Optional[str] = Query(None),
+    status: Optional[str] = Query(None),
+    breakdown_type: Optional[str] = Query(None),
+    priority: Optional[str] = Query(None),
+    location: Optional[str] = Query(None),
 ):
     """Get comprehensive breakdown analytics with multiple visualizations"""
     db = check_supabase()
-    
+
     try:
         query = db.table("breakdowns").select("*")
-        
-        # Apply filters
+
+        # Apply filters — kept in sync with the Records tab's Filters bar (status/type/
+        # priority/location/department/dates) so switching a filter there also scopes
+        # this heatmap; free-text search isn't replicated here (would need ILIKE across
+        # several columns to exactly match the client-side search).
         if date_from:
             query = query.gte("breakdown_date", date_from)
         if date_to:
@@ -574,6 +581,14 @@ async def get_breakdown_heatmap(
             query = query.eq("department", department)
         if machine_id and machine_id != "all":
             query = query.eq("machine_id", machine_id)
+        if status and status != "all":
+            query = query.eq("status", status)
+        if breakdown_type and breakdown_type != "all":
+            query = query.eq("breakdown_type", breakdown_type)
+        if priority and priority != "all":
+            query = query.eq("priority", priority)
+        if location and location != "all":
+            query = query.eq("location", location)
         
         response = query.execute()
         records = response.data or []
