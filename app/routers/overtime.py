@@ -265,6 +265,8 @@ def _ngrams(tokens: list[str], n: int) -> list[str]:
 # such categories come up rather than letting them fragment across n-grams.
 KNOWN_CATEGORIES: list[tuple[str, str]] = [
     ('daily check', 'Daily Checks'),
+    ('shaft exam', 'Shaft Exam'),
+    ('declutch', 'Declutching'),
 ]
 
 
