@@ -251,6 +251,24 @@ def _ngrams(tokens: list[str], n: int) -> list[str]:
     return [' '.join(tokens[i:i + n]) for i in range(len(tokens) - n + 1)]
 
 
+# Known recurring-task categories that should always be reported as ONE combined
+# entry regardless of whatever equipment/location happens to be named alongside them
+# — e.g. "winder daily checks" and "southwell daily checks" are the same routine task
+# ("Daily Checks"), not two separate causes. User-identified; extend this list as more
+# such categories come up rather than letting them fragment across n-grams.
+KNOWN_CATEGORIES: list[tuple[str, str]] = [
+    ('daily check', 'Daily Checks'),
+]
+
+
+def _categorize(reason: str) -> Optional[str]:
+    low = reason.lower()
+    for pattern, label in KNOWN_CATEGORIES:
+        if pattern in low:
+            return label
+    return None
+
+
 def _group_hours(records: list[dict], key_fn) -> dict:
     """Sum hours per group. Polars path for larger record sets, pure-Python fallback."""
     if _POLARS and len(records) > 20:
@@ -340,13 +358,21 @@ def _analyze_overtime(data: OvertimeAnalysisInput) -> dict:
     double_time_pct = round(double_time_hours / total_hours * 100) if total_hours else 0
 
     # ── Text mining on `reason` — bigrams/trigrams surface multi-word causes
-    # like "5 level" or "rope change" that single-word frequency would miss ──
+    # like "5 level" or "rope change" that single-word frequency would miss. A
+    # record matching a KNOWN_CATEGORIES pattern is bucketed under that one
+    # canonical label instead — it doesn't also get fragmented into n-grams. ──
     phrase_hours: dict = defaultdict(float)
     phrase_count: Counter = Counter()
     for r in records:
-        tokens = _tokenize(str(r.get('reason') or ''))
-        phrases = set(_ngrams(tokens, 2) + _ngrams(tokens, 3))
+        reason = str(r.get('reason') or '')
         h = _hours(r)
+        category = _categorize(reason)
+        if category:
+            phrase_hours[category] += h
+            phrase_count[category] += 1
+            continue
+        tokens = _tokenize(reason)
+        phrases = set(_ngrams(tokens, 2) + _ngrams(tokens, 3))
         for p in phrases:
             phrase_hours[p] += h
             phrase_count[p] += 1
