@@ -267,6 +267,8 @@ KNOWN_CATEGORIES: list[tuple[str, str]] = [
     ('daily check', 'Daily Checks'),
     ('shaft exam', 'Shaft Exam'),
     ('declutch', 'Declutching'),
+    ('loco breakdown', 'Loco Breakdown'),
+    ('attended loco', 'Loco Breakdown'),
 ]
 
 
