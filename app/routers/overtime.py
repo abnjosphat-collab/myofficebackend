@@ -349,7 +349,9 @@ def _analyze_overtime(data: OvertimeAnalysisInput) -> dict:
             'direction': trend_dir,
             'insight': f"{newer_hours:.1f}h in the second half of the period vs {older_hours:.1f}h in the first half."
                        + (' Overtime is trending up — review staffing levels.' if trend_dir == 'worsening'
-                          else ' Overtime is trending down.' if trend_dir == 'improving' else ' Overtime volume is stable.')
+                          else ' Overtime is trending down.' if trend_dir == 'improving' else ' Overtime volume is stable.'),
+            'older_hours': round(older_hours, 1),
+            'newer_hours': round(newer_hours, 1),
         })
 
     # ── Problem areas ─────────────────────────────────────────────────────────
@@ -454,12 +456,15 @@ def _analyze_overtime(data: OvertimeAnalysisInput) -> dict:
 
     return {
         'summary': summary,
+        'total_hours': round(total_hours, 1),
+        'double_time_pct': double_time_pct,
         'problem_areas': problem_areas,
         'trends': trends,
         'recommendations': recommendations,
         'top_reasons': top_phrases,
         'top_employees': [{'name': n, 'hours': round(h, 1)} for n, h in top_employees],
         'top_sections': [{'section': s, 'hours': round(h, 1)} for s, h in top_depts],
+        'daily_hours': _group_hours(records, lambda r: r.get('date')),
         '_source': 'polars-analysis' if _POLARS else 'pure-python-analysis',
         '_records_analysed': total,
         'generated_at': datetime.utcnow().isoformat(),
