@@ -277,6 +277,24 @@ def _date(r: dict):
         return None
 
 
+WEEKDAY_LABELS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']
+
+
+def _weekday(r: dict) -> Optional[int]:
+    d = _date(r)
+    return d.weekday() if d else None
+
+
+def _start_hour(r: dict) -> Optional[int]:
+    start = r.get('start_time')
+    if not start:
+        return None
+    try:
+        return int(str(start).split(':')[0]) % 24
+    except (ValueError, IndexError):
+        return None
+
+
 def _split_halves(records: list[dict]):
     dated = [(r, _date(r)) for r in records]
     dated = [(r, d) for r, d in dated if d]
@@ -332,10 +350,21 @@ def _analyze_overtime(data: OvertimeAnalysisInput) -> dict:
         for p in phrases:
             phrase_hours[p] += h
             phrase_count[p] += 1
-    top_phrases = sorted(
-        ({'phrase': p, 'count': c, 'hours': round(phrase_hours[p], 1)} for p, c in phrase_count.items() if c >= 2),
-        key=lambda x: (-x['count'], -x['hours']),
-    )[:8]
+
+    # A bigram and the trigram it's part of ("winder daily" / "winder daily checks")
+    # describe the same underlying task at different n-gram lengths, not two separate
+    # recurring causes — collapse a shorter phrase into a longer one already kept
+    # when it's a substring AND its count is essentially the same occurrence set
+    # (allowing some slack since the longer phrase can't match every occurrence of
+    # the shorter one, e.g. free-text variation at the start/end of the sentence).
+    candidates = [{'phrase': p, 'count': c, 'hours': round(phrase_hours[p], 1)} for p, c in phrase_count.items() if c >= 2]
+    candidates.sort(key=lambda x: (-len(x['phrase'].split()), -x['count']))
+    deduped_phrases: list[dict] = []
+    for cand in candidates:
+        if any(cand['phrase'] in kept['phrase'] and cand['count'] <= kept['count'] * 1.15 for kept in deduped_phrases):
+            continue
+        deduped_phrases.append(cand)
+    top_phrases = sorted(deduped_phrases, key=lambda x: (-x['count'], -x['hours']))[:8]
 
     # ── Trend — older half of the date range vs newer half, weighted by hours ─
     older, newer = _split_halves(records)
@@ -353,6 +382,17 @@ def _analyze_overtime(data: OvertimeAnalysisInput) -> dict:
             'older_hours': round(older_hours, 1),
             'newer_hours': round(newer_hours, 1),
         })
+
+    # ── When overtime happens — hour-of-day × weekday, weighted by hours (not just
+    # count of starts). Only records with a real start_time can be placed on an hour
+    # axis; the "pressed for time" hours-only fast path has no time to bucket. ──────
+    hour_weekday_hours = [[0.0] * 7 for _ in range(24)]
+    for r in records:
+        wd, hr = _weekday(r), _start_hour(r)
+        if wd is None or hr is None:
+            continue
+        hour_weekday_hours[hr][wd] += _hours(r)
+    hour_weekday_hours = [[round(v, 1) for v in row] for row in hour_weekday_hours]
 
     # ── Problem areas ─────────────────────────────────────────────────────────
     problem_areas = []
@@ -464,7 +504,8 @@ def _analyze_overtime(data: OvertimeAnalysisInput) -> dict:
         'top_reasons': top_phrases,
         'top_employees': [{'name': n, 'hours': round(h, 1)} for n, h in top_employees],
         'top_sections': [{'section': s, 'hours': round(h, 1)} for s, h in top_depts],
-        'daily_hours': _group_hours(records, lambda r: r.get('date')),
+        'hour_weekday_hours': hour_weekday_hours,
+        'weekday_labels': WEEKDAY_LABELS,
         '_source': 'polars-analysis' if _POLARS else 'pure-python-analysis',
         '_records_analysed': total,
         'generated_at': datetime.utcnow().isoformat(),
