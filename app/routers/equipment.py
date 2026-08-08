@@ -1,6 +1,6 @@
 # backend/app/routers/equipment.py
 from fastapi import APIRouter, HTTPException, Depends
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, computed_field
 from typing import List, Optional
 from datetime import date
 from app.supabase_client import supabase
@@ -12,7 +12,11 @@ import logging
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
-class Equipment(BaseModel):
+class EquipmentBase(BaseModel):
+    """The portable "what is this asset" contract — every field but `name` is
+    optional since the register isn't fully populated yet, and every field here
+    is safe to hand to another module's equipment picker/autofill (compressors,
+    breakdowns, etc.) without dragging in register-only bookkeeping."""
     # Primary fields
     id: Optional[int] = None
     equipment_id: Optional[str] = Field(None, description="Unique equipment identifier")
@@ -21,7 +25,7 @@ class Equipment(BaseModel):
     serial_number: Optional[str] = None
     category: Optional[str] = None
     subcategory: Optional[str] = None
-    
+
     # Status and location
     # Default must satisfy the equipment_status_check DB constraint, which only
     # accepts the form's values: operational | maintenance | out_of_service |
@@ -29,62 +33,80 @@ class Equipment(BaseModel):
     # status got a 500.
     status: Optional[str] = "operational"
     location: Optional[str] = None
+    department: Optional[str] = None
     assigned_to: Optional[str] = None
-    
+
     # Purchase information
     purchase_date: Optional[date] = None
     purchase_price: Optional[float] = None
+    purchase_cost: Optional[float] = None
     supplier: Optional[str] = None
+    supplier_contact: Optional[str] = None
+    supplier_phone: Optional[str] = None
+    warranty_info: Optional[str] = None
     warranty_expiry: Optional[date] = None
-    
-    # Maintenance
-    last_maintenance: Optional[date] = None
-    next_maintenance: Optional[date] = None
-    maintenance_notes: Optional[str] = None
-    
+
     # Additional info
+    model: Optional[str] = None
+    manufacturer: Optional[str] = Field(None, description="Who made it — distinct from `supplier`, who it was bought from")
+    power_rating: Optional[str] = Field(None, description="Structured capacity, e.g. \"45kW\" — unit varies (kW/HP), so a formatted string, not a bare float")
+    criticality: Optional[str] = Field(None, description="High / Medium / Low")
+    commission_date: Optional[date] = None
+    specifications: Optional[str] = None
+    maintenance_interval: Optional[int] = None
+    maintenance_notes: Optional[str] = None
     condition: Optional[str] = None
     barcode: Optional[str] = None
     qr_code: Optional[str] = None
     image_url: Optional[str] = None
     notes: Optional[str] = None
 
-    # Fields the EquipmentForm has always sent but this model silently dropped
-    # (Pydantic ignores unknown keys by default). All 11 have existed as columns
-    # in the equipment table all along — every one was NULL in every row because
-    # saves discarded them while still returning success. The "Total Value" KPI
-    # summed current_value over rows that could never have one.
-    model: Optional[str] = None
-    department: Optional[str] = None
-    commission_date: Optional[date] = None
-    purchase_cost: Optional[float] = None
-    current_value: Optional[float] = None
-    depreciation_rate: Optional[float] = None
-    supplier_contact: Optional[str] = None
-    supplier_phone: Optional[str] = None
-    warranty_info: Optional[str] = None
-    specifications: Optional[str] = None
-    maintenance_interval: Optional[int] = None
+    @computed_field
+    @property
+    def display_name(self) -> str:
+        """One consistent "how do I show this equipment as one string" — every
+        picker/dropdown/breadcrumb should call this instead of re-deriving its
+        own format. Excluded from the Supabase write payload (see the two
+        `.dict(..., exclude={'display_name'})` call sites below) since it isn't
+        a real column."""
+        return f"{self.equipment_id} — {self.name}" if self.equipment_id else self.name
 
+    def matches(self, query: str) -> bool:
+        """The one search-match rule, so every equipment search/filter (this
+        router, EquipmentAutocomplete, a future compressor picker) agrees on
+        what "matches" means instead of each re-implementing it slightly
+        differently."""
+        q = query.lower()
+        return any(q in (v or '').lower() for v in (self.name, self.equipment_id, self.model, self.manufacturer))
+
+
+class Equipment(EquipmentBase):
+    """The full equipment-register record — every existing endpoint uses this.
+    Kept as a distinct type from EquipmentBase (currently field-identical) so a
+    future register-only field has somewhere to go without pulling other
+    modules' equipment pickers along for the ride. last_maintenance/
+    next_maintenance/current_value/depreciation_rate USED to live here —
+    removed: maintenance dates belong to the maintenance module, valuation to
+    accounting, not the equipment register."""
     class Config:
         json_encoders = {date: lambda v: v.isoformat()}
 
 def process_dates_for_db(data: dict) -> dict:
     """Convert date objects to ISO strings for Supabase"""
     processed_data = data.copy()
-    
-    date_fields = ['purchase_date', 'warranty_expiry', 'last_maintenance', 'next_maintenance', 'commission_date']
+
+    date_fields = ['purchase_date', 'warranty_expiry', 'commission_date']
     for field in date_fields:
         if isinstance(processed_data.get(field), date):
             processed_data[field] = processed_data[field].isoformat()
-    
+
     return processed_data
 
 def process_dates_from_db(data: dict) -> dict:
     """Convert ISO date strings back to date objects"""
     processed_data = data.copy()
     
-    date_fields = ['purchase_date', 'warranty_expiry', 'last_maintenance', 'next_maintenance', 'commission_date']
+    date_fields = ['purchase_date', 'warranty_expiry', 'commission_date']
     for field in date_fields:
         if processed_data.get(field):
             try:
@@ -150,7 +172,9 @@ async def get_equipment_item(equipment_id: int):
 async def create_equipment(equipment: Equipment, current_user: dict = Depends(get_current_user)):
     """Create a new equipment record."""
     try:
-        data_to_insert = equipment.dict(exclude_none=True)
+        # display_name is a computed field (derived, not a real column) — exclude
+        # it from the write payload or Supabase rejects the insert.
+        data_to_insert = equipment.dict(exclude_none=True, exclude={'display_name'})
         
         # Auto-generate equipment_id if not provided
         if not data_to_insert.get('equipment_id'):
@@ -193,7 +217,7 @@ async def update_equipment(equipment_id: int, updated: Equipment, current_user: 
                 detail=f"Equipment with ID {equipment_id} not found"
             )
         
-        data_to_update = updated.dict(exclude_none=True)
+        data_to_update = updated.dict(exclude_none=True, exclude={'display_name'})
         data_to_update = process_dates_for_db(data_to_update)
         
         # Don't update equipment_id if it already exists
