@@ -52,7 +52,13 @@ class BreakdownCreate(BaseModel):
     location: str = Field(..., min_length=1)
     breakdown_date: str  # Changed from 'date' to 'breakdown_date'
     breakdown_type: str = Field(..., min_length=1)
-    
+
+    # Short, pick-or-type "nature of breakdown" tag (e.g. "Bearing Failure") -
+    # distinct from the free-form narrative below; backed by lookup_lists
+    # (list_name="breakdown_nature") so it grows into a shared, real list instead
+    # of being retyped every time.
+    breakdown_nature: Optional[str] = None
+
     # Description fields - database has both
     breakdown_description: Optional[str] = None
     machine_description: Optional[str] = None
@@ -97,6 +103,7 @@ class BreakdownUpdate(BaseModel):
     location: Optional[str] = None
     breakdown_date: Optional[str] = None
     breakdown_type: Optional[str] = None
+    breakdown_nature: Optional[str] = None
     breakdown_description: Optional[str] = None
     machine_description: Optional[str] = None
     work_done: Optional[str] = None
@@ -197,6 +204,22 @@ def parse_spares(record: dict) -> list:
         except:
             return []
     return spares
+
+def learn_lookup_value(list_name: str, value: Optional[str]):
+    """Best-effort: record a freshly-typed value into the shared, growing lookup
+    list for this field (lookup_lists table) so future entries can pick it instead
+    of retyping it — called after location/breakdown_nature are saved. Never
+    raises: a failure here must not fail the breakdown save itself."""
+    v = (value or '').strip()
+    if not v or supabase is None:
+        return
+    try:
+        existing = supabase.table("lookup_lists").select("id").eq("list_name", list_name).ilike("value", v).execute()
+        if existing.data:
+            return
+        supabase.table("lookup_lists").insert({"list_name": list_name, "value": v}).execute()
+    except Exception as e:
+        logger.warning(f"Could not save '{v}' to lookup list '{list_name}': {e}")
 
 # ===== API ENDPOINTS =====
 
@@ -299,7 +322,7 @@ async def create_breakdown(breakdown: BreakdownCreate, current_user: dict = Depe
         # Ensure we're only sending columns that exist
         expected_columns = [
             'machine_id', 'machine_name', 'machine_description', 'artisan_name',
-            'department', 'location', 'breakdown_date', 'breakdown_type',
+            'department', 'location', 'breakdown_date', 'breakdown_type', 'breakdown_nature',
             'work_done', 'artisan_recommendations', 'status', 'priority',
             'breakdown_start', 'breakdown_end', 'work_start', 'work_end',
             'response_time_minutes', 'repair_time_minutes', 'downtime_minutes',
@@ -323,7 +346,10 @@ async def create_breakdown(breakdown: BreakdownCreate, current_user: dict = Depe
                     result['spares_used'] = json.loads(result['spares_used'])
                 except:
                     result['spares_used'] = []
-            
+
+            learn_lookup_value("breakdown_location", result.get('location'))
+            learn_lookup_value("breakdown_nature", result.get('breakdown_nature'))
+
             await invalidate_namespace("breakdowns")
             return {
                 "success": True,
@@ -408,7 +434,7 @@ async def update_breakdown(breakdown_id: str, breakdown_update: BreakdownUpdate,
         # Remove any unexpected fields
         expected_columns = [
             'machine_id', 'machine_name', 'machine_description', 'artisan_name',
-            'department', 'location', 'breakdown_date', 'breakdown_type',
+            'department', 'location', 'breakdown_date', 'breakdown_type', 'breakdown_nature',
             'work_done', 'artisan_recommendations', 'status', 'priority',
             'breakdown_start', 'breakdown_end', 'work_start', 'work_end',
             'response_time_minutes', 'repair_time_minutes', 'downtime_minutes',
@@ -429,6 +455,9 @@ async def update_breakdown(breakdown_id: str, breakdown_update: BreakdownUpdate,
                     result['spares_used'] = json.loads(result['spares_used'])
                 except:
                     result['spares_used'] = []
+
+            learn_lookup_value("breakdown_location", result.get('location'))
+            learn_lookup_value("breakdown_nature", result.get('breakdown_nature'))
 
             await invalidate_namespace("breakdowns")
             return result

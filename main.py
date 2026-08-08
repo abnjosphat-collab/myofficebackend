@@ -239,6 +239,7 @@ for _name, _prefix, _tags, _key in [
     ("maintenance", "/api/maintenance", ["Maintenance"], None),
     ("issues", "/api/issues", ["Stock Issues"], None),
     ("drivers", "/api/drivers", ["Drivers"], None),
+    ("lookup_lists", "/api/lookup-lists", ["Lookup Lists"], None),
 ]:
     register_router(_name, _prefix, _tags, _key)
 
