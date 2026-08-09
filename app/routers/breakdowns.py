@@ -347,7 +347,7 @@ async def create_breakdown(breakdown: BreakdownCreate, current_user: dict = Depe
                 except:
                     result['spares_used'] = []
 
-            learn_lookup_value("breakdown_location", result.get('location'))
+            learn_lookup_value("location", result.get('location'))
             learn_lookup_value("breakdown_nature", result.get('breakdown_nature'))
 
             await invalidate_namespace("breakdowns")
@@ -456,7 +456,7 @@ async def update_breakdown(breakdown_id: str, breakdown_update: BreakdownUpdate,
                 except:
                     result['spares_used'] = []
 
-            learn_lookup_value("breakdown_location", result.get('location'))
+            learn_lookup_value("location", result.get('location'))
             learn_lookup_value("breakdown_nature", result.get('breakdown_nature'))
 
             await invalidate_namespace("breakdowns")
