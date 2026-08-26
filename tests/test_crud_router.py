@@ -14,40 +14,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from pydantic import BaseModel
 
-
-class FakeResult:
-    def __init__(self, data):
-        self.data = data
-
-
-class FakeQuery:
-    """Records every call and is fully chainable; execute() returns the canned rows."""
-    def __init__(self, table, store):
-        self.table_name = table
-        self.store = store
-        store["queries"].append(self)
-        self.calls = []
-
-    def select(self, *a, **k):     self.calls.append(("select", a));       return self
-    def eq(self, col, val):        self.calls.append(("eq", col, val));    return self
-    def or_(self, s):              self.calls.append(("or_", s));          return self
-    def order(self, col, desc=False): self.calls.append(("order", col, desc)); return self
-    def limit(self, n):            self.calls.append(("limit", n));        return self
-    def offset(self, n):           self.calls.append(("offset", n));       return self
-    def insert(self, d):           self.calls.append(("insert", d)); self.store["insert"] = d; return self
-    def update(self, d):           self.calls.append(("update", d)); self.store["update"] = d; return self
-    def delete(self):              self.calls.append(("delete",));         return self
-
-    def execute(self):
-        return FakeResult(self.store["data"])
-
-
-class FakeSupabase:
-    def __init__(self, store):
-        self.store = store
-
-    def table(self, name):
-        return FakeQuery(name, self.store)
+from tests.conftest import FakeSupabase
 
 
 class ItemCreate(BaseModel):

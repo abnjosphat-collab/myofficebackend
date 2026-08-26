@@ -5,6 +5,8 @@ __pycache__/
 *.pyd
 *.sqlite3
 .pytest_cache/
+.coverage
+htmlcov/
 
 # Virtual environment
 .venv/

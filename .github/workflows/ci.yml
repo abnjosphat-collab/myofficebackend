@@ -35,4 +35,8 @@ jobs:
           pip install -r requirements.txt -r requirements-dev.txt
 
       - name: Run tests
-        run: pytest -q
+        # --cov is report-only for now (term-missing shows exactly which lines aren't
+        # hit) — no --cov-fail-under yet. The point right now is making coverage
+        # visible, not gating on it; a threshold can follow once there's a real
+        # baseline to set it against instead of guessing one.
+        run: pytest -q --cov=app --cov-report=term-missing
