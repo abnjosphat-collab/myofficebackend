@@ -21,6 +21,9 @@ class OvertimeCreate(BaseModel):
     # By Section breakdown regardless of who actually worked it).
     department: Optional[str] = None
     overtime_type: str
+    # 'planned' / 'unplanned' / None (unclassified) — the frontend owns the enum,
+    # same loose-typing convention as overtime_type/status in this router.
+    planning_status: Optional[str] = None
     date: str
     # Reason/contact/exact times are no longer mandatory — a fast path for when someone is
     # pressed for time: either give start_time+end_time (hours computed from them) OR just
@@ -49,6 +52,7 @@ class OvertimeUpdate(BaseModel):
     position: Optional[str] = None
     department: Optional[str] = None
     overtime_type: Optional[str] = None
+    planning_status: Optional[str] = None
     date: Optional[str] = None
     start_time: Optional[str] = None
     end_time: Optional[str] = None
@@ -102,6 +106,7 @@ async def create_overtime(overtime: OvertimeCreate, current_user: dict = Depends
             "position": overtime.position,
             "department": overtime.department,
             "overtime_type": overtime.overtime_type,
+            "planning_status": overtime.planning_status,
             "date": overtime.date,
             "start_time": overtime.start_time,
             "end_time": overtime.end_time,
