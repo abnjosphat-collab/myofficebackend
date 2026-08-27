@@ -4,7 +4,7 @@ from pydantic import BaseModel, Field, validator
 from typing import Optional, List
 from datetime import date, datetime
 from app.supabase_client import supabase
-from app.auth import require_role, get_current_user
+from app.auth import get_current_user, require_role_if_status_in
 from app.db_helpers import get_or_404
 import logging
 import traceback
@@ -176,9 +176,7 @@ async def get_leave(leave_id: int):
 async def update_leave(leave_id: int, updated: LeaveUpdate, authorization: Optional[str] = Header(None), current_user: dict = Depends(get_current_user)):
     # Any edit requires a signed-in user (current_user); approve/reject additionally
     # requires manager+ (checked below against the same Authorization header).
-    if updated.status in ('approved', 'rejected'):
-        approver = await require_role('manager')(authorization)
-        logger.info(f"Leave approval '{updated.status}' by {approver['email']} (role: {approver['role']})")
+    await require_role_if_status_in(updated.status, {'approved', 'rejected'}, 'manager', authorization, context="Leave approval")
     try:
         existing = get_or_404(supabase, "leaves", leave_id, detail=f"Leave with ID {leave_id} not found")
 

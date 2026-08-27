@@ -109,3 +109,24 @@ def require_role(min_role: str):
             )
         return user
     return _check
+
+
+async def require_role_if_status_in(
+    status: Optional[str], trigger_statuses: set, min_role: str,
+    authorization: Optional[str], context: str = "Status change",
+) -> Optional[dict]:
+    """The "conditional" half of the pattern this module's own docstring already
+    named above: an edit endpoint that only needs an elevated role for SOME status
+    values (approve/reject) and not others (any other field edit, which just needs
+    to be signed in via the route's normal current_user dependency). Was hand-rolled
+    identically in leaves.py and overtime.py's PATCH handlers; centralised here.
+
+    No-op (returns None) if `status` isn't one of `trigger_statuses`. Otherwise
+    raises the same 401/403 require_role(min_role) already would, and logs who did
+    it — `context` customises that log line's wording per call site.
+    """
+    if status not in trigger_statuses:
+        return None
+    approver = await require_role(min_role)(authorization)
+    logger.info(f"{context} '{status}' by {approver['email']} (role: {approver['role']})")
+    return approver

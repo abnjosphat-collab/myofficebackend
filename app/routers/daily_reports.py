@@ -2,11 +2,11 @@
 from fastapi import APIRouter, HTTPException, Query, Request, Depends
 from app.auth import get_current_user, require_role
 from app.db_helpers import apply_date_range
+from app.serialization import encode_json_fields, decode_json_fields
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from typing import List, Optional
 from datetime import datetime
-import json
 import logging
 from supabase import create_client, Client
 import os
@@ -71,22 +71,6 @@ def format_supabase_response(data):
     if hasattr(data, 'data'):
         return data.data
     return data
-
-def parse_json_fields(report: dict) -> dict:
-    """Parse JSON fields in report"""
-    if report.get('call_outs') and isinstance(report['call_outs'], str):
-        try:
-            report['call_outs'] = json.loads(report['call_outs'])
-        except:
-            report['call_outs'] = []
-    
-    if report.get('equipment') and isinstance(report['equipment'], str):
-        try:
-            report['equipment'] = json.loads(report['equipment'])
-        except:
-            report['equipment'] = []
-    
-    return report
 
 # ===== REMOVED DUPLICATE ROOT ENDPOINT =====
 # The root endpoint was causing conflict with get_reports
@@ -161,12 +145,8 @@ async def get_reports(
         reports = format_supabase_response(result)
         
         logger.info(f"✅ Retrieved {len(reports)} reports")
-        
-        # Parse JSON fields
-        for report in reports:
-            parse_json_fields(report)
-        
-        return reports
+
+        return [decode_json_fields(r, ['call_outs', 'equipment']) for r in reports]
         
     except Exception as e:
         logger.error(f"❌ Error in get_reports: {str(e)}")
@@ -197,8 +177,7 @@ async def create_report(report: DailyReportCreate, current_user: dict = Depends(
         
         # Prepare data
         report_data = report.dict()
-        report_data['call_outs'] = json.dumps(report_data['call_outs'])
-        report_data['equipment'] = json.dumps(report_data['equipment'])
+        report_data = encode_json_fields(report_data, ['call_outs', 'equipment'])
         
         now = datetime.now().isoformat()
         
@@ -220,9 +199,8 @@ async def create_report(report: DailyReportCreate, current_user: dict = Depends(
         if not created_data:
             raise HTTPException(status_code=500, detail="Failed to save report")
         
-        created_report = created_data[0]
-        parse_json_fields(created_report)
-        
+        created_report = decode_json_fields(created_data[0], ['call_outs', 'equipment'])
+
         logger.info(f"✅ Report saved successfully")
         return created_report
         
@@ -275,15 +253,7 @@ async def get_stats_summary(
             total_dam += float(report.get('dam_level', 0))
             
             # Parse callouts
-            callouts = report.get('call_outs', '[]')
-            if isinstance(callouts, str):
-                try:
-                    callouts_list = json.loads(callouts)
-                except:
-                    callouts_list = []
-            else:
-                callouts_list = callouts
-            
+            callouts_list = decode_json_fields(report, ['call_outs']).get('call_outs') or []
             total_callout_hours += sum(float(co.get('duration_hours', 0)) for co in callouts_list)
         
         return {
@@ -383,15 +353,8 @@ async def get_equipment_performance_trend(
         categories = set()
         
         for report in reports:
-            equipment = report.get('equipment', '[]')
-            if isinstance(equipment, str):
-                try:
-                    equipment_list = json.loads(equipment)
-                except:
-                    equipment_list = []
-            else:
-                equipment_list = equipment
-            
+            equipment_list = decode_json_fields(report, ['equipment']).get('equipment') or []
+
             for eq in equipment_list:
                 name = eq.get('name')
                 category = eq.get('category')

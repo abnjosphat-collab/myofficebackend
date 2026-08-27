@@ -2,10 +2,10 @@ from fastapi import APIRouter, HTTPException, Header, Depends
 from pydantic import BaseModel, Field, validator
 from typing import Optional, List, Dict, Any
 from app.supabase_client import supabase
-from app.auth import require_role, get_current_user
+from app.auth import get_current_user, require_role_if_status_in
 from app.db_helpers import get_or_404
+from app.serialization import encode_json_fields, decode_json_fields
 import logging
-import json
 from datetime import datetime
 
 logger = logging.getLogger(__name__)
@@ -83,13 +83,7 @@ async def get_overtime(status: Optional[str] = None, overtime_type: Optional[str
             data = response
             
         logger.info(f"Returning {len(data) if data else 0} records")
-        for record in (data or []):
-            if isinstance(record.get('spares_used'), str):
-                try:
-                    record['spares_used'] = json.loads(record['spares_used'])
-                except (TypeError, ValueError):
-                    record['spares_used'] = []
-        return data or []
+        return [decode_json_fields(record, ['spares_used']) for record in (data or [])]
         
     except Exception as e:
         logger.error(f"Error fetching overtime: {str(e)}")
@@ -115,10 +109,11 @@ async def create_overtime(overtime: OvertimeCreate, current_user: dict = Depends
             "reason": overtime.reason,
             "contact_number": overtime.contact_number,
             "emergency_contact": overtime.emergency_contact,
-            "spares_used": json.dumps(overtime.spares_used or []),
+            "spares_used": overtime.spares_used or [],
             "status": "pending",
             "applied_date": datetime.utcnow().isoformat()
         }
+        data_to_insert = encode_json_fields(data_to_insert, ['spares_used'])
 
         logger.info(f"Inserting data: {data_to_insert}")
 
@@ -127,12 +122,7 @@ async def create_overtime(overtime: OvertimeCreate, current_user: dict = Depends
         logger.info(f"Supabase insert response: {response}")
 
         if hasattr(response, 'data') and response.data:
-            created_data = response.data[0]
-            if isinstance(created_data.get('spares_used'), str):
-                try:
-                    created_data['spares_used'] = json.loads(created_data['spares_used'])
-                except (TypeError, ValueError):
-                    created_data['spares_used'] = []
+            created_data = decode_json_fields(response.data[0], ['spares_used'])
             logger.info(f"Successfully created overtime with ID: {created_data.get('id')}")
             return created_data
         else:
@@ -148,9 +138,7 @@ async def create_overtime(overtime: OvertimeCreate, current_user: dict = Depends
 async def update_overtime(overtime_id: int, updated: OvertimeUpdate, authorization: Optional[str] = Header(None), current_user: dict = Depends(get_current_user)):
     # Any edit requires a signed-in user (current_user); approve/reject additionally
     # requires manager+ (checked below against the same Authorization header).
-    if updated.status in ('approved', 'rejected'):
-        approver = await require_role('manager')(authorization)
-        logger.info(f"Approval action '{updated.status}' by {approver['email']} (role: {approver['role']})")
+    await require_role_if_status_in(updated.status, {'approved', 'rejected'}, 'manager', authorization, context="Approval action")
     try:
         logger.info(f"Updating overtime {overtime_id}")
         
@@ -161,18 +149,12 @@ async def update_overtime(overtime_id: int, updated: OvertimeUpdate, authorizati
         # field, not be silently dropped. See work_orders (backend edec24a).
         data_to_update = updated.model_dump(exclude_unset=True)
         if 'spares_used' in data_to_update:
-            data_to_update['spares_used'] = json.dumps(data_to_update['spares_used'] or [])
+            data_to_update = encode_json_fields(data_to_update, ['spares_used'])
 
         response = supabase.table("overtime").update(data_to_update).eq("id", overtime_id).execute()
 
         if hasattr(response, 'data') and response.data:
-            result = response.data[0]
-            if isinstance(result.get('spares_used'), str):
-                try:
-                    result['spares_used'] = json.loads(result['spares_used'])
-                except (TypeError, ValueError):
-                    result['spares_used'] = []
-            return result
+            return decode_json_fields(response.data[0], ['spares_used'])
         else:
             raise HTTPException(status_code=500, detail="Update failed")
             

@@ -6,8 +6,8 @@ from app.supabase_client import supabase
 from app.auth import get_current_user, require_role
 from app.aggregation import count_by
 from app.db_helpers import apply_date_range, get_or_404
+from app.serialization import encode_json_fields, decode_json_fields
 import logging
-import json
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -80,10 +80,7 @@ async def create_timesheet_entry(entry: TimesheetEntryCreate, current_user: dict
         data_to_insert['date'] = data_to_insert['date'].isoformat()
         
         # Handle JSON fields
-        if data_to_insert.get('overtime_periods'):
-            data_to_insert['overtime_periods'] = json.dumps(data_to_insert['overtime_periods'])
-        else:
-            data_to_insert['overtime_periods'] = json.dumps([])
+        data_to_insert = encode_json_fields(data_to_insert, ['overtime_periods'])
         
         # Add timestamps
         now = datetime.utcnow().isoformat()
@@ -108,13 +105,7 @@ async def create_timesheet_entry(entry: TimesheetEntryCreate, current_user: dict
             logger.info(f"Created new timesheet entry")
         
         if response.data:
-            result = response.data[0]
-            # Parse JSON fields back
-            if result.get('overtime_periods'):
-                try:
-                    result['overtime_periods'] = json.loads(result['overtime_periods'])
-                except:
-                    result['overtime_periods'] = []
+            result = decode_json_fields(response.data[0], ['overtime_periods'])
             return {"action": action, "data": result}
         else:
             raise HTTPException(status_code=500, detail="Database operation failed")
@@ -128,14 +119,7 @@ async def get_timesheet_entry(entry_id: int):
     """Get a specific timesheet entry by ID"""
     try:
         result = get_or_404(supabase, "timesheets", entry_id, detail="Timesheet entry not found")
-        # Parse JSON fields
-        if result.get('overtime_periods'):
-            try:
-                result['overtime_periods'] = json.loads(result['overtime_periods'])
-            except:
-                result['overtime_periods'] = []
-
-        return result
+        return decode_json_fields(result, ['overtime_periods'])
 
 
     except Exception as e:
@@ -153,23 +137,17 @@ async def update_timesheet_entry(entry_id: int, updated: TimesheetEntryUpdate, c
         # field, not be silently dropped. See work_orders (backend edec24a).
         data_to_update = updated.model_dump(exclude_unset=True)
         
-        # Handle JSON fields
+        # Handle JSON fields — only if the caller actually sent this field, matching
+        # exclude_unset above (encode_json_fields would otherwise add it fresh).
         if 'overtime_periods' in data_to_update:
-            data_to_update['overtime_periods'] = json.dumps(data_to_update['overtime_periods'])
-        
+            data_to_update = encode_json_fields(data_to_update, ['overtime_periods'])
+
         data_to_update["updated_at"] = datetime.utcnow().isoformat()
-        
+
         response = supabase.table("timesheets").update(data_to_update).eq("id", entry_id).execute()
-        
+
         if response.data:
-            result = response.data[0]
-            # Parse JSON fields
-            if result.get('overtime_periods'):
-                try:
-                    result['overtime_periods'] = json.loads(result['overtime_periods'])
-                except:
-                    result['overtime_periods'] = []
-            return result
+            return decode_json_fields(response.data[0], ['overtime_periods'])
         else:
             raise HTTPException(status_code=500, detail="Update failed")
             
