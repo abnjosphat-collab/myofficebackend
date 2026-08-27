@@ -322,8 +322,8 @@ async def get_compressors(
         return compressors
     except Exception as e:
         logger.error(f"Error fetching compressors: {str(e)}")
-        # Return empty array instead of throwing error for frontend
-        return []
+        # Was returning [] here — indistinguishable from "no compressors registered."
+        raise HTTPException(status_code=500, detail="Failed to load compressors")
 
 @router.get("/compressors/{compressor_id}", response_model=Dict[str, Any], dependencies=[Depends(get_current_user)])
 async def get_compressor_by_id(
@@ -692,7 +692,9 @@ async def get_compressor_readings(
         }
     except Exception as e:
         logger.error(f"Error fetching readings: {str(e)}")
-        return {"success": False, "data": [], "error": str(e)}
+        # Was returning 200 with success:False — a real status code is a guarantee
+        # every caller gets, not just the ones that remember to check the body.
+        raise HTTPException(status_code=500, detail="Failed to load readings")
 
 @router.get("/readings/{compressor_id}/detailed", dependencies=[Depends(get_current_user)])
 async def get_detailed_readings(
@@ -760,7 +762,7 @@ async def get_detailed_readings(
         }
     except Exception as e:
         logger.error(f"Error fetching detailed readings: {str(e)}")
-        return {"success": False, "data": [], "error": str(e)}
+        raise HTTPException(status_code=500, detail="Failed to load detailed readings")
 
 @router.get("/readings/date/{date}", dependencies=[Depends(get_current_user)])
 async def get_readings_by_date(
@@ -1061,7 +1063,7 @@ async def get_performance_metrics(
         return metrics
     except Exception as e:
         logger.error(f"Error getting performance metrics: {str(e)}")
-        return []
+        raise HTTPException(status_code=500, detail="Failed to load performance metrics")
 
 @router.get("/analytics/trends", dependencies=[Depends(get_current_user)])
 async def get_trend_analysis(

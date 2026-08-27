@@ -288,7 +288,12 @@ async def upload_attachment(service_id: str, file: UploadFile = File(...), curre
 
     try:
         file_url = supabase.storage.from_(BUCKET).get_public_url(storage_path)
-    except Exception:
+    except Exception as e:
+        # The file itself is already safely uploaded and verified above (storage_path
+        # is saved below either way) — only the display URL failed to generate. Log it
+        # so it's not invisible, but don't fail an otherwise-good upload over it; the
+        # frontend shows "link unavailable" rather than a dead link for file_url="".
+        logger.error("get_public_url failed for %s: %s", storage_path, e)
         file_url = ""
 
     meta = {

@@ -157,7 +157,10 @@ async def get_leave_stats():
         }
     except Exception as e:
         logger.error(f"Error fetching stats: {str(e)}\n{traceback.format_exc()}")
-        return {"total": 0, "pending": 0, "approved": 0, "rejected": 0, "on_leave_now": 0, "upcoming": 0}
+        # Was returning an all-zero 200 here — currently dormant (the frontend computes
+        # these stats client-side instead of calling this endpoint) but a landmine for
+        # whoever wires a dashboard widget to it next.
+        raise HTTPException(status_code=500, detail="Failed to load leave stats")
 
 # ---------- GET leave by id ----------
 @router.get("/{leave_id}", response_model=LeaveResponse, dependencies=[Depends(get_current_user)])

@@ -386,10 +386,15 @@ async def apply_ppe_matrix_all(current_user: dict = Depends(require_role('manage
     matrix = dict(PPE_MATRIX_DEFAULTS)
     matrix.update(_matrix_overrides())
     results = {}
+    failed = []
     for ppe_type, interval in matrix.items():
         try:
             results[ppe_type] = _apply_matrix_to_type(ppe_type, interval)
         except Exception as e:
             logger.error(f"Failed recalculating '{ppe_type}': {e}")
             results[ppe_type] = None
-    return {"results": results, "total_updated": sum(v for v in results.values() if v)}
+            failed.append(ppe_type)
+    # `results[type] is None` already distinguished "failed" from "0 records updated"
+    # for a caller that reads it carefully, but nothing surfaced it if they only checked
+    # the aggregate `total_updated` — `failed` makes it explicit rather than implicit.
+    return {"results": results, "total_updated": sum(v for v in results.values() if v), "failed": failed}

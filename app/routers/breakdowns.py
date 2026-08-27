@@ -4,12 +4,12 @@ from app.auth import get_current_user, require_role
 from pydantic import BaseModel, Field, validator
 from typing import Optional, List
 from datetime import datetime, timedelta
-import json
 import logging
 import os
 from supabase import create_client, Client
 from collections import defaultdict
 from app.cache import cached, cache_get, cache_set, build_key, invalidate_namespace
+from app.serialization import encode_json_fields, decode_json_fields
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -197,13 +197,7 @@ def check_supabase():
 
 def parse_spares(record: dict) -> list:
     """Parse spares_used field from string to list"""
-    spares = record.get('spares_used', '[]')
-    if isinstance(spares, str):
-        try:
-            return json.loads(spares)
-        except:
-            return []
-    return spares
+    return decode_json_fields(record, ['spares_used']).get('spares_used') or []
 
 def learn_lookup_value(list_name: str, value: Optional[str]):
     """Best-effort: record a freshly-typed value into the shared, growing lookup
@@ -270,15 +264,8 @@ async def get_breakdowns(
         
         response = query.order("created_at", desc=True).range(offset, offset + limit - 1).execute()
         
-        records = response.data or []
-        # Parse spares_used JSON string back to list
-        for record in records:
-            if isinstance(record.get('spares_used'), str):
-                try:
-                    record['spares_used'] = json.loads(record['spares_used'])
-                except:
-                    record['spares_used'] = []
-        
+        records = [decode_json_fields(r, ['spares_used']) for r in (response.data or [])]
+
         result = {
             "data": records,
             "count": len(records),
@@ -308,10 +295,11 @@ async def create_breakdown(breakdown: BreakdownCreate, current_user: dict = Depe
         if data.get('spares_used'):
             costs = calculate_spare_costs(breakdown.spares_used)
             data['total_spare_cost'] = costs['total_spare_cost']
-            data['spares_used'] = json.dumps(costs['spares_used'])
+            data['spares_used'] = costs['spares_used']
         else:
-            data['spares_used'] = '[]'
+            data['spares_used'] = []
             data['total_spare_cost'] = 0.0
+        data = encode_json_fields(data, ['spares_used'])
         
         # Add timestamps
         now = datetime.utcnow().isoformat()
@@ -339,13 +327,7 @@ async def create_breakdown(breakdown: BreakdownCreate, current_user: dict = Depe
         response = db.table("breakdowns").insert(data).execute()
         
         if response.data:
-            result = response.data[0]
-            # Parse spares_used back to list for response
-            if isinstance(result.get('spares_used'), str):
-                try:
-                    result['spares_used'] = json.loads(result['spares_used'])
-                except:
-                    result['spares_used'] = []
+            result = decode_json_fields(response.data[0], ['spares_used'])
 
             learn_lookup_value("location", result.get('location'))
             learn_lookup_value("breakdown_nature", result.get('breakdown_nature'))
@@ -376,16 +358,8 @@ async def get_breakdown(breakdown_id: str):
         if not response.data:
             raise HTTPException(status_code=404, detail="Breakdown not found")
         
-        result = response.data[0]
-        # Parse spares_used
-        if isinstance(result.get('spares_used'), str):
-            try:
-                result['spares_used'] = json.loads(result['spares_used'])
-            except:
-                result['spares_used'] = []
-        
-        return result
-        
+        return decode_json_fields(response.data[0], ['spares_used'])
+
     except HTTPException:
         raise
     except Exception as e:
@@ -415,10 +389,11 @@ async def update_breakdown(breakdown_id: str, breakdown_update: BreakdownUpdate,
             if update_data['spares_used']:
                 costs = calculate_spare_costs(update_data['spares_used'])
                 update_data['total_spare_cost'] = costs['total_spare_cost']
-                update_data['spares_used'] = json.dumps(costs['spares_used'])
+                update_data['spares_used'] = costs['spares_used']
             else:
-                update_data['spares_used'] = '[]'
+                update_data['spares_used'] = []
                 update_data['total_spare_cost'] = 0.0
+            update_data = encode_json_fields(update_data, ['spares_used'])
         
         # Calculate time metrics if time fields are updated
         if any(key in update_data for key in ['breakdown_start', 'breakdown_end', 'work_start', 'work_end']):
@@ -448,13 +423,7 @@ async def update_breakdown(breakdown_id: str, breakdown_update: BreakdownUpdate,
         response = db.table("breakdowns").update(update_data).eq("id", breakdown_id).execute()
         
         if response.data:
-            result = response.data[0]
-            # Parse spares_used
-            if isinstance(result.get('spares_used'), str):
-                try:
-                    result['spares_used'] = json.loads(result['spares_used'])
-                except:
-                    result['spares_used'] = []
+            result = decode_json_fields(response.data[0], ['spares_used'])
 
             learn_lookup_value("location", result.get('location'))
             learn_lookup_value("breakdown_nature", result.get('breakdown_nature'))
@@ -537,22 +506,11 @@ async def get_dashboard_overview():
         
     except Exception as e:
         logger.error(f"Error fetching dashboard: {e}")
-        # Return basic mock data
-        return {
-            "metrics": {
-                "total_breakdowns": 0,
-                "week_breakdowns": 0,
-                "open_breakdowns": 0,
-                "high_priority": 0,
-                "critical_priority": 0,
-                "today_breakdowns": 0,
-                "today_downtime_minutes": 0,
-                "today_downtime_hours": 0
-            },
-            "last_updated": datetime.utcnow().isoformat(),
-            "success": True,
-            "note": "Using fallback data"
-        }
+        # Was returning an all-zero "success": True payload here — indistinguishable
+        # from a genuinely healthy plant with zero breakdowns, and it reached the
+        # homepage KPI tile with nothing telling anyone the DB call actually failed.
+        # A real error status lets the frontend show a real error state instead.
+        raise HTTPException(status_code=500, detail="Failed to load dashboard metrics")
 
 @router.get("/health/check")
 async def health_check():
