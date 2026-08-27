@@ -40,3 +40,12 @@ jobs:
         # visible, not gating on it; a threshold can follow once there's a real
         # baseline to set it against instead of guessing one.
         run: pytest -q --cov=app --cov-report=term-missing
+
+      - name: Type-check (report-only)
+        # Baseline as of 2026-08-26: ~2084 errors — the codebase has never been
+        # type-checked before now. continue-on-error means this can never fail the
+        # build; it exists to make the error count visible in every run instead of
+        # guessed, same rationale as --cov above. Tighten to blocking once the count
+        # is small enough to be a realistic bar, not before.
+        run: pyright app
+        continue-on-error: true
