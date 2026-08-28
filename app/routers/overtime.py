@@ -69,26 +69,34 @@ class OvertimeUpdate(BaseModel):
 async def get_overtime(status: Optional[str] = None, overtime_type: Optional[str] = None):
     try:
         logger.info("Fetching overtime data...")
-        
-        query = supabase.table("overtime").select("*")
-        
-        if status:
-            query = query.eq("status", status)
-        if overtime_type:
-            query = query.eq("overtime_type", overtime_type)
-            
-        response = query.order("created_at", desc=True).execute()
-        
-        logger.info(f"Supabase response: {response}")
-        
-        if hasattr(response, 'data'):
-            data = response.data
-        else:
-            data = response
-            
-        logger.info(f"Returning {len(data) if data else 0} records")
-        return [decode_json_fields(record, ['spares_used']) for record in (data or [])]
-        
+
+        def _build_query():
+            q = supabase.table("overtime").select("*")
+            if status:
+                q = q.eq("status", status)
+            if overtime_type:
+                q = q.eq("overtime_type", overtime_type)
+            return q.order("created_at", desc=True)
+
+        # Supabase PostgREST caps each request at 1000 rows — a single unbounded
+        # .execute() here silently returned only the 1000 most-recently-created
+        # records once the table grew past that, with older ones invisible to the
+        # frontend (list view, Weekly Summary, analysis) even though they were
+        # still safely in the database. Loop with .range() until exhausted, same
+        # pattern as spares.py's list endpoint.
+        PAGE = 1000
+        data: list = []
+        start = 0
+        while True:
+            batch = (_build_query().range(start, start + PAGE - 1).execute().data or [])
+            data.extend(batch)
+            if len(batch) < PAGE:
+                break
+            start += PAGE
+
+        logger.info(f"Returning {len(data)} records")
+        return [decode_json_fields(record, ['spares_used']) for record in data]
+
     except Exception as e:
         logger.error(f"Error fetching overtime: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Error fetching overtime: {str(e)}")
