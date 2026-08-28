@@ -24,6 +24,13 @@ class OvertimeCreate(BaseModel):
     # 'planned' / 'unplanned' / None (unclassified) — the frontend owns the enum,
     # same loose-typing convention as overtime_type/status in this router.
     planning_status: Optional[str] = None
+    # 'cash' (will be paid) / 'lieu' (compensated with time off instead of pay) /
+    # None (unclassified). Named payout_method, not payment_status, so its 'cash'
+    # value can't be confused with OTStatus's own unrelated 'paid' value (the
+    # approval-lifecycle status, pending->approved->paid). No hard link to a
+    # specific Leave-in-Lieu request — just a manual flag set by whoever
+    # reconciles it.
+    payout_method: Optional[str] = None
     date: str
     # Reason/contact/exact times are no longer mandatory — a fast path for when someone is
     # pressed for time: either give start_time+end_time (hours computed from them) OR just
@@ -53,6 +60,7 @@ class OvertimeUpdate(BaseModel):
     department: Optional[str] = None
     overtime_type: Optional[str] = None
     planning_status: Optional[str] = None
+    payout_method: Optional[str] = None
     date: Optional[str] = None
     start_time: Optional[str] = None
     end_time: Optional[str] = None
@@ -115,6 +123,7 @@ async def create_overtime(overtime: OvertimeCreate, current_user: dict = Depends
             "department": overtime.department,
             "overtime_type": overtime.overtime_type,
             "planning_status": overtime.planning_status,
+            "payout_method": overtime.payout_method,
             "date": overtime.date,
             "start_time": overtime.start_time,
             "end_time": overtime.end_time,
