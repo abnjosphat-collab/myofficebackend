@@ -35,6 +35,7 @@ class FakeQuery:
     def order(self, col, desc=False): self.calls.append(("order", col, desc)); return self
     def limit(self, n):            self.calls.append(("limit", n));        return self
     def offset(self, n):           self.calls.append(("offset", n));       return self
+    def range(self, start, end):   self.calls.append(("range", start, end)); return self
     def insert(self, d):           self.calls.append(("insert", d)); self.store["insert"] = d; return self
     def update(self, d):           self.calls.append(("update", d)); self.store["update"] = d; return self
     def delete(self):              self.calls.append(("delete",));         return self

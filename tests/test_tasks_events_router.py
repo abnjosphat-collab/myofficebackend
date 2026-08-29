@@ -58,6 +58,7 @@ class _FakeTable:
     def order(self, *a, **k): return self
     def eq(self, *a, **k): return self
     def limit(self, *a, **k): return self
+    def range(self, *a, **k): return self
     def execute(self): return _SelectResp([])
 
 

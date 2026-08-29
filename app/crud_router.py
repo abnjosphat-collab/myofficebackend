@@ -42,7 +42,7 @@ from typing import Optional, Type
 from fastapi import APIRouter, HTTPException, Request, Depends
 from pydantic import BaseModel
 
-from app.supabase_client import supabase
+from app.supabase_client import supabase, rows as db_rows, one_row
 from app.auth import get_current_user, require_role
 from app.db_helpers import or_ilike
 import logging
@@ -121,12 +121,25 @@ class CrudRouter:
                         limit = int(params.get("limit", default_limit))
                     except (TypeError, ValueError):
                         limit = default_limit
-                    q = q.limit(limit)
-                    offset = params.get("offset")
-                    if offset:
-                        q = q.offset(int(offset))
-                rows = (q.execute()).data or []
-                return [serialize_row(r) for r in rows]
+                    result = db_rows(q.limit(limit).offset(int(params.get("offset") or 0)).execute())
+                else:
+                    # No limit configured — Supabase PostgREST caps a single unbounded
+                    # .execute() at ~1000 rows by default, which silently truncated
+                    # overtime.py's list endpoint once its table grew past that (fixed
+                    # separately). Every CrudRouter consumer that doesn't set
+                    # default_limit shares this same base query, so the fix belongs
+                    # here once rather than in each router — loop with .range() until
+                    # a page comes back short.
+                    PAGE = 1000
+                    result = []
+                    start = 0
+                    while True:
+                        batch = db_rows(q.range(start, start + PAGE - 1).execute())
+                        result.extend(batch)
+                        if len(batch) < PAGE:
+                            break
+                        start += PAGE
+                return [serialize_row(r) for r in result]
             except Exception as e:
                 logger.error(f"[{table}] list failed: {e}")
                 raise HTTPException(status_code=500, detail=str(e))
@@ -135,9 +148,10 @@ class CrudRouter:
             try:
                 payload = data.dict(exclude_none=True)
                 r = supabase.table(table).insert(payload).execute()
-                if not r.data:
+                created = one_row(r)
+                if created is None:
                     raise HTTPException(status_code=500, detail="Insert failed")
-                return serialize_row(r.data[0])
+                return serialize_row(created)
             except HTTPException:
                 raise
             except Exception as e:
@@ -151,9 +165,10 @@ class CrudRouter:
             if reject_empty_update and not payload:
                 raise HTTPException(status_code=400, detail="No fields to update")
             r = supabase.table(table).update(payload).eq("id", item_id).execute()
-            if not r.data:
+            updated = one_row(r)
+            if updated is None:
                 raise HTTPException(status_code=404, detail=not_found)
-            return serialize_row(r.data[0])
+            return serialize_row(updated)
 
         async def delete_item(item_id: int):
             supabase.table(table).delete().eq("id", item_id).execute()
