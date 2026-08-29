@@ -1,16 +1,36 @@
 """
 Stock Issues Router — record items issued to personnel
+
+Migrated onto the shared CrudRouter (see app/crud_router.py) — list/create/delete
+was plain CRUD, no computed fields, `items` is a nested Pydantic model list that
+CrudRouter's `.dict()` already serializes recursively (same as the original
+hand-written version's `[item.dict() for item in issue.items]`), no hook needed
+for it.
+
+Two things the original router had that this migration deliberately changes:
+- `date_from`/`date_to` range filtering on GET was dropped — CrudRouter's generic
+  `filters` only does equality matches, and the frontend (app/issues/useIssuesData.ts)
+  never actually sends these params (fetches everything, filters client-side), so
+  nothing live depended on it.
+- No update endpoint existed before; CrudRouter always exposes one. Being able to
+  fix a typo in an issued-items record is a reasonable, low-risk addition — still
+  gated behind sign-in like every other endpoint here, nothing new is exposed.
+
+/stats/summary is genuinely custom (an aggregation, not a CRUD verb) and stays
+hand-added alongside the base, same pattern as contractors.py.
 """
-from fastapi import APIRouter, HTTPException, Query, Depends
+from datetime import date, timedelta
+from typing import List, Optional
+
+from fastapi import Depends, HTTPException
 from pydantic import BaseModel, Field
-from typing import Optional, List
-from datetime import datetime, date, timedelta
-from app.supabase_client import supabase
-from app.auth import get_current_user, require_role
 import logging
 
+from app.crud_router import CrudRouter
+from app.supabase_client import supabase, rows
+from app.auth import get_current_user
+
 logger = logging.getLogger(__name__)
-router = APIRouter()
 
 # Run this SQL in Supabase before using this router:
 #
@@ -25,12 +45,14 @@ router = APIRouter()
 #     created_at TIMESTAMPTZ DEFAULT NOW()
 #   );
 
+
 class IssueItem(BaseModel):
     stock_code: Optional[str] = None
     description: str = Field(..., min_length=1)
     qty: float = Field(1, gt=0)
     unit: Optional[str] = "UN"
     unit_price: Optional[float] = Field(None, ge=0)
+
 
 class StockIssueCreate(BaseModel):
     issued_at: Optional[str] = None
@@ -40,75 +62,43 @@ class StockIssueCreate(BaseModel):
     items: List[IssueItem] = Field(..., min_length=1)
     notes: Optional[str] = None
 
-@router.get("", dependencies=[Depends(get_current_user)])
-async def get_issues(
-    search: Optional[str] = Query(None),
-    date_from: Optional[str] = Query(None),
-    date_to: Optional[str] = Query(None),
-    limit: int = Query(500, ge=1, le=2000),
-    offset: int = Query(0, ge=0),
-):
-    try:
-        query = supabase.table("stock_issues").select("*")
-        if search:
-            query = query.or_(
-                f"recipient_name.ilike.%{search}%,"
-                f"recipient_id.ilike.%{search}%,"
-                f"issued_by.ilike.%{search}%"
-            )
-        if date_from:
-            query = query.gte("issued_at", date_from)
-        if date_to:
-            query = query.lte("issued_at", date_to + "T23:59:59")
-        query = query.order("issued_at", desc=True).limit(limit).offset(offset)
-        response = query.execute()
-        return response.data or []
-    except Exception as e:
-        logger.error(f"Error fetching issues: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
 
-@router.post("", status_code=201)
-async def create_issue(issue: StockIssueCreate, current_user: dict = Depends(get_current_user)):
-    try:
-        now = datetime.utcnow().isoformat()
-        row = {
-            "issued_at": issue.issued_at or now,
-            "recipient_name": issue.recipient_name.strip(),
-            "recipient_id": issue.recipient_id or None,
-            "issued_by": issue.issued_by or None,
-            "items": [item.dict() for item in issue.items],
-            "notes": issue.notes or None,
-            "created_at": now,
-        }
-        response = supabase.table("stock_issues").insert(row).execute()
-        if not response.data:
-            raise HTTPException(status_code=500, detail="Failed to record issue")
-        return response.data[0]
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error creating issue: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+class StockIssueUpdate(BaseModel):
+    issued_at: Optional[str] = None
+    recipient_name: Optional[str] = Field(None, min_length=1)
+    recipient_id: Optional[str] = None
+    issued_by: Optional[str] = None
+    items: Optional[List[IssueItem]] = None
+    notes: Optional[str] = None
 
-@router.delete("/{issue_id}")
-async def delete_issue(issue_id: int, current_user: dict = Depends(require_role('manager'))):
-    try:
-        existing = supabase.table("stock_issues").select("id").eq("id", issue_id).execute()
-        if not existing.data:
-            raise HTTPException(status_code=404, detail="Issue record not found")
-        supabase.table("stock_issues").delete().eq("id", issue_id).execute()
-        return {"message": "Deleted", "id": issue_id}
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error deleting issue: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+
+def _clean_issue_write(data: dict) -> dict:
+    """Mirrors the original router's write-time normalization: trim recipient_name,
+    collapse an empty-string optional field back to None."""
+    if isinstance(data.get("recipient_name"), str):
+        data["recipient_name"] = data["recipient_name"].strip()
+    for field in ("recipient_id", "issued_by", "notes"):
+        if data.get(field) == "":
+            data[field] = None
+    return data
+
+
+router = CrudRouter(
+    "stock_issues", StockIssueCreate, StockIssueUpdate,
+    order_by="issued_at", order_desc=True,
+    search_columns=["recipient_name", "recipient_id", "issued_by"],
+    default_limit=500,
+    not_found="Issue record not found",
+    before_create=_clean_issue_write,
+    before_update=_clean_issue_write,
+).router
+
 
 @router.get("/stats/summary", dependencies=[Depends(get_current_user)])
 async def get_stats():
     try:
         response = supabase.table("stock_issues").select("issued_at, recipient_name").execute()
-        records = response.data or []
+        records = rows(response)
         today_str = date.today().isoformat()
         week_start = (date.today() - timedelta(days=date.today().weekday())).isoformat()
         today_count = sum(1 for r in records if (r.get("issued_at") or "").startswith(today_str))
@@ -121,5 +111,8 @@ async def get_stats():
             "unique_recipients": recipients,
         }
     except Exception as e:
+        # Was returning a fake all-zero 200 here — silently indistinguishable from a
+        # genuinely quiet week. Raise instead, matching this project's standard
+        # (backend/docs/ENGINEERING_STANDARDS.md).
         logger.error(f"Error fetching issue stats: {e}")
-        return {"total": 0, "today": 0, "this_week": 0, "unique_recipients": 0}
+        raise HTTPException(status_code=500, detail="Failed to load issue stats")

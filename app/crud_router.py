@@ -25,6 +25,20 @@ Behaviour is a faithful union of the hand-written routers it replaces:
   row doesn't exist; returns the updated row. Requires a signed-in user.
 - **DELETE "/{item_id}"** — delete by id; returns `{"ok": True}`. Requires manager+.
 
+`id_type` (optional, default `int`): pass `str` for a table keyed by a UUID/client-
+generated id instead of a SERIAL integer (e.g. `notices.py`). Affects PATCH/DELETE's
+`/{item_id}` only — the id is always read off the URL as a string and cast per this
+setting, so an invalid int id still gets a clean 422, same as a literal `item_id: int`
+annotation would have given.
+
+`before_create`/`before_update` (optional): a `dict -> dict` transform applied to the
+already-built payload right before it's written — for a table with a genuinely custom
+but small write-time need (trimming/filtering a field, stamping a timestamp column with
+no DB-level default/trigger) that doesn't justify hand-writing the whole endpoint. See
+`drivers.py` for a real example. Don't reach for this to route around a *read*-time
+difference (computed fields, joins) — that's still a sign the table needs its own
+hand-written endpoint alongside the base, same as `contractors.py`.
+
 Subclass to extend:
 
     class ContractorsRouter(CrudRouter):
@@ -37,7 +51,7 @@ Subclass to extend:
             self.router.add_api_route("/{c_id}", self.get_one, methods=["GET"])
 """
 from datetime import date, datetime
-from typing import Optional, Type
+from typing import Callable, Optional, Type
 
 from fastapi import APIRouter, HTTPException, Request, Depends
 from pydantic import BaseModel
@@ -48,6 +62,9 @@ from app.db_helpers import or_ilike
 import logging
 
 logger = logging.getLogger(__name__)
+
+
+BeforeSaveHook = Callable[[dict], dict]
 
 
 def serialize_row(row: dict) -> dict:
@@ -75,6 +92,16 @@ class CrudRouter:
         default_limit: Optional[int] = None,     # None → unbounded; int → .limit(default) and honour ?limit=
         not_found: str = "Not found",
         reject_empty_update: bool = False,   # 400 on a PATCH that resolves to no fields (job_cards)
+        # Transform a payload right before it's written — e.g. trimming/filtering
+        # fields, or stamping a timestamp column the table has no DB-level default/
+        # trigger for. Applied to the already-built dict (data.dict(...)), not the
+        # Pydantic model, and runs after reject_empty_update's check so a hook that
+        # unconditionally stamps a field (e.g. updated_at) can't defeat it.
+        before_create: Optional[BeforeSaveHook] = None,
+        before_update: Optional[BeforeSaveHook] = None,
+        # int (default, a SERIAL primary key) or str (a UUID/client-generated id, e.g.
+        # notices.py) — several tables in this codebase use string ids, not just one.
+        id_type: Type = int,
     ):
         self.table = table
         self.create_model = create_model
@@ -86,6 +113,9 @@ class CrudRouter:
         self.default_limit = default_limit
         self.not_found = not_found
         self.reject_empty_update = reject_empty_update
+        self.before_create = before_create
+        self.before_update = before_update
+        self.id_type = id_type
         self.router = APIRouter(tags=tags or [])
         self._register()
 
@@ -103,6 +133,21 @@ class CrudRouter:
         default_limit = self.default_limit
         not_found = self.not_found
         reject_empty_update = self.reject_empty_update
+        before_create = self.before_create
+        before_update = self.before_update
+        id_type = self.id_type
+
+        def cast_id(raw: str):
+            # The path param is always read as str (FastAPI's natural type for a URL
+            # segment) so both int- and str-keyed tables share one function signature;
+            # int tables get the same "not a valid id" 422 FastAPI would have given
+            # for a literal `item_id: int` annotation, just raised here instead.
+            if id_type is int:
+                try:
+                    return int(raw)
+                except (TypeError, ValueError):
+                    raise HTTPException(status_code=422, detail=f"Invalid id: {raw!r}")
+            return raw
 
         async def list_items(request: Request):
             try:
@@ -147,6 +192,8 @@ class CrudRouter:
         async def create_item(data: create_model):
             try:
                 payload = data.dict(exclude_none=True)
+                if before_create:
+                    payload = before_create(payload)
                 r = supabase.table(table).insert(payload).execute()
                 created = one_row(r)
                 if created is None:
@@ -158,20 +205,22 @@ class CrudRouter:
                 logger.error(f"[{table}] create failed: {e}")
                 raise HTTPException(status_code=500, detail=str(e))
 
-        async def update_item(item_id: int, data: update_model):
+        async def update_item(item_id: str, data: update_model):
             # exclude_unset (not a None-filter): an explicitly-sent null clears the field,
             # an unset field is left untouched. See work_orders (backend edec24a).
             payload = data.dict(exclude_unset=True)
             if reject_empty_update and not payload:
                 raise HTTPException(status_code=400, detail="No fields to update")
-            r = supabase.table(table).update(payload).eq("id", item_id).execute()
+            if before_update:
+                payload = before_update(payload)
+            r = supabase.table(table).update(payload).eq("id", cast_id(item_id)).execute()
             updated = one_row(r)
             if updated is None:
                 raise HTTPException(status_code=404, detail=not_found)
             return serialize_row(updated)
 
-        async def delete_item(item_id: int):
-            supabase.table(table).delete().eq("id", item_id).execute()
+        async def delete_item(item_id: str):
+            supabase.table(table).delete().eq("id", cast_id(item_id)).execute()
             return {"ok": True}
 
         # Register both "" and "/" to match the hand-written routers, which decorated both.
