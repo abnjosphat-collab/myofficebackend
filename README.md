@@ -56,9 +56,16 @@ unreachable).
 - **`app/serialization.py`** — shared helpers for shaping Supabase records into
   JSON (e.g. `convert_dates_to_iso`).
 - **`supabase_migration_*.sql`** at the repo root — one file per schema change,
-  meant to be run manually in the Supabase SQL editor (there's no migration
-  runner). Check `git log` on a given file if you need to know when/why it was
-  added.
+  meant to be run manually in the Supabase SQL editor. There's still no
+  runner (the `supabase` client is REST-based, no direct Postgres connection
+  is configured — it can't execute arbitrary DDL, and production schema
+  changes should be reviewed by hand anyway), but there is now real
+  applied/pending **tracking**: after running a file, record it with
+  `python scripts/track_migration.py --mark-applied <filename>`; check status
+  with `--list`. Requires `supabase_migration_schema_migrations_table.sql` to
+  have been run first (bootstraps the tracking table itself). Check `git log`
+  on a given file if you need to know when/why it was *added* — the tracker
+  is for when/whether it was *run*.
 
 ## Testing
 
