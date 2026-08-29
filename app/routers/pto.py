@@ -637,18 +637,21 @@ async def update_pto_report(report_id: str, updated: PTOReportUpdate, current_us
                 now = datetime.utcnow().isoformat()
                 
                 for i, action in enumerate(updated.actionPlan, start=1):
-                    # Only include if it has required fields
-                    if action.get("action") and action.get("byWhom") and action.get("byWhen"):
+                    # `action` is an ActionPlanItemUpdate model instance, not a dict —
+                    # .get(...) on it raised AttributeError at runtime on every PATCH
+                    # that included an actionPlan array (real, live bug; found while
+                    # investigating this file's pyright errors, not just type noise).
+                    if action.action and action.byWhom and action.byWhen:
                         actions_data.append({
                             "id": generate_id(),
                             "report_id": report_id,
                             "no": i,
-                            "action": action.get("action"),
-                            "by_whom": action.get("byWhom"),
-                            "by_when": action.get("byWhen"),
-                            "status": action.get("status", "Pending"),
-                            "completed_date": action.get("completedDate"),
-                            "remarks": action.get("remarks", ""),
+                            "action": action.action,
+                            "by_whom": action.byWhom,
+                            "by_when": action.byWhen,
+                            "status": action.status or "Pending",
+                            "completed_date": action.completedDate,
+                            "remarks": action.remarks or "",
                             "created_at": now
                         })
                 

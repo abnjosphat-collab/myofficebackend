@@ -18,7 +18,7 @@ _ocr_reader = None
 def _get_ocr_reader():
     global _ocr_reader
     if _ocr_reader is None:
-        import easyocr
+        import easyocr  # pyright: ignore[reportMissingImports] — deliberately absent from .venv (drags in PyTorch); see backend README
         _ocr_reader = easyocr.Reader(['en'], gpu=False, verbose=False)
     return _ocr_reader
 

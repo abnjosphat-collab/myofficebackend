@@ -525,17 +525,21 @@ async def update_vfl_report(report_id: str, updated: VFLReportUpdate, current_us
                 now = datetime.utcnow().isoformat()
                 
                 for action in updated.actions:
-                    # Only include if it has required fields
-                    if action.get("action") and action.get("responsible") and action.get("targetDate"):
+                    # `action` is an ActionItemUpdate model instance, not a dict —
+                    # .get(...) on it raised AttributeError at runtime on every PATCH
+                    # that included an actions array (real, live bug; same class as
+                    # pto.py's identical pattern, found while investigating pyright
+                    # errors, not just type noise).
+                    if action.action and action.responsible and action.targetDate:
                         actions_data.append({
                             "id": generate_id(),
                             "report_id": report_id,
-                            "action": action.get("action"),
-                            "responsible": action.get("responsible"),
-                            "target_date": action.get("targetDate"),
-                            "status": action.get("status", "Pending"),
-                            "completed_date": action.get("completedDate"),
-                            "remarks": action.get("remarks", ""),
+                            "action": action.action,
+                            "responsible": action.responsible,
+                            "target_date": action.targetDate,
+                            "status": action.status or "Pending",
+                            "completed_date": action.completedDate,
+                            "remarks": action.remarks or "",
                             "created_at": now
                         })
                 
