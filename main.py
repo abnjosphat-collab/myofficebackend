@@ -177,7 +177,7 @@ def register_router(module_name: str, prefix: str | None = None, tags: list[str]
     # name — e.g. the notices module registers under "noticeboard" because that's
     # what the health-check/debug endpoints further down already look up.
     # `dependencies` gates every route the router contributes (including nested
-    # include_router() mounts) — e.g. accounting's manager+-only gate below.
+    # include_router() mounts) — e.g. tasks_events's manager+-only gate below.
     dict_key = key or module_name
     try:
         module = __import__(f"app.routers.{module_name}", fromlist=[module_name])
@@ -239,13 +239,9 @@ for _name, _prefix, _tags, _key in [
 ]:
     register_router(_name, _prefix, _tags, _key)
 
-# Manager+ only, whole router — company financials. Can't go in the generic
-# routers_to_import list below (that loop only derives prefix/tags, no support
-# for extra kwargs like dependencies).
-register_router("accounting", "/api/accounting", ["Accounting"],
-                 dependencies=[Depends(require_role('manager'))])
-
-# Manager+ only, whole router — same shape as accounting above.
+# Manager+ only, whole router. Can't go in the generic routers_to_import list
+# below (that loop only derives prefix/tags, no support for extra kwargs like
+# dependencies).
 register_router("tasks_events", "/api/tasks-events", ["Tasks & Events"],
                  dependencies=[Depends(require_role('manager'))])
 
