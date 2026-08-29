@@ -2,7 +2,7 @@ from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel
 from typing import Optional
 import logging
-from app.supabase_client import supabase
+from app.supabase_client import supabase, rows, one_row
 from app.auth import get_current_user, require_role
 from datetime import datetime, timedelta
 
@@ -26,8 +26,7 @@ async def get_availabilities():
     """Get equipment list with their latest availability data merged in."""
     try:
         logger.info("Fetching equipment with availability data...")
-        equipment_response = supabase.table("equipment").select("*").execute()
-        equipment = equipment_response.data if hasattr(equipment_response, 'data') else equipment_response
+        equipment = rows(supabase.table("equipment").select("*").execute())
 
         for eq in equipment:
             av_resp = (supabase.table("availabilities")
@@ -36,8 +35,8 @@ async def get_availabilities():
                        .order("date", desc=True)
                        .limit(1)
                        .execute())
-            if av_resp.data:
-                latest = av_resp.data[0]
+            latest = one_row(av_resp)
+            if latest is not None:
                 eq["availability"]          = latest["availability_percentage"]
                 eq["operational_hours"]     = latest["operational_hours"]
                 eq["breakdown_hours"]       = latest["breakdown_hours"]
@@ -69,8 +68,7 @@ async def get_availability_stats():
     """Aggregate availability statistics."""
     try:
         thirty_days_ago = (datetime.now() - timedelta(days=30)).strftime("%Y-%m-%d")
-        equipment_response = supabase.table("equipment").select("*").execute()
-        equipment = equipment_response.data if hasattr(equipment_response, 'data') else equipment_response
+        equipment = rows(supabase.table("equipment").select("*").execute())
 
         if not equipment:
             return {"totalEquipment": 0, "operational": 0, "inMaintenance": 0, "inBreakdown": 0,
@@ -95,7 +93,7 @@ async def get_availability_stats():
         # breakdown downtime in the window, from the breakdowns table.
         week_start = (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d")
         week_bd_resp = supabase.table("breakdowns").select("downtime_minutes").gte("breakdown_date", week_start).execute()
-        week_bd_hours = sum((b.get("downtime_minutes") or 0) for b in (week_bd_resp.data or [])) / 60.0
+        week_bd_hours = sum((b.get("downtime_minutes") or 0) for b in rows(week_bd_resp)) / 60.0
         week_possible_hours = total * 24 * 7
         week_availability = round(((week_possible_hours - week_bd_hours) / week_possible_hours) * 100, 2) if week_possible_hours > 0 else 0
 
@@ -128,7 +126,7 @@ async def get_availability_history(equipment_id: int, days: int = 30):
                     .gte("date", start_date)
                     .order("date", desc=True)
                     .execute())
-        return response.data if hasattr(response, 'data') else response
+        return rows(response)
     except Exception as e:
         logger.error(f"Error fetching history: {e}")
         raise HTTPException(status_code=500, detail=f"Error: {e}")
@@ -148,16 +146,15 @@ async def list_availability_records(
         if equipment_id: q = q.eq("equipment_id", equipment_id)
         if date_from:    q = q.gte("date", date_from)
         if date_to:      q = q.lte("date", date_to)
-        r = q.execute()
-        rows = r.data or []
+        records = rows(q.execute())
 
         # Try to enrich with equipment name
         eq_resp = supabase.table("equipment").select("id, name").execute()
-        eq_lookup = {str(e["id"]): e["name"] for e in (eq_resp.data or [])}
-        for row in rows:
+        eq_lookup = {str(e["id"]): e["name"] for e in rows(eq_resp)}
+        for row in records:
             row["equipment_name"] = eq_lookup.get(str(row.get("equipment_id", "")))
 
-        return rows
+        return records
     except Exception as e:
         logger.error(f"list_availability_records error: {e}")
         raise HTTPException(500, str(e))
@@ -175,7 +172,7 @@ async def availability_from_breakdowns(
 
         # Load equipment: equipment_id (code) → row
         eq_resp = supabase.table("equipment").select("id, name, equipment_id, category, department").execute()
-        equipment = eq_resp.data or []
+        equipment = rows(eq_resp)
         code_to_eq = {e["equipment_id"]: e for e in equipment}
         name_to_eq = {e["name"]: e for e in equipment}
 
@@ -184,10 +181,10 @@ async def availability_from_breakdowns(
         if date_from: q = q.gte("breakdown_date", date_from)
         if date_to:   q = q.lte("breakdown_date", date_to)
         bd_resp = q.execute()
-        breakdowns = bd_resp.data or []
+        breakdowns = rows(bd_resp)
 
         # Group by (machine_id_code, date) and sum downtime_minutes
-        grouped: dict = defaultdict(lambda: {"bd_minutes": 0.0, "machine_name": ""})
+        grouped: "defaultdict[tuple, dict]" = defaultdict(lambda: {"bd_minutes": 0.0, "machine_name": ""})
         for bd in breakdowns:
             key = (bd.get("machine_id", ""), bd.get("breakdown_date", ""))
             grouped[key]["bd_minutes"] += float(bd.get("downtime_minutes") or 0)
@@ -239,7 +236,12 @@ async def create_availability_record(body: AvailRecordIn, current_user: dict = D
         data["created_at"] = now
         data["updated_at"] = now
         r = supabase.table("availabilities").insert(data).execute()
-        return r.data[0]
+        created = one_row(r)
+        if created is None:
+            raise HTTPException(500, "Insert failed")
+        return created
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"create_availability_record error: {e}")
         raise HTTPException(500, str(e))
@@ -256,9 +258,10 @@ async def update_availability_record(record_id: int, body: AvailRecordIn, curren
              .update(data)
              .eq("id", record_id)
              .execute())
-        if not r.data:
+        updated = one_row(r)
+        if updated is None:
             raise HTTPException(404, "Record not found")
-        return r.data[0]
+        return updated
     except HTTPException:
         raise
     except Exception as e:

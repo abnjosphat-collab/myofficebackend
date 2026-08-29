@@ -6,7 +6,7 @@
 from fastapi import APIRouter, HTTPException, Query, Depends
 from pydantic import BaseModel, Field, validator
 from typing import Optional, List, Dict, Any
-from app.supabase_client import supabase
+from app.supabase_client import supabase, rows, one_row
 from app.auth import get_current_user, require_role
 from app.aggregation import count_by
 from app.db_helpers import get_or_404, apply_date_range, or_ilike, distinct_suggestions, status_choice_validator
@@ -293,29 +293,25 @@ async def get_pto_reports(
         query = query.range(offset, offset + limit - 1)
         
         response = query.execute()
-        
-        if hasattr(response, 'data'):
-            db_reports = response.data or []
-            result = []
-            
-            # Fetch action plan items for each report
-            for report in db_reports:
-                actions_response = supabase.table("pto_action_plan")\
-                    .select("*")\
-                    .eq("report_id", report["id"])\
-                    .order("no")\
-                    .execute()
-                
-                db_actions = actions_response.data if hasattr(actions_response, 'data') else []
-                camel_actions = [map_db_action_to_camel(a) for a in db_actions]
-                
-                camel_report = map_db_pto_to_camel(report)
-                camel_report["actionPlan"] = camel_actions
-                result.append(camel_report)
-            
-            return result
-        
-        return []
+        db_reports = rows(response)
+        result = []
+
+        # Fetch action plan items for each report
+        for report in db_reports:
+            actions_response = supabase.table("pto_action_plan")\
+                .select("*")\
+                .eq("report_id", report["id"])\
+                .order("no")\
+                .execute()
+
+            db_actions = rows(actions_response)
+            camel_actions = [map_db_action_to_camel(a) for a in db_actions]
+
+            camel_report = map_db_pto_to_camel(report)
+            camel_report["actionPlan"] = camel_actions
+            result.append(camel_report)
+
+        return result
         
     except Exception as e:
         logger.error(f"Error fetching PTO reports: {str(e)}")
@@ -334,11 +330,11 @@ async def get_pto_stats():
         
         # Get all reports
         reports_response = supabase.table("pto_reports").select("*").execute()
-        reports = reports_response.data if hasattr(reports_response, 'data') else []
-        
+        reports = rows(reports_response)
+
         # Get all actions
         actions_response = supabase.table("pto_action_plan").select("*").execute()
-        actions = actions_response.data if hasattr(actions_response, 'data') else []
+        actions = rows(actions_response)
         
         # Calculate stats
         total = len(reports)
@@ -355,8 +351,11 @@ async def get_pto_stats():
         reviewed_count = 0
         closed_count = 0
         
-        # Count by observer
-        by_observer = count_by((r.get("observer_name") for r in reports if r.get("observer_name")), lambda name: name)
+        # Count by observer — count_by takes the raw records + a field name (its own
+        # key-resolution handles the extraction); was passing pre-extracted strings as
+        # if they were records, which only worked because the "key function" was the
+        # identity — functionally correct but fought the helper's actual signature.
+        by_observer = count_by((r for r in reports if r.get("observer_name")), "observer_name")
 
         # Count by observation type
         initial_count = 0
@@ -440,20 +439,19 @@ async def get_pto_report(report_id: str):
             .select("*")\
             .eq("id", report_id)\
             .execute()
-        
-        if not report_response.data:
+
+        db_report = one_row(report_response)
+        if db_report is None:
             raise HTTPException(status_code=404, detail="Report not found")
-        
-        db_report = report_response.data[0]
-        
+
         # Get action plan items
         actions_response = supabase.table("pto_action_plan")\
             .select("*")\
             .eq("report_id", report_id)\
             .order("no")\
             .execute()
-        
-        db_actions = actions_response.data if hasattr(actions_response, 'data') else []
+
+        db_actions = rows(actions_response)
         camel_actions = [map_db_action_to_camel(a) for a in db_actions]
         
         camel_report = map_db_pto_to_camel(db_report)
@@ -508,11 +506,10 @@ async def create_pto_report(report: PTOReportCreate, current_user: dict = Depend
         report_response = supabase.table("pto_reports")\
             .insert(report_data)\
             .execute()
-        
-        if not report_response.data:
+
+        created_report = one_row(report_response)
+        if created_report is None:
             raise HTTPException(status_code=500, detail="Failed to create report")
-        
-        created_report = report_response.data[0]
         
         # Insert action plan items
         if report.actionPlan:
@@ -535,8 +532,8 @@ async def create_pto_report(report: PTOReportCreate, current_user: dict = Depend
                 actions_response = supabase.table("pto_action_plan")\
                     .insert(actions_data)\
                     .execute()
-                
-                db_actions = actions_response.data if hasattr(actions_response, 'data') else []
+
+                db_actions = rows(actions_response)
                 created_report["actionPlan"] = [map_db_action_to_camel(a) for a in db_actions]
             else:
                 created_report["actionPlan"] = []
@@ -549,7 +546,9 @@ async def create_pto_report(report: PTOReportCreate, current_user: dict = Depend
         
         logger.info(f"Successfully created PTO report with ID: {report_id}")
         return result
-        
+
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Error creating PTO report: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Error creating report: {str(e)}")
@@ -565,10 +564,11 @@ async def update_pto_report(report_id: str, updated: PTOReportUpdate, current_us
             .select("*")\
             .eq("id", report_id)\
             .execute()
-        
-        if not existing.data:
+
+        existing_row = one_row(existing)
+        if existing_row is None:
             raise HTTPException(status_code=404, detail="Report not found")
-        
+
         # Prepare update data - map camelCase to snake_case for DB
         data_to_update = {}
         update_dict = updated.dict(exclude_unset=True)
@@ -615,13 +615,12 @@ async def update_pto_report(report_id: str, updated: PTOReportUpdate, current_us
                 .update(data_to_update)\
                 .eq("id", report_id)\
                 .execute()
-            
-            if not update_response.data:
+
+            updated_report = one_row(update_response)
+            if updated_report is None:
                 raise HTTPException(status_code=500, detail="Update failed")
-            
-            updated_report = update_response.data[0]
         else:
-            updated_report = existing.data[0]
+            updated_report = existing_row
         
         # Update action plan items if provided
         if updated.actionPlan is not None:
@@ -659,8 +658,8 @@ async def update_pto_report(report_id: str, updated: PTOReportUpdate, current_us
                     actions_response = supabase.table("pto_action_plan")\
                         .insert(actions_data)\
                         .execute()
-                    
-                    db_actions = actions_response.data if hasattr(actions_response, 'data') else []
+
+                    db_actions = rows(actions_response)
                     updated_report["actionPlan"] = [map_db_action_to_camel(a) for a in db_actions]
                 else:
                     updated_report["actionPlan"] = []
@@ -673,8 +672,8 @@ async def update_pto_report(report_id: str, updated: PTOReportUpdate, current_us
                 .eq("report_id", report_id)\
                 .order("no")\
                 .execute()
-            
-            db_actions = actions_response.data if hasattr(actions_response, 'data') else []
+
+            db_actions = rows(actions_response)
             updated_report["actionPlan"] = [map_db_action_to_camel(a) for a in db_actions]
         
         # Map to camelCase for response
@@ -700,10 +699,10 @@ async def delete_pto_report(report_id: str, current_user: dict = Depends(require
             .select("*")\
             .eq("id", report_id)\
             .execute()
-        
-        if not existing.data:
+
+        if one_row(existing) is None:
             raise HTTPException(status_code=404, detail="Report not found")
-        
+
         # Action plan items will be automatically deleted due to foreign key cascade
         supabase.table("pto_reports")\
             .delete()\

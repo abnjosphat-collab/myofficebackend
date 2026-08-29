@@ -10,6 +10,7 @@ from supabase import create_client, Client
 from collections import defaultdict
 from app.cache import cached, cache_get, cache_set, build_key, invalidate_namespace
 from app.serialization import encode_json_fields, decode_json_fields
+from app.supabase_client import rows, one_row
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -117,7 +118,7 @@ class BreakdownUpdate(BaseModel):
     priority: Optional[str] = None
 
 # Helper Functions
-def time_to_minutes(time_str: str) -> int:
+def time_to_minutes(time_str: Optional[str]) -> int:
     """Convert HH:MM time string to minutes"""
     if not time_str:
         return 0
@@ -209,7 +210,7 @@ def learn_lookup_value(list_name: str, value: Optional[str]):
         return
     try:
         existing = supabase.table("lookup_lists").select("id").eq("list_name", list_name).ilike("value", v).execute()
-        if existing.data:
+        if one_row(existing) is not None:
             return
         supabase.table("lookup_lists").insert({"list_name": list_name, "value": v}).execute()
     except Exception as e:
@@ -264,7 +265,7 @@ async def get_breakdowns(
         
         response = query.order("created_at", desc=True).range(offset, offset + limit - 1).execute()
         
-        records = [decode_json_fields(r, ['spares_used']) for r in (response.data or [])]
+        records = [decode_json_fields(r, ['spares_used']) for r in rows(response)]
 
         result = {
             "data": records,
@@ -325,9 +326,10 @@ async def create_breakdown(breakdown: BreakdownCreate, current_user: dict = Depe
         
         # Insert into database
         response = db.table("breakdowns").insert(data).execute()
-        
-        if response.data:
-            result = decode_json_fields(response.data[0], ['spares_used'])
+        created = one_row(response)
+
+        if created is not None:
+            result = decode_json_fields(created, ['spares_used'])
 
             learn_lookup_value("location", result.get('location'))
             learn_lookup_value("breakdown_nature", result.get('breakdown_nature'))
@@ -354,11 +356,12 @@ async def get_breakdown(breakdown_id: str):
 
     try:
         response = db.table("breakdowns").select("*").eq("id", breakdown_id).execute()
-        
-        if not response.data:
+        db_breakdown = one_row(response)
+
+        if db_breakdown is None:
             raise HTTPException(status_code=404, detail="Breakdown not found")
-        
-        return decode_json_fields(response.data[0], ['spares_used'])
+
+        return decode_json_fields(db_breakdown, ['spares_used'])
 
     except HTTPException:
         raise
@@ -374,9 +377,10 @@ async def update_breakdown(breakdown_id: str, breakdown_update: BreakdownUpdate,
     try:
         # Check if exists
         existing = db.table("breakdowns").select("*").eq("id", breakdown_id).execute()
-        if not existing.data:
+        existing_row = one_row(existing)
+        if existing_row is None:
             raise HTTPException(status_code=404, detail="Breakdown not found")
-        
+
         # Get update data
         update_data = breakdown_update.dict(exclude_unset=True)
         
@@ -398,7 +402,7 @@ async def update_breakdown(breakdown_id: str, breakdown_update: BreakdownUpdate,
         # Calculate time metrics if time fields are updated
         if any(key in update_data for key in ['breakdown_start', 'breakdown_end', 'work_start', 'work_end']):
             # Get full data to calculate metrics
-            full_data = existing.data[0].copy()
+            full_data = existing_row.copy()
             full_data.update(update_data)
             time_metrics = calculate_time_metrics(full_data)
             update_data.update(time_metrics)
@@ -421,9 +425,10 @@ async def update_breakdown(breakdown_id: str, breakdown_update: BreakdownUpdate,
         
         # Update in database
         response = db.table("breakdowns").update(update_data).eq("id", breakdown_id).execute()
-        
-        if response.data:
-            result = decode_json_fields(response.data[0], ['spares_used'])
+        updated = one_row(response)
+
+        if updated is not None:
+            result = decode_json_fields(updated, ['spares_used'])
 
             learn_lookup_value("location", result.get('location'))
             learn_lookup_value("breakdown_nature", result.get('breakdown_nature'))
@@ -447,9 +452,9 @@ async def delete_breakdown(breakdown_id: str, current_user: dict = Depends(requi
     try:
         # Check if exists
         existing = db.table("breakdowns").select("*").eq("id", breakdown_id).execute()
-        if not existing.data:
+        if one_row(existing) is None:
             raise HTTPException(status_code=404, detail="Breakdown not found")
-        
+
         # Delete
         db.table("breakdowns").delete().eq("id", breakdown_id).execute()
         await invalidate_namespace("breakdowns")
@@ -470,7 +475,7 @@ async def get_dashboard_overview():
     
     try:
         response = db.table("breakdowns").select("*").execute()
-        records = response.data or []
+        records = rows(response)
         
         total = len(records)
         open_count = sum(1 for r in records if r.get('status') in ['logged', 'in_progress'])
@@ -578,8 +583,8 @@ async def get_breakdown_heatmap(
             query = query.eq("location", location)
         
         response = query.execute()
-        records = response.data or []
-        
+        records = rows(response)
+
         # ===== Initialize data structures =====
         hour_day_heatmap = [[0 for _ in range(7)] for _ in range(24)]  # 24 hours x 7 days
         machine_breakdowns = {}

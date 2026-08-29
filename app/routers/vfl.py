@@ -4,7 +4,7 @@
 from fastapi import APIRouter, HTTPException, Query, Depends
 from pydantic import BaseModel, Field, validator
 from typing import Optional, List, Dict, Any
-from app.supabase_client import supabase
+from app.supabase_client import supabase, rows, one_row
 from app.auth import get_current_user, require_role
 from app.aggregation import count_by
 from app.db_helpers import get_or_404, apply_date_range, or_ilike, distinct_suggestions, status_choice_validator
@@ -186,28 +186,24 @@ async def get_vfl_reports(
         query = query.range(offset, offset + limit - 1)
         
         response = query.execute()
-        
-        if hasattr(response, 'data'):
-            db_reports = response.data or []
-            result = []
-            
-            # Fetch action items for each report
-            for report in db_reports:
-                actions_response = supabase.table("vfl_action_plan")\
-                    .select("*")\
-                    .eq("report_id", report["id"])\
-                    .execute()
-                
-                db_actions = actions_response.data if hasattr(actions_response, 'data') else []
-                camel_actions = [map_db_action_to_camel(a) for a in db_actions]
-                
-                camel_report = map_db_vfl_to_camel(report)
-                camel_report["actions"] = camel_actions
-                result.append(camel_report)
-            
-            return result
-        
-        return []
+        db_reports = rows(response)
+        result = []
+
+        # Fetch action items for each report
+        for report in db_reports:
+            actions_response = supabase.table("vfl_action_plan")\
+                .select("*")\
+                .eq("report_id", report["id"])\
+                .execute()
+
+            db_actions = rows(actions_response)
+            camel_actions = [map_db_action_to_camel(a) for a in db_actions]
+
+            camel_report = map_db_vfl_to_camel(report)
+            camel_report["actions"] = camel_actions
+            result.append(camel_report)
+
+        return result
         
     except Exception as e:
         logger.error(f"Error fetching VFL reports: {str(e)}")
@@ -226,11 +222,11 @@ async def get_vfl_stats():
         
         # Get all reports
         reports_response = supabase.table("vfl_reports").select("*").execute()
-        reports = reports_response.data if hasattr(reports_response, 'data') else []
-        
+        reports = rows(reports_response)
+
         # Get all actions
         actions_response = supabase.table("vfl_action_plan").select("*").execute()
-        actions = actions_response.data if hasattr(actions_response, 'data') else []
+        actions = rows(actions_response)
         
         # Calculate stats
         total = len(reports)
@@ -267,8 +263,11 @@ async def get_vfl_stats():
         reviewed_count = 0
         closed_count = 0
         
-        # Count by observer
-        by_observer = count_by((r.get("observer_name") for r in reports if r.get("observer_name")), lambda name: name)
+        # Count by observer — count_by takes the raw records + a field name (its own
+        # key-resolution handles the extraction); was passing pre-extracted strings as
+        # if they were records, which only worked because the "key function" was the
+        # identity — functionally correct but fought the helper's actual signature.
+        by_observer = count_by((r for r in reports if r.get("observer_name")), "observer_name")
         
         for report in reports:
             # Section
@@ -348,19 +347,18 @@ async def get_vfl_report(report_id: str):
             .select("*")\
             .eq("id", report_id)\
             .execute()
-        
-        if not report_response.data:
+
+        db_report = one_row(report_response)
+        if db_report is None:
             raise HTTPException(status_code=404, detail="Report not found")
-        
-        db_report = report_response.data[0]
-        
+
         # Get action items
         actions_response = supabase.table("vfl_action_plan")\
             .select("*")\
             .eq("report_id", report_id)\
             .execute()
-        
-        db_actions = actions_response.data if hasattr(actions_response, 'data') else []
+
+        db_actions = rows(actions_response)
         camel_actions = [map_db_action_to_camel(a) for a in db_actions]
         
         camel_report = map_db_vfl_to_camel(db_report)
@@ -408,11 +406,10 @@ async def create_vfl_report(report: VFLReportCreate, current_user: dict = Depend
         report_response = supabase.table("vfl_reports")\
             .insert(report_data)\
             .execute()
-        
-        if not report_response.data:
+
+        created_report = one_row(report_response)
+        if created_report is None:
             raise HTTPException(status_code=500, detail="Failed to create report")
-        
-        created_report = report_response.data[0]
         
         # Insert action items
         if report.actions:
@@ -434,8 +431,8 @@ async def create_vfl_report(report: VFLReportCreate, current_user: dict = Depend
                 actions_response = supabase.table("vfl_action_plan")\
                     .insert(actions_data)\
                     .execute()
-                
-                db_actions = actions_response.data if hasattr(actions_response, 'data') else []
+
+                db_actions = rows(actions_response)
                 created_report["actions"] = [map_db_action_to_camel(a) for a in db_actions]
             else:
                 created_report["actions"] = []
@@ -448,7 +445,9 @@ async def create_vfl_report(report: VFLReportCreate, current_user: dict = Depend
         
         logger.info(f"Successfully created VFL report with ID: {report_id}")
         return result
-        
+
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Error creating VFL report: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Error creating report: {str(e)}")
@@ -464,10 +463,11 @@ async def update_vfl_report(report_id: str, updated: VFLReportUpdate, current_us
             .select("*")\
             .eq("id", report_id)\
             .execute()
-        
-        if not existing.data:
+
+        existing_row = one_row(existing)
+        if existing_row is None:
             raise HTTPException(status_code=404, detail="Report not found")
-        
+
         # Prepare update data - map camelCase to snake_case for DB
         data_to_update = {}
         update_dict = updated.dict(exclude_unset=True)
@@ -503,13 +503,12 @@ async def update_vfl_report(report_id: str, updated: VFLReportUpdate, current_us
                 .update(data_to_update)\
                 .eq("id", report_id)\
                 .execute()
-            
-            if not update_response.data:
+
+            updated_report = one_row(update_response)
+            if updated_report is None:
                 raise HTTPException(status_code=500, detail="Update failed")
-            
-            updated_report = update_response.data[0]
         else:
-            updated_report = existing.data[0]
+            updated_report = existing_row
         
         # Update action items if provided
         if updated.actions is not None:
@@ -547,8 +546,8 @@ async def update_vfl_report(report_id: str, updated: VFLReportUpdate, current_us
                     actions_response = supabase.table("vfl_action_plan")\
                         .insert(actions_data)\
                         .execute()
-                    
-                    db_actions = actions_response.data if hasattr(actions_response, 'data') else []
+
+                    db_actions = rows(actions_response)
                     updated_report["actions"] = [map_db_action_to_camel(a) for a in db_actions]
                 else:
                     updated_report["actions"] = []
@@ -560,8 +559,8 @@ async def update_vfl_report(report_id: str, updated: VFLReportUpdate, current_us
                 .select("*")\
                 .eq("report_id", report_id)\
                 .execute()
-            
-            db_actions = actions_response.data if hasattr(actions_response, 'data') else []
+
+            db_actions = rows(actions_response)
             updated_report["actions"] = [map_db_action_to_camel(a) for a in db_actions]
         
         # Map to camelCase for response
@@ -587,10 +586,10 @@ async def delete_vfl_report(report_id: str, current_user: dict = Depends(require
             .select("*")\
             .eq("id", report_id)\
             .execute()
-        
-        if not existing.data:
+
+        if one_row(existing) is None:
             raise HTTPException(status_code=404, detail="Report not found")
-        
+
         # Action items will be automatically deleted due to foreign key cascade
         supabase.table("vfl_reports")\
             .delete()\
