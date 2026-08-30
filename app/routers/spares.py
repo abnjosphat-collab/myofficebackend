@@ -12,7 +12,6 @@ from app.uploads import read_and_validate_upload, SPREADSHEET_EXTS
 from app.serialization import convert_dates_to_iso
 from app.db_helpers import get_or_404
 import logging
-import json
 import io
 try:
     import polars as pl
@@ -23,13 +22,6 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
-
-# Custom JSON encoder to handle date objects
-class DateTimeEncoder(json.JSONEncoder):
-    def default(self, obj):
-        if isinstance(obj, (date, datetime)):
-            return obj.isoformat()
-        return super().default(obj)
 
 # Pydantic Models matching frontend
 class SpareCreate(BaseModel):

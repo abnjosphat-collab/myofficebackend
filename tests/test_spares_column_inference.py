@@ -139,6 +139,24 @@ def test_qty_hint_vetoes_a_price_hint_in_the_same_header():
     assert ambiguous["unit_price"] < clear_price_header["unit_price"]
 
 
+def test_currency_formatted_string_column_is_scored_as_numeric():
+    # ">80% of values parse as numbers once currency symbols/commas are stripped" is
+    # what promotes a Utf8 column into the numeric-scoring branch instead of the
+    # string-heuristics branch.
+    series = pl.Series("Price", ["$1,250.00", "$899.50", "$45.00", "$12.99"], dtype=pl.Utf8)
+    scores = _score_column("Price", series)
+    assert scores["unit_price"] > scores["stock_code"]
+    assert scores["unit_price"] > scores["description"]
+
+
+def test_all_blank_string_column_returns_zero_scores():
+    # Every value is whitespace-only — after stripping, zero non-empty strings remain,
+    # hitting the early-return before any string-heuristic scoring runs.
+    series = pl.Series("Blank", ["  ", " ", "\t"], dtype=pl.Utf8)
+    scores = _score_column("Blank", series)
+    assert scores == {"stock_code": 0.0, "description": 0.0, "unit_price": 0.0}
+
+
 def test_empty_column_returns_zero_scores():
     # A neutral header — "Notes" would score via the short generic stock-code hint
     # "no" matching as a substring ("Notes" contains "no"), which isn't what this test
