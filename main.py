@@ -78,9 +78,19 @@ app.add_middleware(SlowAPIMiddleware)
 # intended. Now: only the explicit ALLOWED_ORIGINS list is trusted — add any new preview/
 # deployment URL to that env var as needed rather than pattern-matching domain names — and
 # only the methods/headers this API actually uses are allowed.
+# localhost/127.0.0.1 covers 3000-3002 and 8000-8001 — this machine runs several local
+# projects that fight over the same default Next.js/uvicorn ports (found live 2026-08-30:
+# the frontend landed on :3001, not :3000, because something else already held :3000, and
+# CORS silently blocked every request — curl doesn't enforce CORS so server-side health
+# checks all looked fine while the browser's fetch() just failed). Widening the default
+# dev allowlist is cheaper than re-diagnosing this every time a local port shifts.
 _raw_origins = os.environ.get(
     "ALLOWED_ORIGINS",
     "http://localhost:3000,http://127.0.0.1:3000,"
+    "http://localhost:3001,http://127.0.0.1:3001,"
+    "http://localhost:3002,http://127.0.0.1:3002,"
+    "http://localhost:8000,http://127.0.0.1:8000,"
+    "http://localhost:8001,http://127.0.0.1:8001,"
     "https://myofficefrontend.vercel.app,https://myoffice-black.vercel.app"
 )
 ALLOWED_ORIGINS = [o.strip() for o in _raw_origins.split(",") if o.strip()]
