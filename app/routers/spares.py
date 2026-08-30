@@ -836,15 +836,12 @@ async def get_stats():
         }
         
     except Exception as e:
+        # Was returning an all-zero 200 here — a near-verbatim match to the bad
+        # example in ENGINEERING_STANDARDS.md #2 ("Never fake a 200 on failure"),
+        # indistinguishable from a genuinely empty spares register. Re-raise instead
+        # (2026-08-30, found via the 90%+ coverage push).
         logger.error(f"Error fetching stats: {str(e)}")
-        return {
-            "total": 0,
-            "out_of_stock": 0,
-            "low_stock": 0,
-            "critical": 0,
-            "safety_stock": 0,
-            "total_value": 0
-        }
+        raise HTTPException(status_code=500, detail="Failed to load spares stats")
 
 # Health check endpoint
 @router.get("/health/check")
