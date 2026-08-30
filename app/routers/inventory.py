@@ -236,20 +236,28 @@ async def update_inventory_item(item_id: str, item_update: InventoryItemUpdate, 
         raise HTTPException(status_code=404, detail="Inventory item not found")
     
     existing_item = inventory_db[item_id]
+    # Captured before the update loop overwrites currentStock below — this is the only
+    # way to know whether stock actually went up. (Bug fix: this used to read
+    # existing_item.get('previous_stock', existing_item['currentStock']) *after* the
+    # loop had already written the new value into existing_item['currentStock'], so the
+    # comparison was always `new > new` — lastRestocked could never bump via this
+    # endpoint, no matter how much stock increased. 'previous_stock' was never a real
+    # key on the item; the .get() default was silently doing all the "work".)
+    previous_stock = existing_item.get('currentStock')
     update_data = item_update.dict(exclude_unset=True)
 
     # Update fields. exclude_unset already limited this to explicitly-sent fields —
     # re-filtering `is not None` here would silently drop an explicit null-clear.
     for field, value in update_data.items():
         existing_item[field] = value
-    
+
     # Recalculate status if stock changed
     if 'currentStock' in update_data:
         existing_item['status'] = calculate_status(
-            existing_item['currentStock'], 
+            existing_item['currentStock'],
             existing_item['minStock']
         )
-        if update_data['currentStock'] > existing_item.get('previous_stock', existing_item['currentStock']):
+        if update_data['currentStock'] > previous_stock:
             existing_item['lastRestocked'] = datetime.now().isoformat()
     
     existing_item['updatedAt'] = datetime.now().isoformat()

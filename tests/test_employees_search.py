@@ -7,6 +7,8 @@ from datetime import date
 
 import pytest
 
+from fastapi import HTTPException
+
 import app.routers.employees as emp_mod
 from app.routers.employees import search_employees
 from app.routers.equipment import generate_equipment_id
@@ -71,6 +73,28 @@ async def test_search_by_email_uses_ilike_on_email(patch_supabase):
     state = patch_supabase()
     await search_employees("john@x.com", search_by="email")
     assert state["column"] == "email"
+
+
+async def test_search_by_id_number_uses_ilike_on_id_number(patch_supabase):
+    state = patch_supabase()
+    await search_employees("ID123", search_by="id_number")
+    assert state["method"] == "ilike"
+    assert state["column"] == "id_number"
+
+
+async def test_search_db_failure_is_500(monkeypatch):
+    class _BoomQuery:
+        def select(self, *a, **k): return self
+        def or_(self, *a, **k): return self
+        def execute(self): raise RuntimeError("db down")
+
+    class _BoomSupabase:
+        def table(self, _name): return _BoomQuery()
+
+    monkeypatch.setattr(emp_mod, "supabase", _BoomSupabase())
+    with pytest.raises(HTTPException) as exc:
+        await search_employees("John", search_by="name")
+    assert exc.value.status_code == 500
 
 
 async def test_search_by_name_uses_or_across_first_and_last_name(patch_supabase):
