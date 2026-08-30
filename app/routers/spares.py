@@ -6,7 +6,7 @@ from app.rate_limit import limiter
 from pydantic import BaseModel, Field, validator
 from typing import Optional, List, Dict, Any
 from datetime import datetime, date
-from app.supabase_client import supabase
+from app.supabase_client import supabase, rows, one_row
 from app.auth import get_current_user, require_role
 from app.uploads import read_and_validate_upload, SPREADSHEET_EXTS
 from app.serialization import convert_dates_to_iso
@@ -470,7 +470,7 @@ async def get_spares(
         while len(all_records) < limit:
             fetch_n = min(PAGE, limit - len(all_records))
             res   = _build_query().range(current_start, current_start + fetch_n - 1).execute()
-            batch = res.data or []
+            batch = rows(res)
             all_records.extend(batch)
             if len(batch) < fetch_n:
                 break                   # last page — no more rows
@@ -534,7 +534,7 @@ async def bulk_create_spares(request: Request, payload: BulkSpareCreate, current
             for i in range(0, len(all_codes), CHECK_BATCH):
                 res = supabase.table("spares").select("stock_code") \
                               .in_("stock_code", all_codes[i:i + CHECK_BATCH]).execute()
-                existing_codes.update(r["stock_code"] for r in (res.data or []))
+                existing_codes.update(r["stock_code"] for r in rows(res))
 
             new_items = [item for item in items if item.stock_code not in existing_codes]
             upd_items = [item for item in items if item.stock_code in existing_codes]
@@ -577,7 +577,7 @@ async def bulk_create_spares(request: Request, payload: BulkSpareCreate, current
                 for i in range(0, len(all_codes), CHECK_BATCH):
                     res = supabase.table("spares").select("stock_code") \
                                   .in_("stock_code", all_codes[i:i + CHECK_BATCH]).execute()
-                    existing_codes.update(r["stock_code"] for r in (res.data or []))
+                    existing_codes.update(r["stock_code"] for r in rows(res))
 
             new_items = [item for item in items if item.stock_code not in existing_codes]
             skipped   = len(items) - len(new_items)
@@ -613,19 +613,19 @@ async def create_spare(spare: SpareCreate, current_user: dict = Depends(get_curr
     try:
         # Check if stock code already exists
         existing = supabase.table("spares").select("id").eq("stock_code", spare.stock_code).execute()
-        
-        if existing.data:
+
+        if one_row(existing) is not None:
             raise HTTPException(status_code=400, detail=f"Stock code '{spare.stock_code}' already exists")
-        
+
         # Insert new spare (filter to known DB columns only)
         response = supabase.table("spares").insert(filter_for_db(spare.dict())).execute()
-        
-        if not response.data:
+
+        result = one_row(response)
+        if result is None:
             raise HTTPException(status_code=500, detail="Failed to create spare part")
-        
+
         logger.info(f"Created spare part: {spare.stock_code}")
-        
-        result = response.data[0]
+
         convert_dates_to_iso(result)
         return result
         
@@ -641,7 +641,7 @@ async def update_spare(spare_id: int, spare_update: SpareUpdate, current_user: d
     """Update an existing spare part"""
     try:
         # Check if spare exists
-        get_or_404(supabase, "spares", spare_id, detail="Spare part not found")
+        existing_spare = get_or_404(supabase, "spares", spare_id, detail="Spare part not found")
 
         # Check stock code conflict if updating
         if spare_update.stock_code:
@@ -650,8 +650,8 @@ async def update_spare(spare_id: int, spare_update: SpareUpdate, current_user: d
                 .eq("stock_code", spare_update.stock_code) \
                 .neq("id", spare_id) \
                 .execute()
-            
-            if conflict.data:
+
+            if one_row(conflict) is not None:
                 raise HTTPException(status_code=400, detail=f"Stock code '{spare_update.stock_code}' already exists")
         
         # Clean and filter update data to known DB columns only
@@ -663,7 +663,8 @@ async def update_spare(spare_id: int, spare_update: SpareUpdate, current_user: d
         # Update in database
         response = supabase.table("spares").update(update_data).eq("id", spare_id).execute()
 
-        if not response.data:
+        updated_row = one_row(response)
+        if updated_row is None:
             raise HTTPException(status_code=500, detail="Failed to update spare part")
 
         logger.info(f"Updated spare part: {spare_id}")
@@ -691,7 +692,13 @@ async def update_spare(spare_id: int, spare_update: SpareUpdate, current_user: d
         #   END;
         #   $$ LANGUAGE plpgsql SECURITY DEFINER;
         if 'unit_price' in update_data:
-            old_stock_code = existing.data[0].get('stock_code')
+            # `existing_spare` (fetched before the update, above) so this finds
+            # stock_issues records under the code the spare had BEFORE this call —
+            # matters if stock_code is also being changed in the same update.
+            # Was referencing an undefined `existing` variable (2026-08-30 fix,
+            # found via the rows()/one_row() pyright pass on this file) — a live
+            # NameError on any PUT with unit_price, silently breaking this sync.
+            old_stock_code = existing_spare.get('stock_code')
             try:
                 sync_result = supabase.rpc('sync_issue_item_prices', {
                     'p_stock_code': old_stock_code,
@@ -704,7 +711,7 @@ async def update_spare(spare_id: int, spare_update: SpareUpdate, current_user: d
                 # Non-fatal — function may not exist yet (migration pending)
                 logger.warning(f"Price sync to stock_issues skipped: {sync_err}")
 
-        result = response.data[0]
+        result = updated_row
         convert_dates_to_iso(result)
         return result
 
@@ -752,13 +759,14 @@ async def get_suggestions(field: str):
     try:
         # Get distinct values
         response = supabase.table("spares").select(field).execute()
-        
-        if not response.data:
+        response_rows = rows(response)
+
+        if not response_rows:
             return {"suggestions": []}
-        
+
         # Extract unique non-empty values
         values = set()
-        for item in response.data:
+        for item in response_rows:
             if field in item and item[field] and str(item[field]).strip():
                 values.add(str(item[field]).strip())
         
@@ -776,8 +784,9 @@ async def get_stats():
     try:
         # Get all spares
         response = supabase.table("spares").select("*").execute()
-        
-        if not response.data:
+        spares = rows(response)
+
+        if not spares:
             return {
                 "total": 0,
                 "out_of_stock": 0,
@@ -786,8 +795,7 @@ async def get_stats():
                 "safety_stock": 0,
                 "total_value": 0
             }
-        
-        spares = response.data
+
         total = len(spares)
         
         out_of_stock = 0
@@ -861,12 +869,12 @@ async def test_connection():
     """Test database connection"""
     try:
         response = supabase.table("spares").select("id", count="exact").limit(1).execute()
-        
+
         return {
             "status": "ok",
             "database": "connected",
             "table": "spares",
-            "record_count": len(response.data) if response.data else 0
+            "record_count": len(rows(response))
         }
     except Exception as e:
         return {"status": "error", "database": "disconnected", "error": str(e)}
@@ -878,7 +886,7 @@ async def export_spares():
     try:
         response = supabase.table("spares").select("*").order("stock_code").execute()
 
-        spares = response.data or []
+        spares = rows(response)
         for record in spares:
             convert_dates_to_iso(record)
 
@@ -924,7 +932,7 @@ async def get_saved_spare_requisitions():
     """Fetch all saved spare requisitions from Supabase"""
     try:
         response = supabase.table("spare_requisitions").select("*").order("updated_at", desc=True).execute()
-        return response.data or []
+        return rows(response)
     except Exception as e:
         logger.warning(f"spare_requisitions table may not exist yet: {e}")
         return []
@@ -936,9 +944,10 @@ async def create_saved_spare_requisition(data: SavedSpareReqCreate, current_user
         now = datetime.utcnow().isoformat()
         row = {**data.dict(), "saved_at": now, "updated_at": now}
         response = supabase.table("spare_requisitions").insert(row).execute()
-        if not response.data:
+        created = one_row(response)
+        if created is None:
             raise HTTPException(status_code=500, detail="Failed to save requisition")
-        return response.data[0]
+        return created
     except HTTPException:
         raise
     except Exception as e:
@@ -952,9 +961,10 @@ async def update_saved_spare_requisition(req_id: str, data: SavedSpareReqCreate,
         now = datetime.utcnow().isoformat()
         row = {**data.dict(), "updated_at": now}
         response = supabase.table("spare_requisitions").update(row).eq("id", req_id).execute()
-        if not response.data:
+        updated = one_row(response)
+        if updated is None:
             raise HTTPException(status_code=404, detail="Saved requisition not found")
-        return response.data[0]
+        return updated
     except HTTPException:
         raise
     except Exception as e:
