@@ -7,7 +7,14 @@ from app.supabase_client import supabase
 from app.auth import get_current_user, require_role
 from app.uploads import read_and_validate_upload, DOCUMENT_EXTS
 
-# Alias prevents the Pydantic field named 'date' from shadowing datetime.date in type resolution
+# Alias prevents the Pydantic field named 'date' from shadowing datetime.date in type
+# resolution — a class-body annotated assignment (`date: Optional[_Date] = None`) binds
+# the name `date` to its default value in the class namespace, so any LATER field in the
+# same class body that wrote a bare `Optional[date]` would resolve `date` to that
+# shadowed `None`, not the datetime.date type — every field below the first must use
+# `_Date`, never the bare `date` name (fixed live bug: the 6 stage sign-off date fields
+# below all used the bare name and silently became None-only fields, rejecting any real
+# date sent by the frontend with a 422).
 _Date = date
 import logging, io, re
 import uuid as uuid_module
@@ -41,33 +48,33 @@ class ServiceIn(BaseModel):
     # Stage 1: Planning
     planning_signed: bool = False
     planning_signed_by: str = ''
-    planning_signed_date: Optional[date] = None
+    planning_signed_date: Optional[_Date] = None
     planning_comments: str = ''
     # Stage 2: Engineering Manager
     eng_mgr_signed: bool = False
     eng_mgr_signed_by: str = ''
-    eng_mgr_signed_date: Optional[date] = None
+    eng_mgr_signed_date: Optional[_Date] = None
     eng_mgr_comments: str = ''
     # Stage 3: Finance
     finance_signed: bool = False
     finance_signed_by: str = ''
-    finance_signed_date: Optional[date] = None
+    finance_signed_date: Optional[_Date] = None
     finance_comments: str = ''
     # Stage 4: General Manager
     gm_signed: bool = False
     gm_signed_by: str = ''
-    gm_signed_date: Optional[date] = None
+    gm_signed_date: Optional[_Date] = None
     gm_comments: str = ''
     # Stage 5: Stores / GRV
     stores_signed: bool = False
     stores_signed_by: str = ''
-    stores_signed_date: Optional[date] = None
+    stores_signed_date: Optional[_Date] = None
     stores_comments: str = ''
     stores_grv_number: str = ''
     # Stage 6: Payment
     payment_done: bool = False
     payment_paid_by: str = ''
-    payment_date: Optional[date] = None
+    payment_date: Optional[_Date] = None
     payment_reference: str = ''
     payment_comments: str = ''
 
