@@ -391,7 +391,15 @@ async def update_breakdown(breakdown_id: str, breakdown_update: BreakdownUpdate,
         # Handle spares_used
         if 'spares_used' in update_data:
             if update_data['spares_used']:
-                costs = calculate_spare_costs(update_data['spares_used'])
+                # calculate_spare_costs expects List[SparePart] (it calls spare.dict()
+                # on each item) — breakdown_update.dict() already turned those into
+                # plain dicts, so pass the un-dict()'d model field instead. Passing
+                # update_data['spares_used'] here silently blew up inside
+                # calculate_spare_costs's own try/except, which swallowed the error and
+                # fell back to {"total_spare_cost": 0.0, "spares_used": []} — so editing
+                # a breakdown's spares_used didn't just miscompute the cost, it erased
+                # the spares list entirely on every save.
+                costs = calculate_spare_costs(breakdown_update.spares_used)
                 update_data['total_spare_cost'] = costs['total_spare_cost']
                 update_data['spares_used'] = costs['spares_used']
             else:
