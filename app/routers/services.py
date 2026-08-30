@@ -111,7 +111,19 @@ async def create_service(body: ServiceIn, current_user: dict = Depends(get_curre
 # ── OCR helpers ───────────────────────────────────────────────────────────────
 
 def _parse_service_text(text: str) -> dict:
-    """Regex-based field extraction from raw OCR text."""
+    """Regex-based field extraction from raw OCR text.
+
+    The label/value separator is `[ \\t:]+`, NOT `\\s` (which also matches
+    newline) — found via testing: a document header/title containing a field's
+    label word standalone (e.g. "SERVICE INVOICE" as a title, followed by
+    "Date: ..." on the next line) matched the invoice_number pattern's
+    `\\s*` as "label, then a newline as the required separator", capturing the
+    NEXT LINE'S unrelated leading token ("Date:") as the invoice number. Every
+    field here shares this same separator, so all of them had this bug, not
+    just invoice_number. Restricting to same-line whitespace fixes it; OCR
+    output realistically always has "Label: value" on one line for the
+    layouts this parser targets, so same-line-only is the correct default.
+    """
 
     def find(pattern: str, flags: int = re.I) -> Optional[str]:
         m = re.search(pattern, text, flags)
@@ -133,37 +145,37 @@ def _parse_service_text(text: str) -> dict:
     return {
         "date": date_val,
         "description": find(
-            r'(?:description|service\s*desc(?:ription)?|work\s*desc(?:ription)?|scope\s*of\s*work)[\s:]+([^\n]{5,})'
+            r'(?:description|service\s*desc(?:ription)?|work\s*desc(?:ription)?|scope\s*of\s*work)[ \t:]+([^\n]{5,})'
         ),
         "supplier": find(
-            r'(?:supplier|vendor|from|company|contractor|service\s*provider)[\s:]+([^\n]+)'
+            r'(?:supplier|vendor|from|company|contractor|service\s*provider)[ \t:]+([^\n]+)'
         ),
         "contact_person": find(
-            r'(?:contact\s*(?:person)?|attention|attn\b|representative|rep\b)[\s:]+([^\n]+)'
+            r'(?:contact\s*(?:person)?|attention|attn\b|representative|rep\b)[ \t:]+([^\n]+)'
         ),
         "requisition_number": find(
-            r'(?:requisition\s*(?:no|number|#|nr)?\.?|req\.?\s*(?:no|#|nr)?)[\s:]+([^\s\n,;]+)'
+            r'(?:requisition\s*(?:no|number|#|nr)?\.?|req\.?\s*(?:no|#|nr)?)[ \t:]+([^\s\n,;]+)'
         ),
         "invoice_number": find(
-            r'(?:invoice\s*(?:no|number|#|nr)?\.?|inv\.?\s*(?:no|#|nr)?)[\s:]+([^\s\n,;]+)'
+            r'(?:invoice\s*(?:no|number|#|nr)?\.?|inv\.?\s*(?:no|#|nr)?)[ \t:]+([^\s\n,;]+)'
         ),
         "order_number": find(
-            r'(?:(?:purchase\s*)?order\s*(?:no|number|#|nr)?\.?|p\.?\s*o\.?\s*(?:no|#|nr)?)[\s:]+([^\s\n,;]+)'
+            r'(?:(?:purchase\s*)?order\s*(?:no|number|#|nr)?\.?|p\.?\s*o\.?\s*(?:no|#|nr)?)[ \t:]+([^\s\n,;]+)'
         ),
         "amount": find(
-            r'(?:amount|total|value|cost|price)[\s:]+([R$€£]\s*[\d\s,]+\.?\d*|[\d\s,]+\.?\d*\s*(?:ZAR|USD|EUR|GBP))'
+            r'(?:amount|total|value|cost|price)[ \t:]+([R$€£]\s*[\d\s,]+\.?\d*|[\d\s,]+\.?\d*\s*(?:ZAR|USD|EUR|GBP))'
         ),
         "category": find(
-            r'(?:category|type\s*of\s*service|service\s*type|trade)[\s:]+([^\n]+)'
+            r'(?:category|type\s*of\s*service|service\s*type|trade)[ \t:]+([^\n]+)'
         ),
         "grv_number": find(
-            r'(?:GRV\s*(?:no|number|#|nr)?\.?)[\s:]+([^\s\n,;]+)'
+            r'(?:GRV\s*(?:no|number|#|nr)?\.?)[ \t:]+([^\s\n,;]+)'
         ),
         "payment_reference": find(
-            r'(?:payment\s*ref(?:erence)?\.?|pay(?:ment)?\s*(?:no|ref|#)|transaction\s*(?:no|ref|#))[\s:]+([^\s\n,;]+)'
+            r'(?:payment\s*ref(?:erence)?\.?|pay(?:ment)?\s*(?:no|ref|#)|transaction\s*(?:no|ref|#))[ \t:]+([^\s\n,;]+)'
         ),
         "general_comments": find(
-            r'(?:comment|note|remark)s?[\s:]+([^\n]+)'
+            r'(?:comment|note|remark)s?[ \t:]+([^\n]+)'
         ),
     }
 
