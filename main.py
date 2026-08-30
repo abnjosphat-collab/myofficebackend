@@ -265,7 +265,7 @@ register_router("tasks_events", "/api/tasks-events", ["Tasks & Events"],
 for _name in [
     "signatures", "usage",
     "reports", "inventory", "overtime", "ppe",
-    "training", "visualization", "leaves", "compressors",
+    "training", "leaves", "compressors",
     # Engineering modules
     "job_cards", "handover", "compliance", "lubrication",
     "condition_monitoring", "contractors", "production",
