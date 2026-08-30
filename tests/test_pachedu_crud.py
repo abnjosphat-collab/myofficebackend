@@ -293,6 +293,15 @@ async def test_update_maps_camel_field_to_snake_column(patch_supabase):
     assert update_calls[0]["payload"]["location"] == "New Site"
 
 
+async def test_update_explicit_none_clears_the_field(patch_supabase):
+    # Regression test for the null-vs-unset bug (backend edec24a, reintroduced here,
+    # fixed 2026-08-30).
+    state = patch_supabase([_db_report(id="r1", dept="Old Dept")])
+    await update_pachedu_report("r1", PacheduReportUpdate(dept=None), current_user=_user())
+    update_calls = [c for c in state["calls"] if c["mode"] == "update"]
+    assert update_calls[0]["payload"]["dept"] is None
+
+
 async def test_update_to_submitted_sets_submitted_at(patch_supabase):
     state = patch_supabase([_db_report(id="r1", status="draft", submitted_at=None)])
     await update_pachedu_report("r1", PacheduReportUpdate(status="submitted"), current_user=_user())

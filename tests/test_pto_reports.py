@@ -346,6 +346,23 @@ async def test_update_pto_report_field_update_maps_to_snake_case(patch_supabase)
     assert "updated_at" in update_payload
 
 
+async def test_update_pto_report_explicit_none_clears_the_field(patch_supabase):
+    # Regression test for the null-vs-unset bug (backend edec24a, reintroduced here,
+    # fixed 2026-08-30): the field loop used to filter on `value is not None` AFTER
+    # exclude_unset=True already ran, silently dropping an explicit clear-to-null.
+    existing = {"id": "r1", "occupation": "Old Occupation", "status": "draft"}
+    state = patch_supabase({
+        "pto_reports": {
+            "select_return": [existing],
+            "update_return": lambda payload, f: [{**existing, **payload}],
+        },
+        "pto_action_plan": {"select_return": []},
+    })
+    await update_pto_report("r1", PTOReportUpdate(occupation=None), current_user={"user_id": "u1"})
+    update_payload = _calls(state, "pto_reports", "update")[0]["payload"]
+    assert update_payload["occupation"] is None
+
+
 async def test_update_pto_report_nested_model_fields_are_converted_to_dict(patch_supabase):
     existing = {"id": "r1", "status": "draft"}
     state = patch_supabase({

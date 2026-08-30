@@ -99,16 +99,22 @@ _DB_COLUMNS = {
 
 # Helper function to clean data
 def clean_data(data: dict) -> dict:
-    """Clean data by removing None values and empty strings"""
+    """Trim strings and drop empty ones. Its only caller (update_spare) already runs
+    spare_update.dict(exclude_unset=True) first, so every key remaining here is one
+    the caller explicitly sent — including an explicit None, which means "clear this
+    field", not "field wasn't provided". This used to also strip None values, which
+    silently dropped every explicit-clear request — the null-vs-unset bug already
+    fixed project-wide once (backend edec24a). Fixed 2026-08-30."""
     cleaned = {}
     for key, value in data.items():
-        if value is not None and value != "":
-            if isinstance(value, str):
-                value = value.strip()
-                if value:
-                    cleaned[key] = value
-            else:
+        if value is None:
+            cleaned[key] = None
+        elif isinstance(value, str):
+            value = value.strip()
+            if value:
                 cleaned[key] = value
+        elif value != "":
+            cleaned[key] = value
     return cleaned
 
 def filter_for_db(data: dict) -> dict:

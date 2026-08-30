@@ -159,13 +159,29 @@ async def test_update_spare_happy_path_updates_and_returns_row(patch_supabase):
     assert "rpc_name" not in state
 
 
-async def test_update_spare_clears_optional_field_via_clean_data(patch_supabase):
-    # clean_data drops None/"" — an update that only sends notes="" ends up with an
-    # empty update_data dict and hits the "No data provided" 400, not a silent no-op.
+async def test_update_spare_empty_string_notes_is_dropped_not_saved(patch_supabase):
+    # clean_data still strips a blank string — an update that only sends notes=""
+    # ends up with an empty update_data dict and hits the "No data provided" 400, not
+    # a silent no-op. (Deliberately different from the None case below.)
     state = patch_supabase([[{"id": 1, "stock_code": "SC-1"}]])
     with pytest.raises(HTTPException) as exc_info:
         await update_spare(1, SpareUpdate(notes=""), current_user={"user_id": "u1"})
     assert exc_info.value.status_code == 400
+
+
+async def test_update_spare_explicit_none_clears_the_field(patch_supabase):
+    # Regression test for the null-vs-unset bug (backend edec24a, reintroduced here,
+    # fixed 2026-08-30): clean_data used to drop an explicit None the same way it
+    # drops "", making "clear this field" indistinguishable from "field not sent" —
+    # exclude_unset=True already handles "not sent"; an explicit None reaching
+    # clean_data must reach the database as a real NULL.
+    state = patch_supabase([
+        [{"id": 1, "stock_code": "SC-1", "notes": "old note"}],
+        [{"id": 1, "stock_code": "SC-1", "notes": None}],
+    ])
+    result = await update_spare(1, SpareUpdate(notes=None), current_user={"user_id": "u1"})
+    assert state["update_payload"] == {"notes": None}
+    assert result["notes"] is None
 
 
 async def test_update_spare_returning_no_row_is_500(patch_supabase):

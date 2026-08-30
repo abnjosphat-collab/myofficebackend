@@ -215,9 +215,13 @@ async def update_report(report_id: str, updated: NearMissUpdate, current_user: d
         }
         
         for key, value in update_dict.items():
-            if key in field_mapping and value is not None:
+            # `value is not None` used to be here too — the null-vs-unset bug already
+            # fixed project-wide once (backend edec24a): exclude_unset=True already
+            # excludes fields the caller never sent, so an explicit null reaching here
+            # IS the caller asking to clear that field. Fixed 2026-08-30.
+            if key in field_mapping:
                 data_to_update[field_mapping[key]] = value
-        
+
         if not data_to_update:
             return map_db_to_camel(existing.data[0])
         

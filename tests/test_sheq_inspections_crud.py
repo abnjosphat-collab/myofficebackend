@@ -307,6 +307,16 @@ async def test_update_inspection_missing_is_404(patch_supabase):
     assert exc_info.value.status_code == 404
 
 
+async def test_update_inspection_explicit_none_clears_the_field(patch_supabase):
+    # Regression test for the null-vs-unset bug (backend edec24a, reintroduced here,
+    # fixed 2026-08-30): the field loop used to filter on `value is not None` AFTER
+    # exclude_unset=True already ran, silently dropping an explicit clear-to-null.
+    fake = patch_supabase(inspections=[_insp("i1")], findings=[])
+    await update_inspection("i1", SHEQUpdate(hodName=None), current_user=USER)
+    update_call = next(c for c in fake.calls if c["table"] == "sheq_inspections" and c["op"] == "update")
+    assert update_call["payload"]["hodname"] is None
+
+
 async def test_update_inspection_updates_fields_and_keeps_existing_findings_when_omitted(patch_supabase):
     fake = patch_supabase(inspections=[_insp("i1")], findings=[_finding("f1", "i1")])
     result = await update_inspection("i1", SHEQUpdate(title="Renamed", hodName="New HOD"), current_user=USER)
@@ -421,6 +431,15 @@ async def test_add_finding_to_missing_inspection_is_404(patch_supabase):
 
 
 # ─── update_finding ──────────────────────────────────────────────────────────────────
+
+async def test_update_finding_explicit_none_clears_the_field(patch_supabase):
+    # Regression test for the null-vs-unset bug (backend edec24a, reintroduced here,
+    # fixed 2026-08-30).
+    fake = patch_supabase(findings=[_finding("f1", "i1")])
+    await update_finding("f1", FindingUpdate(byWho=None), current_user=USER)
+    update_call = next(c for c in fake.calls if c["table"] == "sheq_findings" and c["op"] == "update")
+    assert update_call["payload"]["bywho"] is None
+
 
 async def test_update_finding_updates_only_provided_fields(patch_supabase):
     fake = patch_supabase(findings=[_finding("f1", "i1", status="open")])

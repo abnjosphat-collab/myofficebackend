@@ -305,6 +305,16 @@ async def test_update_report_updates_provided_fields(patch_supabase):
     assert update_call["payload"] == {"location": "Bay 7", "reportername": "B. Sibanda"}
 
 
+async def test_update_report_explicit_none_clears_the_field(patch_supabase):
+    # Regression test for the null-vs-unset bug (backend edec24a, reintroduced here,
+    # fixed 2026-08-30): the field loop used to filter on `value is not None` AFTER
+    # exclude_unset=True already ran, silently dropping an explicit clear-to-null.
+    fake = patch_supabase(reports=[_report("r1")])
+    await update_report("r1", NearMissUpdate(witnessDetails=None), current_user=USER)
+    update_call = next(c for c in fake.calls if c["table"] == "nearmiss_reports" and c["op"] == "update")
+    assert update_call["payload"]["witnessdetails"] is None
+
+
 async def test_update_report_with_no_fields_set_returns_existing_without_writing(patch_supabase):
     fake = patch_supabase(reports=[_report("r1")])
     result = await update_report("r1", NearMissUpdate(), current_user=USER)

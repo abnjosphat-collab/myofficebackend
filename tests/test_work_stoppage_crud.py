@@ -342,6 +342,16 @@ async def test_update_report_missing_is_404(patch_supabase):
     assert exc_info.value.status_code == 404
 
 
+async def test_update_report_explicit_none_clears_the_field(patch_supabase):
+    # Regression test for the null-vs-unset bug (backend edec24a, reintroduced here,
+    # fixed 2026-08-30): the field loop used to filter on `value is not None` AFTER
+    # exclude_unset=True already ran, silently dropping an explicit clear-to-null.
+    fake = patch_supabase(reports=[_report("r1")], actions=[])
+    await update_report("r1", WorkStoppageUpdate(acceptedBy=None), current_user=USER)
+    update_call = next(c for c in fake.calls if c["table"] == "work_stoppage_reports" and c["op"] == "update")
+    assert update_call["payload"]["accepted_by"] is None
+
+
 async def test_update_report_updates_fields_and_keeps_existing_actions_when_omitted(patch_supabase):
     fake = patch_supabase(reports=[_report("r1")], actions=[_action("a1", "r1")])
     result = await update_report("r1", WorkStoppageUpdate(department="New Workshop", acceptedBy="M. Chirwa"),

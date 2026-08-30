@@ -488,7 +488,13 @@ async def update_vfl_report(report_id: str, updated: VFLReportUpdate, current_us
         }
         
         for key, value in update_dict.items():
-            if key in field_mapping and value is not None and key != "actions":
+            # `value is not None` used to be here too — that's the null-vs-unset bug
+            # already fixed project-wide once (backend edec24a): exclude_unset=True
+            # already excludes fields the caller never sent, so an explicit
+            # `"designation": null` reaching here IS the caller asking to clear that
+            # field, not an accidental omission. Filtering it out silently dropped
+            # every explicit-clear request. Fixed 2026-08-30.
+            if key in field_mapping and key != "actions":
                 data_to_update[field_mapping[key]] = value
         
         # Always update updated_at timestamp

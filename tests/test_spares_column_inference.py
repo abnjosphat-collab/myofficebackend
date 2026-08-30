@@ -20,8 +20,13 @@ from app.routers.spares import (
 
 # ─── clean_data ─────────────────────────────────────────────────────────────────────
 
-def test_clean_data_drops_none_values():
-    assert clean_data({"a": None, "b": 1}) == {"b": 1}
+def test_clean_data_preserves_none_values():
+    # clean_data's only caller (update_spare) runs exclude_unset=True first, so a key
+    # reaching here IS something the caller explicitly sent — an explicit None means
+    # "clear this field", not "field wasn't provided". Used to drop it silently (the
+    # null-vs-unset bug, already fixed project-wide once, backend edec24a) — fixed
+    # here 2026-08-30. See tests/test_spares_crud.py for the update_spare-level test.
+    assert clean_data({"a": None, "b": 1}) == {"a": None, "b": 1}
 
 
 def test_clean_data_drops_empty_string():

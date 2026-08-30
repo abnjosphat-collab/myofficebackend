@@ -322,6 +322,23 @@ async def test_update_vfl_report_field_update_maps_to_snake_case(patch_supabase)
     assert "updated_at" in update_payload
 
 
+async def test_update_vfl_report_explicit_none_clears_the_field(patch_supabase):
+    # Regression test for the null-vs-unset bug (backend edec24a, reintroduced here,
+    # fixed 2026-08-30): the field loop used to filter on `value is not None` AFTER
+    # exclude_unset=True already ran, silently dropping an explicit clear-to-null.
+    existing = {"id": "r1", "designation": "Old Designation", "status": "draft"}
+    state = patch_supabase({
+        "vfl_reports": {
+            "select_return": [existing],
+            "update_return": lambda payload, f: [{**existing, **payload}],
+        },
+        "vfl_action_plan": {"select_return": []},
+    })
+    await update_vfl_report("r1", VFLReportUpdate(designation=None), current_user={"user_id": "u1"})
+    update_payload = _calls(state, "vfl_reports", "update")[0]["payload"]
+    assert update_payload["designation"] is None
+
+
 async def test_update_vfl_report_status_to_submitted_sets_submitted_at(patch_supabase):
     existing = {"id": "r1", "status": "draft"}
     state = patch_supabase({

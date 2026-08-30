@@ -596,7 +596,11 @@ async def update_pto_report(report_id: str, updated: PTOReportUpdate, current_us
         }
         
         for key, value in update_dict.items():
-            if key in field_mapping and value is not None and key != "actionPlan":
+            # `value is not None` used to be here too — the null-vs-unset bug already
+            # fixed project-wide once (backend edec24a): exclude_unset=True already
+            # excludes fields the caller never sent, so an explicit null reaching here
+            # IS the caller asking to clear that field. Fixed 2026-08-30.
+            if key in field_mapping and key != "actionPlan":
                 # Convert Pydantic models to dict
                 if hasattr(value, 'dict'):
                     data_to_update[field_mapping[key]] = value.dict()

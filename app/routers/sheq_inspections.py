@@ -419,7 +419,14 @@ async def update_inspection(inspection_id: str, updated: SHEQUpdate, current_use
         }
         
         for key, value in update_dict.items():
-            if key in field_mapping and value is not None and key != "findings":
+            # `value is not None` used to be here too — the null-vs-unset bug already
+            # fixed project-wide once (backend edec24a): exclude_unset=True already
+            # excludes fields the caller never sent, so an explicit null reaching here
+            # IS the caller asking to clear that field. Fixed 2026-08-30. The elif
+            # below was already dead code before this fix (an empty list satisfied the
+            # old `value is not None` check too, so the if branch always won for
+            # before_photos/after_photos) and stays dead now — left as-is, harmless.
+            if key in field_mapping and key != "findings":
                 data_to_update[field_mapping[key]] = value
             # lists can be empty — treat separately so [] clears photos
             elif key in ("before_photos", "after_photos") and isinstance(value, list):
@@ -621,7 +628,11 @@ async def update_finding(finding_id: str, updated: FindingUpdate, current_user: 
         }
 
         for key, value in update_dict.items():
-            if key in field_mapping and value is not None:
+            # `value is not None` used to be here too — the null-vs-unset bug already
+            # fixed project-wide once (backend edec24a): exclude_unset=True already
+            # excludes fields the caller never sent, so an explicit null reaching here
+            # IS the caller asking to clear that field. Fixed 2026-08-30.
+            if key in field_mapping:
                 data_to_update[field_mapping[key]] = value
 
         if not data_to_update:
