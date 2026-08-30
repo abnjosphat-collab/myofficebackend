@@ -6,7 +6,7 @@
 from fastapi import APIRouter, HTTPException, Query, Depends
 from pydantic import BaseModel, Field, validator
 from typing import Optional, List, Dict, Any
-from app.supabase_client import supabase
+from app.supabase_client import supabase, rows, one_row
 from app.auth import get_current_user, require_role
 from app.aggregation import count_by
 from app.db_helpers import get_or_404, apply_date_range, or_ilike, distinct_suggestions, status_choice_validator
@@ -144,19 +144,19 @@ async def get_reports(
         query = query.range(offset, offset + limit - 1)
         
         response = query.execute()
-        
+
         if hasattr(response, 'data'):
-            db_reports = response.data or []
+            db_reports = rows(response)
             result = []
-            
+
             # Fetch corrective actions for each report
             for report in db_reports:
                 actions_response = supabase.table("corrective_actions")\
                     .select("*")\
                     .eq("report_id", report["id"])\
                     .execute()
-                
-                db_actions = actions_response.data if hasattr(actions_response, 'data') else []
+
+                db_actions = rows(actions_response)
                 camel_actions = [map_db_action_to_camel(a) for a in db_actions]
                 
                 camel_report = map_db_work_stoppage_to_camel(report)
@@ -192,21 +192,20 @@ async def get_report(report_id: str):
             .select("*")\
             .eq("id", report_id)\
             .execute()
-        
-        if not report_response.data:
+
+        db_report = one_row(report_response)
+        if db_report is None:
             raise HTTPException(status_code=404, detail="Report not found")
-        
-        db_report = report_response.data[0]
-        
+
         # Get corrective actions
         actions_response = supabase.table("corrective_actions")\
             .select("*")\
             .eq("report_id", report_id)\
             .execute()
-        
-        db_actions = actions_response.data if hasattr(actions_response, 'data') else []
+
+        db_actions = rows(actions_response)
         camel_actions = [map_db_action_to_camel(a) for a in db_actions]
-        
+
         camel_report = map_db_work_stoppage_to_camel(db_report)
         camel_report["correctiveActions"] = camel_actions
         
@@ -248,11 +247,10 @@ async def create_report(report: WorkStoppageCreate, current_user: dict = Depends
         report_response = supabase.table("work_stoppage_reports")\
             .insert(report_data)\
             .execute()
-        
-        if not report_response.data:
+
+        created_report = one_row(report_response)
+        if created_report is None:
             raise HTTPException(status_code=500, detail="Failed to create report")
-        
-        created_report = report_response.data[0]
         
         # Insert corrective actions
         if report.correctiveActions:
@@ -272,8 +270,8 @@ async def create_report(report: WorkStoppageCreate, current_user: dict = Depends
                 actions_response = supabase.table("corrective_actions")\
                     .insert(actions_data)\
                     .execute()
-                
-                db_actions = actions_response.data if hasattr(actions_response, 'data') else []
+
+                db_actions = rows(actions_response)
                 created_report["correctiveActions"] = [map_db_action_to_camel(a) for a in db_actions]
             else:
                 created_report["correctiveActions"] = []
@@ -302,10 +300,11 @@ async def update_report(report_id: str, updated: WorkStoppageUpdate, current_use
             .select("*")\
             .eq("id", report_id)\
             .execute()
-        
-        if not existing.data:
+
+        existing_row = one_row(existing)
+        if existing_row is None:
             raise HTTPException(status_code=404, detail="Report not found")
-        
+
         # Prepare update data - map camelCase to lowercase for DB
         data_to_update = {}
         update_dict = updated.dict(exclude_unset=True)
@@ -332,13 +331,12 @@ async def update_report(report_id: str, updated: WorkStoppageUpdate, current_use
                 .update(data_to_update)\
                 .eq("id", report_id)\
                 .execute()
-            
-            if not update_response.data:
+
+            updated_report = one_row(update_response)
+            if updated_report is None:
                 raise HTTPException(status_code=500, detail="Update failed")
-            
-            updated_report = update_response.data[0]
         else:
-            updated_report = existing.data[0]
+            updated_report = existing_row
         
         # Update corrective actions if provided
         if updated.correctiveActions is not None:
@@ -352,24 +350,28 @@ async def update_report(report_id: str, updated: WorkStoppageUpdate, current_use
             if updated.correctiveActions:
                 actions_data = []
                 for action in updated.correctiveActions:
+                    # updated.correctiveActions is a list of CorrectiveActionUpdate model
+                    # instances, not dicts — .get() raised AttributeError on every PATCH
+                    # that included correctiveActions (2026-08-30 fix, found via the
+                    # rows()/one_row() pyright pass on this file).
                     # Only include if it has required fields
-                    if action.get("finding") and action.get("action") and action.get("byWho") and action.get("byWhen"):
+                    if action.finding and action.action and action.byWho and action.byWhen:
                         actions_data.append({
                             "id": generate_id(),
                             "report_id": report_id,
-                            "finding": action.get("finding"),
-                            "action": action.get("action"),
-                            "by_who": action.get("byWho"),
-                            "by_when": action.get("byWhen"),
-                            "status": action.get("status", "Pending")
+                            "finding": action.finding,
+                            "action": action.action,
+                            "by_who": action.byWho,
+                            "by_when": action.byWhen,
+                            "status": action.status or "Pending"
                         })
                 
                 if actions_data:
                     actions_response = supabase.table("corrective_actions")\
                         .insert(actions_data)\
                         .execute()
-                    
-                    db_actions = actions_response.data if hasattr(actions_response, 'data') else []
+
+                    db_actions = rows(actions_response)
                     updated_report["correctiveActions"] = [map_db_action_to_camel(a) for a in db_actions]
                 else:
                     updated_report["correctiveActions"] = []
@@ -381,8 +383,8 @@ async def update_report(report_id: str, updated: WorkStoppageUpdate, current_use
                 .select("*")\
                 .eq("report_id", report_id)\
                 .execute()
-            
-            db_actions = actions_response.data if hasattr(actions_response, 'data') else []
+
+            db_actions = rows(actions_response)
             updated_report["correctiveActions"] = [map_db_action_to_camel(a) for a in db_actions]
         
         # Map to camelCase for response
@@ -408,10 +410,10 @@ async def delete_report(report_id: str, current_user: dict = Depends(require_rol
             .select("*")\
             .eq("id", report_id)\
             .execute()
-        
-        if not existing.data:
+
+        if one_row(existing) is None:
             raise HTTPException(status_code=404, detail="Report not found")
-        
+
         # Corrective actions will be automatically deleted due to foreign key cascade
         supabase.table("work_stoppage_reports")\
             .delete()\
@@ -434,11 +436,11 @@ async def get_stats():
         
         # Get all reports
         reports_response = supabase.table("work_stoppage_reports").select("*").execute()
-        reports = reports_response.data if hasattr(reports_response, 'data') else []
-        
+        reports = rows(reports_response)
+
         # Get all actions
         actions_response = supabase.table("corrective_actions").select("*").execute()
-        actions = actions_response.data if hasattr(actions_response, 'data') else []
+        actions = rows(actions_response)
         
         # Calculate stats
         total = len(reports)
