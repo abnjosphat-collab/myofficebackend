@@ -354,10 +354,17 @@ async def create_work_order(work_order: WorkOrderCreate, current_user: dict = De
             try:
                 response = supabase.table("work_orders").insert(data_to_insert).execute()
             except Exception as insert_err:
-                if _is_unique_violation(insert_err) and attempt < 5:
-                    logger.warning(f"WO number {data_to_insert['work_order_number']} taken, retrying: {insert_err}")
+                if not _is_unique_violation(insert_err):
+                    raise
+                logger.warning(f"WO number {data_to_insert['work_order_number']} taken, retrying: {insert_err}")
+                if attempt < 5:
                     continue
-                raise
+                # Exhausted every retry on nothing but number collisions — break instead
+                # of re-raising so the graceful 409 below actually runs. Previously this
+                # branch was dead: the last attempt always re-raised the raw duplicate-key
+                # exception straight into the generic except below, surfacing an opaque
+                # 500 with a Postgres error message instead of the intended "please retry".
+                break
             created = one_row(response)
             if created is not None:
                 result = prepare_data_for_response(created)
