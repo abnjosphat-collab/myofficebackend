@@ -3,7 +3,7 @@ from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel, Field
 from typing import Optional, List, Dict, Any
 from datetime import datetime, date
-from app.supabase_client import supabase
+from app.supabase_client import supabase, rows, one_row
 from app.auth import get_current_user, require_role
 from app.cache import cached, cache_get, cache_set, build_key, invalidate_namespace
 from app.serialization import convert_dates_to_iso
@@ -285,8 +285,8 @@ async def get_work_orders(
         if limit:
             query = query.limit(limit)
         response = query.execute()
-        
-        records = response.data or []
+
+        records = rows(response)
         processed_records = []
         for record in records:
             processed_record = prepare_data_for_response(record)
@@ -305,7 +305,7 @@ def _generate_wo_number(offset: int = 0) -> str:
     only optimistic). `offset` steps past a number a concurrent create just took."""
     resp = supabase.table("work_orders").select("work_order_number").execute()
     max_n = 0
-    for row in (resp.data or []):
+    for row in rows(resp):
         m = re.search(r'(\d+)$', row.get("work_order_number") or "")
         if m:
             max_n = max(max_n, int(m.group(1)))
@@ -358,8 +358,9 @@ async def create_work_order(work_order: WorkOrderCreate, current_user: dict = De
                     logger.warning(f"WO number {data_to_insert['work_order_number']} taken, retrying: {insert_err}")
                     continue
                 raise
-            if response.data:
-                result = prepare_data_for_response(response.data[0])
+            created = one_row(response)
+            if created is not None:
+                result = prepare_data_for_response(created)
                 await invalidate_namespace("work_orders")
                 return result
             raise HTTPException(status_code=500, detail="Failed to create work order")
@@ -400,9 +401,10 @@ async def update_work_order(work_order_id: int, updated: WorkOrderUpdate, curren
         data_to_update["updated_at"] = datetime.utcnow().isoformat()
         
         response = supabase.table("work_orders").update(data_to_update).eq("id", work_order_id).execute()
-        
-        if response.data:
-            result = prepare_data_for_response(response.data[0])
+
+        updated = one_row(response)
+        if updated is not None:
+            result = prepare_data_for_response(updated)
             await invalidate_namespace("work_orders")
             return result
         else:
@@ -433,8 +435,8 @@ async def delete_work_order(work_order_id: int, current_user: dict = Depends(req
 async def get_work_orders_by_allocated(allocated_to: str):
     try:
         response = supabase.table("work_orders").select("*").eq("allocated_to", allocated_to).order("created_at", desc=True).execute()
-        
-        records = response.data or []
+
+        records = rows(response)
         processed_records = []
         for record in records:
             processed_record = prepare_data_for_response(record)
@@ -453,43 +455,41 @@ async def get_work_order_stats():
     try:
         # Get total records count
         records_response = supabase.table("work_orders").select("id", count="exact").execute()
-        total_records = len(records_response.data) if records_response.data else 0
-        
+        total_records = len(rows(records_response))
+
         # Get records by status + priority (one query — both come off the same rows)
         status_priority_response = supabase.table("work_orders").select("status, priority").execute()
-        rows = status_priority_response.data or []
-        status_counts = count_by(rows, 'status')
-        priority_counts = count_by(rows, 'priority')
-        
+        status_priority_rows = rows(status_priority_response)
+        status_counts = count_by(status_priority_rows, 'status')
+        priority_counts = count_by(status_priority_rows, 'priority')
+
         # Count overdue work orders
         today = date.today()
         records_all = supabase.table("work_orders").select("due_date, status").execute()
         overdue_count = 0
-        
-        if records_all.data:
-            for record in records_all.data:
-                due_date_str = record.get('due_date')
-                status = record.get('status', 'pending')
-                
-                if due_date_str and status != 'completed':
-                    try:
-                        due_date = datetime.strptime(due_date_str, '%Y-%m-%d').date()
-                        if due_date < today:
-                            overdue_count += 1
-                    except (ValueError, TypeError):
-                        continue
-        
+
+        for record in rows(records_all):
+            due_date_str = record.get('due_date')
+            status = record.get('status', 'pending')
+
+            if due_date_str and status != 'completed':
+                try:
+                    due_date = datetime.strptime(due_date_str, '%Y-%m-%d').date()
+                    if due_date < today:
+                        overdue_count += 1
+                except (ValueError, TypeError):
+                    continue
+
         # Calculate average progress
         progress_response = supabase.table("work_orders").select("progress").execute()
         total_progress = 0
         count_with_progress = 0
-        
-        if progress_response.data:
-            for record in progress_response.data:
-                progress = record.get('progress', 0)
-                if progress is not None:
-                    total_progress += progress
-                    count_with_progress += 1
+
+        for record in rows(progress_response):
+            progress = record.get('progress', 0)
+            if progress is not None:
+                total_progress += progress
+                count_with_progress += 1
         
         avg_progress = round(total_progress / count_with_progress) if count_with_progress > 0 else 0
         
@@ -537,13 +537,13 @@ async def get_ppe_records(
             query = query.eq("employee_id", employee_id)
             
         response = query.order("created_at", desc=True).execute()
-        
-        records = response.data or []
+
+        records = rows(response)
         for record in records:
             convert_dates_to_iso(record)
-            
+
         return records
-        
+
     except Exception as e:
         logger.error(f"Error fetching PPE records: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Error fetching PPE records: {str(e)}")
@@ -561,9 +561,9 @@ async def create_ppe_record(record: PPEIssueCreate, current_user: dict = Depends
         data_to_insert["created_at"] = datetime.utcnow().isoformat()
         
         response = supabase.table("ppe_records").insert(data_to_insert).execute()
-        
-        if response.data:
-            result = response.data[0]
+
+        result = one_row(response)
+        if result is not None:
             convert_dates_to_iso(result)
             return result
         else:
@@ -583,7 +583,7 @@ async def get_maintenance_dashboard_stats():
         
         # Get PPE stats (you can add PPE stats here too)
         ppe_response = supabase.table("ppe_records").select("id", count="exact").execute()
-        total_ppe = len(ppe_response.data) if ppe_response.data else 0
+        total_ppe = len(rows(ppe_response))
         
         # Calculate overall efficiency
         total_work_orders = work_order_stats["total_records"]

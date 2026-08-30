@@ -3,7 +3,7 @@ from fastapi import APIRouter, HTTPException, Header, Depends
 from pydantic import BaseModel, Field, validator
 from typing import Optional, List
 from datetime import date, datetime
-from app.supabase_client import supabase
+from app.supabase_client import supabase, rows, one_row
 from app.auth import get_current_user, require_role_if_status_in
 from app.db_helpers import get_or_404
 import logging
@@ -108,10 +108,10 @@ async def create_leave(leave: LeaveCreate, current_user: dict = Depends(get_curr
         }
 
         result = supabase.table("leaves").insert(data_to_insert).execute()
-        created = get_supabase_data(result)
+        created = one_row(result)
         if not created:
             raise HTTPException(status_code=500, detail="No data returned after insertion")
-        return created[0]
+        return created
     except Exception as e:
         logger.error(f"Error creating leave: {str(e)}\n{traceback.format_exc()}")
         raise HTTPException(status_code=500, detail=f"Error creating leave: {str(e)}")
@@ -128,8 +128,8 @@ async def get_leaves(status: Optional[str] = None, leave_type: Optional[str] = N
             query = query.eq("leave_type", leave_type)
         query = query.order("applied_date", desc=True)
         response = query.execute()
-        data = get_supabase_data(response)
-        return data or []
+        data = rows(response)
+        return data
     except Exception as e:
         logger.error(f"Error fetching leaves: {str(e)}\n{traceback.format_exc()}")
         raise HTTPException(status_code=500, detail=f"Error fetching leaves: {str(e)}")
@@ -139,7 +139,7 @@ async def get_leaves(status: Optional[str] = None, leave_type: Optional[str] = N
 async def get_leave_stats():
     try:
         response = supabase.table("leaves").select("*").execute()
-        data = get_supabase_data(response) or []
+        data = rows(response)
         today = date.today().isoformat()
         total = len(data)
         pending = sum(1 for l in data if l.get('status') == 'pending')
@@ -196,14 +196,14 @@ async def update_leave(leave_id: int, updated: LeaveUpdate, authorization: Optio
             return existing
 
         result = supabase.table("leaves").update(data_to_update).eq("id", leave_id).execute()
-        updated_data = get_supabase_data(result)
-        if not updated_data:
+        updated_row = one_row(result)
+        if not updated_row:
             fetch_resp = supabase.table("leaves").select("*").eq("id", leave_id).execute()
-            fetched = get_supabase_data(fetch_resp)
-            if not fetched:
+            fetched_row = one_row(fetch_resp)
+            if not fetched_row:
                 raise HTTPException(status_code=500, detail="No data returned after update")
-            return fetched[0]
-        return updated_data[0]
+            return fetched_row
+        return updated_row
     except Exception as e:
         logger.error(f"Error updating leave {leave_id}: {str(e)}\n{traceback.format_exc()}")
         raise HTTPException(status_code=500, detail=f"Error updating leave: {str(e)}")
@@ -213,7 +213,7 @@ async def update_leave(leave_id: int, updated: LeaveUpdate, authorization: Optio
 async def delete_leave(leave_id: int, current_user: dict = Depends(get_current_user)):
     try:
         existing_resp = supabase.table("leaves").select("id").eq("id", leave_id).execute()
-        if not get_supabase_data(existing_resp):
+        if one_row(existing_resp) is None:
             raise HTTPException(status_code=404, detail=f"Leave with ID {leave_id} not found")
         supabase.table("leaves").delete().eq("id", leave_id).execute()
         return {"success": True, "detail": f"Leave {leave_id} deleted"}

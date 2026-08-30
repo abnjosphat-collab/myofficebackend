@@ -12,6 +12,7 @@ from supabase import create_client, Client
 import os
 from dotenv import load_dotenv
 import traceback
+from app.supabase_client import rows, one_row
 
 # Load environment variables
 load_dotenv()
@@ -142,7 +143,7 @@ async def get_reports(
         
         # Execute query
         result = query.order("date", desc=True).limit(limit).execute()
-        reports = format_supabase_response(result)
+        reports = rows(result)
         
         logger.info(f"✅ Retrieved {len(reports)} reports")
 
@@ -174,14 +175,15 @@ async def create_report(report: DailyReportCreate, current_user: dict = Depends(
             .select("*") \
             .eq("date", report.date) \
             .execute()
-        
+        existing_row = one_row(existing)
+
         # Prepare data
         report_data = report.dict()
         report_data = encode_json_fields(report_data, ['call_outs', 'equipment'])
-        
+
         now = datetime.now().isoformat()
-        
-        if existing.data:
+
+        if existing_row:
             # Update existing
             report_data['updated_at'] = now
             result = supabase.table("daily_reports") \
@@ -194,12 +196,12 @@ async def create_report(report: DailyReportCreate, current_user: dict = Depends(
             report_data['updated_at'] = now
             result = supabase.table("daily_reports").insert(report_data).execute()
         
-        created_data = format_supabase_response(result)
-        
+        created_data = one_row(result)
+
         if not created_data:
             raise HTTPException(status_code=500, detail="Failed to save report")
-        
-        created_report = decode_json_fields(created_data[0], ['call_outs', 'equipment'])
+
+        created_report = decode_json_fields(created_data, ['call_outs', 'equipment'])
 
         logger.info(f"✅ Report saved successfully")
         return created_report
@@ -231,8 +233,8 @@ async def get_stats_summary(
         query = apply_date_range(query, "date", start_date, end_date)
         
         result = query.execute()
-        reports = format_supabase_response(result)
-        
+        reports = rows(result)
+
         if not reports:
             return {
                 "total_reports": 0,
@@ -298,8 +300,8 @@ async def get_plant_availability_trend(
         query = apply_date_range(query, "date", start_date, end_date)
         
         result = query.execute()
-        reports = format_supabase_response(result)
-        
+        reports = rows(result)
+
         if not reports:
             return {"dates": [], "plant_availability": [], "dam_levels": []}
         
@@ -343,8 +345,8 @@ async def get_equipment_performance_trend(
         query = apply_date_range(query, "date", start_date, end_date)
         
         result = query.execute()
-        reports = format_supabase_response(result)
-        
+        reports = rows(result)
+
         if not reports:
             return {"equipment_data": [], "categories": []}
         
@@ -403,7 +405,7 @@ async def delete_all_reports(current_user: dict = Depends(require_role('manager'
         
         # Get count before deletion
         all_reports = supabase.table("daily_reports").select("*").execute()
-        report_count = len(all_reports.data) if all_reports.data else 0
+        report_count = len(rows(all_reports))
         
         if report_count == 0:
             return {

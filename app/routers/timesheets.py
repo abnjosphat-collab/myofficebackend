@@ -2,7 +2,7 @@ from fastapi import APIRouter, HTTPException, Query, Depends
 from pydantic import BaseModel
 from typing import Optional, List, Dict, Any
 from datetime import datetime, date
-from app.supabase_client import supabase
+from app.supabase_client import supabase, rows, one_row
 from app.auth import get_current_user, require_role
 from app.aggregation import count_by
 from app.db_helpers import apply_date_range, get_or_404
@@ -63,7 +63,7 @@ async def get_timesheets(
         query = apply_date_range(query, "date", start_date.isoformat() if start_date else None, end_date.isoformat() if end_date else None)
             
         response = query.order("date", desc=True).execute()
-        return response.data or []
+        return rows(response)
         
     except Exception as e:
         logger.error(f"Error fetching timesheets: {str(e)}")
@@ -91,10 +91,11 @@ async def create_timesheet_entry(entry: TimesheetEntryCreate, current_user: dict
         existing = supabase.table("timesheets").select("*").eq(
             "employee_id", entry.employee_id
         ).eq("date", data_to_insert["date"]).execute()
-        
-        if existing.data:
+        existing_row = one_row(existing)
+
+        if existing_row:
             # Update existing
-            entry_id = existing.data[0]["id"]
+            entry_id = existing_row["id"]
             response = supabase.table("timesheets").update(data_to_insert).eq("id", entry_id).execute()
             action = "updated"
             logger.info(f"Updated existing timesheet entry ID: {entry_id}")
@@ -103,9 +104,10 @@ async def create_timesheet_entry(entry: TimesheetEntryCreate, current_user: dict
             response = supabase.table("timesheets").insert(data_to_insert).execute()
             action = "created"
             logger.info(f"Created new timesheet entry")
-        
-        if response.data:
-            result = decode_json_fields(response.data[0], ['overtime_periods'])
+
+        created_or_updated = one_row(response)
+        if created_or_updated:
+            result = decode_json_fields(created_or_updated, ['overtime_periods'])
             return {"action": action, "data": result}
         else:
             raise HTTPException(status_code=500, detail="Database operation failed")
@@ -145,9 +147,10 @@ async def update_timesheet_entry(entry_id: int, updated: TimesheetEntryUpdate, c
         data_to_update["updated_at"] = datetime.utcnow().isoformat()
 
         response = supabase.table("timesheets").update(data_to_update).eq("id", entry_id).execute()
+        updated_row = one_row(response)
 
-        if response.data:
-            return decode_json_fields(response.data[0], ['overtime_periods'])
+        if updated_row:
+            return decode_json_fields(updated_row, ['overtime_periods'])
         else:
             raise HTTPException(status_code=500, detail="Update failed")
             
@@ -184,7 +187,7 @@ async def get_timesheet_stats(
         query = apply_date_range(query, "date", start_date.isoformat() if start_date else None, end_date.isoformat() if end_date else None)
             
         response = query.execute()
-        records = response.data or []
+        records = rows(response)
         
         # Simple calculations
         total_entries = len(records)

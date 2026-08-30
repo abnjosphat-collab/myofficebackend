@@ -2,7 +2,7 @@ from fastapi import APIRouter, HTTPException, Request, Depends
 from pydantic import BaseModel
 from typing import Optional, List
 from datetime import datetime, date
-from app.supabase_client import supabase
+from app.supabase_client import supabase, rows, one_row
 from app.auth import get_current_user, require_role
 from app.aggregation import count_by
 from app.db_helpers import apply_date_range, get_or_404
@@ -70,7 +70,7 @@ async def create_requisition(requisition: RequisitionCreate, request: Request = 
     try:
         # Check unique requisition_number
         existing = supabase.table("requisitions").select("id").eq("requisition_number", requisition.requisition_number).execute()
-        if existing.data:
+        if one_row(existing) is not None:
             raise HTTPException(status_code=400, detail=f"Requisition number '{requisition.requisition_number}' already exists")
 
         now = datetime.utcnow().isoformat()
@@ -88,10 +88,10 @@ async def create_requisition(requisition: RequisitionCreate, request: Request = 
         }
 
         req_response = supabase.table("requisitions").insert(requisition_data).execute()
-        if not req_response.data:
+        new_requisition = one_row(req_response)
+        if new_requisition is None:
             raise HTTPException(status_code=500, detail="Failed to create requisition")
 
-        new_requisition = req_response.data[0]
         requisition_id = new_requisition['id']
 
         if requisition.items:
@@ -107,13 +107,13 @@ async def create_requisition(requisition: RequisitionCreate, request: Request = 
                 for item in requisition.items
             ]
             items_response = supabase.table("requisition_items").insert(items_data).execute()
-            new_requisition['requisition_items'] = items_response.data or []
+            new_requisition['requisition_items'] = rows(items_response)
         else:
             new_requisition['requisition_items'] = []
 
         # Add line number for UI convenience
         all_reqs = supabase.table("requisitions").select("id").execute()
-        new_requisition['line_number'] = len(all_reqs.data)
+        new_requisition['line_number'] = len(rows(all_reqs))
 
         logger.info(f"Successfully created requisition {requisition_id}")
         return new_requisition
@@ -151,7 +151,7 @@ async def get_requisitions(
         query = apply_date_range(query, "date", date_from.isoformat() if date_from else None, date_to.isoformat() if date_to else None)
 
         response = query.order("created_at", desc=True).execute()
-        requisitions = response.data or []
+        requisitions = rows(response)
 
         for idx, req in enumerate(requisitions, 1):
             req['line_number'] = idx
@@ -166,11 +166,11 @@ async def get_requisitions(
 async def get_requisition(requisition_id: int):
     try:
         response = supabase.table("requisitions").select("*, requisition_items(*)").eq("id", requisition_id).execute()
-        if not response.data:
+        requisition = one_row(response)
+        if requisition is None:
             raise HTTPException(status_code=404, detail="Requisition not found")
-        requisition = response.data[0]
         all_reqs = supabase.table("requisitions").select("id").execute()
-        for idx, req in enumerate(sorted(all_reqs.data, key=lambda x: x['id']), 1):
+        for idx, req in enumerate(sorted(rows(all_reqs), key=lambda x: x['id']), 1):
             if req['id'] == requisition_id:
                 requisition['line_number'] = idx
                 break
@@ -188,7 +188,7 @@ async def update_requisition(requisition_id: int, update: RequisitionUpdate, cur
 
         if update.requisition_number:
             conflict = supabase.table("requisitions").select("id").eq("requisition_number", update.requisition_number).neq("id", requisition_id).execute()
-            if conflict.data:
+            if one_row(conflict) is not None:
                 raise HTTPException(status_code=400, detail=f"Requisition number '{update.requisition_number}' already exists")
 
         # exclude_unset, not a None-filter: an explicitly-sent null must clear the
@@ -222,7 +222,7 @@ async def update_requisition(requisition_id: int, update: RequisitionUpdate, cur
                 supabase.table("requisition_items").insert(items_data).execute()
 
         response = supabase.table("requisitions").select("*, requisition_items(*)").eq("id", requisition_id).execute()
-        return response.data[0]
+        return one_row(response)
 
     except HTTPException:
         raise
@@ -247,11 +247,12 @@ async def delete_requisition(requisition_id: int, current_user: dict = Depends(r
 async def get_daily_total(date: date):
     try:
         reqs = supabase.table("requisitions").select("id").eq("date", date.isoformat()).execute()
-        ids = [r['id'] for r in reqs.data] if reqs.data else []
+        ids = [r['id'] for r in rows(reqs)]
         if not ids:
             return {"date": date.isoformat(), "total": 0}
         items = supabase.table("requisition_items").select("cost_per_unit, quantity").in_("requisition_id", ids).execute()
-        total = sum(item['cost_per_unit'] * item['quantity'] for item in items.data) if items.data else 0
+        items_rows = rows(items)
+        total = sum(item['cost_per_unit'] * item['quantity'] for item in items_rows) if items_rows else 0
         return {"date": date.isoformat(), "total": total}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -262,8 +263,9 @@ async def get_stats():
     try:
         reqs = supabase.table("requisitions").select("id, status, section").execute()
         items = supabase.table("requisition_items").select("cost_per_unit, quantity").execute()
-        total_cost = sum(item['cost_per_unit'] * item['quantity'] for item in items.data) if items.data else 0
-        req_rows = reqs.data or []
+        items_rows = rows(items)
+        total_cost = sum(item['cost_per_unit'] * item['quantity'] for item in items_rows) if items_rows else 0
+        req_rows = rows(reqs)
         status_counts = count_by(req_rows, 'status')
         section_counts = count_by(req_rows, 'section')
         return {

@@ -2,7 +2,7 @@ from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel, Field
 from typing import Optional
 from datetime import datetime, date
-from app.supabase_client import supabase
+from app.supabase_client import supabase, rows, one_row
 from app.auth import get_current_user, require_role
 from app.serialization import convert_dates_to_iso
 from app.aggregation import count_by
@@ -92,14 +92,14 @@ async def get_ppe_records(
             query = query.eq("employee_id", employee_id)
             
         response = query.order("created_at", desc=True).execute()
-        
+
         # Convert dates to ISO format for JSON serialization
-        records = response.data or []
+        records = rows(response)
         for record in records:
             convert_dates_to_iso(record)
-            
+
         return records
-        
+
     except Exception as e:
         logger.error(f"Error fetching PPE records: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Error fetching PPE records: {str(e)}")
@@ -119,10 +119,10 @@ async def create_ppe_record(record: PPEIssueCreate, current_user: dict = Depends
         data_to_insert["created_at"] = datetime.utcnow().isoformat()
         
         response = supabase.table("ppe_records").insert(data_to_insert).execute()
-        
-        if response.data:
+
+        result = one_row(response)
+        if result is not None:
             # Convert dates to ISO format for JSON response
-            result = response.data[0]
             convert_dates_to_iso(result)
             return result
         else:
@@ -164,9 +164,9 @@ async def update_ppe_record(record_id: int, updated: PPEIssueUpdate, current_use
         data_to_update["updated_at"] = datetime.utcnow().isoformat()
         
         response = supabase.table("ppe_records").update(data_to_update).eq("id", record_id).execute()
-        
-        if response.data:
-            result = response.data[0]
+
+        result = one_row(response)
+        if result is not None:
             convert_dates_to_iso(result)
             return result
         else:
@@ -196,9 +196,9 @@ async def delete_ppe_record(record_id: int, current_user: dict = Depends(require
 async def get_employee_ppe_records(employee_id: str):
     try:
         response = supabase.table("ppe_records").select("*").eq("employee_id", employee_id).order("issue_date", desc=True).execute()
-        
+
         # Convert dates to ISO format for JSON serialization
-        records = response.data or []
+        records = rows(response)
         for record in records:
             convert_dates_to_iso(record)
             
@@ -214,11 +214,11 @@ async def get_ppe_stats():
     try:
         # Get total records count
         records_response = supabase.table("ppe_records").select("id", count="exact").execute()
-        total_records = len(records_response.data) if records_response.data else 0
-        
+        total_records = len(rows(records_response))
+
         # Get records by status + condition (one query — both come off the same rows)
         status_condition_response = supabase.table("ppe_records").select("status, condition").execute()
-        status_condition_rows = status_condition_response.data or []
+        status_condition_rows = rows(status_condition_response)
         status_counts = count_by(status_condition_rows, 'status')
         condition_counts = count_by(status_condition_rows, 'condition')
         
@@ -227,28 +227,27 @@ async def get_ppe_stats():
         records_all = supabase.table("ppe_records").select("expiry_date, status").execute()
         expiring_soon = 0
         expired = 0
-        
-        if records_all.data:
-            for record in records_all.data:
-                expiry_date_str = record.get('expiry_date')
-                status = record.get('status', 'active')
-                
-                if expiry_date_str and status == 'active':
-                    try:
-                        expiry = datetime.strptime(expiry_date_str, '%Y-%m-%d').date()
-                        days_until_expiry = (expiry - today).days
-                        
-                        if days_until_expiry < 0:
-                            expired += 1
-                        elif days_until_expiry <= 30:
-                            expiring_soon += 1
-                    except (ValueError, TypeError):
-                        # Handle invalid date formats
-                        continue
-        
+
+        for record in rows(records_all):
+            expiry_date_str = record.get('expiry_date')
+            status = record.get('status', 'active')
+
+            if expiry_date_str and status == 'active':
+                try:
+                    expiry = datetime.strptime(expiry_date_str, '%Y-%m-%d').date()
+                    days_until_expiry = (expiry - today).days
+
+                    if days_until_expiry < 0:
+                        expired += 1
+                    elif days_until_expiry <= 30:
+                        expiring_soon += 1
+                except (ValueError, TypeError):
+                    # Handle invalid date formats
+                    continue
+
         # Get unique employees count
         employees_response = supabase.table("ppe_records").select("employee_id").execute()
-        unique_employees = len(set(record['employee_id'] for record in employees_response.data)) if employees_response.data else 0
+        unique_employees = len(set(record['employee_id'] for record in rows(employees_response)))
         
         return {
             "total_records": total_records,
@@ -299,7 +298,7 @@ def _matrix_overrides():
     """{ppe_type: interval_months} from the ppe_matrix table, or {} if unavailable."""
     try:
         resp = supabase.table("ppe_matrix").select("ppe_type, interval_months").execute()
-        return {r["ppe_type"]: r["interval_months"] for r in (resp.data or [])}
+        return {r["ppe_type"]: r["interval_months"] for r in rows(resp)}
     except Exception as e:
         logger.info(f"ppe_matrix table unavailable, using defaults: {e}")
         return {}
@@ -325,7 +324,7 @@ def _apply_matrix_to_type(ppe_type: str, interval: int) -> int:
     Returns the number of records updated."""
     recs = supabase.table("ppe_records").select("id, issue_date").eq("ppe_type", ppe_type).eq("status", "active").execute()
     updated = 0
-    for r in (recs.data or []):
+    for r in rows(recs):
         # interval 0 = no expiry → clear the date; otherwise recompute from issue date.
         new_exp = None if interval == 0 else _add_months(r.get("issue_date"), interval)
         if interval == 0 or new_exp:

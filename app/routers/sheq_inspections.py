@@ -3,7 +3,7 @@
 from fastapi import APIRouter, HTTPException, Query, Depends
 from pydantic import BaseModel, Field
 from typing import Optional, List
-from app.supabase_client import supabase
+from app.supabase_client import supabase, rows, one_row
 from app.auth import get_current_user, require_role
 from app.aggregation import count_by
 from app.db_helpers import get_or_404, apply_date_range, or_ilike
@@ -161,17 +161,17 @@ async def get_inspections(
         logger.info(f"Supabase response: {response}")
         
         if hasattr(response, 'data'):
-            inspections = response.data or []
+            inspections = rows(response)
             result = []
-            
+
             # Fetch findings for each inspection and map to camelCase
             for inspection in inspections:
                 findings_response = supabase.table("sheq_findings")\
                     .select("*")\
                     .eq("inspection_id", inspection["id"])\
                     .execute()
-                
-                db_findings = findings_response.data if hasattr(findings_response, 'data') else []
+
+                db_findings = rows(findings_response)
                 camel_findings = [map_db_finding_to_camel(f) for f in db_findings]
                 
                 camel_inspection = map_db_inspection_to_camel(inspection)
@@ -194,11 +194,11 @@ async def get_inspection_stats():
         
         # Get all inspections
         inspections_response = supabase.table("sheq_inspections").select("*").execute()
-        inspections = inspections_response.data if hasattr(inspections_response, 'data') else []
-        
+        inspections = rows(inspections_response)
+
         # Get all findings
         findings_response = supabase.table("sheq_findings").select("*").execute()
-        findings = findings_response.data if hasattr(findings_response, 'data') else []
+        findings = rows(findings_response)
         
         # Calculate stats
         stats = {
@@ -273,21 +273,20 @@ async def get_inspection(inspection_id: str):
             .select("*")\
             .eq("id", inspection_id)\
             .execute()
-        
-        if not inspection_response.data:
+
+        db_inspection = one_row(inspection_response)
+        if db_inspection is None:
             raise HTTPException(status_code=404, detail="Inspection not found")
-        
-        db_inspection = inspection_response.data[0]
-        
+
         # Get findings
         findings_response = supabase.table("sheq_findings")\
             .select("*")\
             .eq("inspection_id", inspection_id)\
             .execute()
-        
-        db_findings = findings_response.data if hasattr(findings_response, 'data') else []
+
+        db_findings = rows(findings_response)
         camel_findings = [map_db_finding_to_camel(f) for f in db_findings]
-        
+
         camel_inspection = map_db_inspection_to_camel(db_inspection)
         camel_inspection["findings"] = camel_findings
         
@@ -335,11 +334,10 @@ async def create_inspection(inspection: SHEQCreate, current_user: dict = Depends
         inspection_response = supabase.table("sheq_inspections")\
             .insert(inspection_data)\
             .execute()
-        
-        if not inspection_response.data:
+
+        created_inspection = one_row(inspection_response)
+        if created_inspection is None:
             raise HTTPException(status_code=500, detail="Failed to create inspection")
-        
-        created_inspection = inspection_response.data[0]
         
         # Insert findings - WITH LOWERCASE COLUMN NAMES
         if inspection.findings:
@@ -363,8 +361,8 @@ async def create_inspection(inspection: SHEQCreate, current_user: dict = Depends
                 findings_response = supabase.table("sheq_findings")\
                     .insert(findings_data)\
                     .execute()
-                
-                db_findings = findings_response.data if hasattr(findings_response, 'data') else []
+
+                db_findings = rows(findings_response)
                 created_inspection["findings"] = [map_db_finding_to_camel(f) for f in db_findings]
             else:
                 created_inspection["findings"] = []
@@ -393,10 +391,11 @@ async def update_inspection(inspection_id: str, updated: SHEQUpdate, current_use
             .select("*")\
             .eq("id", inspection_id)\
             .execute()
-        
-        if not existing.data:
+
+        existing_row = one_row(existing)
+        if existing_row is None:
             raise HTTPException(status_code=404, detail="Inspection not found")
-        
+
         # Prepare update data - map camelCase to lowercase for DB
         data_to_update = {}
         update_dict = updated.dict(exclude_unset=True)
@@ -434,13 +433,12 @@ async def update_inspection(inspection_id: str, updated: SHEQUpdate, current_use
                 .update(data_to_update)\
                 .eq("id", inspection_id)\
                 .execute()
-            
-            if not update_response.data:
+
+            updated_inspection = one_row(update_response)
+            if updated_inspection is None:
                 raise HTTPException(status_code=500, detail="Update failed")
-            
-            updated_inspection = update_response.data[0]
         else:
-            updated_inspection = existing.data[0]
+            updated_inspection = existing_row
         
         # Update findings if provided
         if updated.findings is not None:
@@ -471,8 +469,8 @@ async def update_inspection(inspection_id: str, updated: SHEQUpdate, current_use
                 findings_response = supabase.table("sheq_findings")\
                     .insert(findings_data)\
                     .execute()
-                
-                db_findings = findings_response.data if hasattr(findings_response, 'data') else []
+
+                db_findings = rows(findings_response)
                 updated_inspection["findings"] = [map_db_finding_to_camel(f) for f in db_findings]
             else:
                 updated_inspection["findings"] = []
@@ -482,8 +480,8 @@ async def update_inspection(inspection_id: str, updated: SHEQUpdate, current_use
                 .select("*")\
                 .eq("inspection_id", inspection_id)\
                 .execute()
-            
-            db_findings = findings_response.data if hasattr(findings_response, 'data') else []
+
+            db_findings = rows(findings_response)
             updated_inspection["findings"] = [map_db_finding_to_camel(f) for f in db_findings]
         
         # Map to camelCase for response
@@ -509,10 +507,10 @@ async def delete_inspection(inspection_id: str, current_user: dict = Depends(req
             .select("*")\
             .eq("id", inspection_id)\
             .execute()
-        
-        if not existing.data:
+
+        if one_row(existing) is None:
             raise HTTPException(status_code=404, detail="Inspection not found")
-        
+
         # Findings will be automatically deleted due to foreign key cascade
         supabase.table("sheq_inspections")\
             .delete()\
@@ -538,7 +536,7 @@ async def get_findings(inspection_id: str):
             .eq("inspection_id", inspection_id)\
             .execute()
         
-        db_findings = response.data if hasattr(response, 'data') else []
+        db_findings = rows(response)
         return [map_db_finding_to_camel(f) for f in db_findings]
         
     except Exception as e:
@@ -556,10 +554,10 @@ async def add_finding(inspection_id: str, finding: FindingCreate, current_user: 
             .select("*")\
             .eq("id", inspection_id)\
             .execute()
-        
-        if not inspection.data:
+
+        if one_row(inspection) is None:
             raise HTTPException(status_code=404, detail="Inspection not found")
-        
+
         finding_data = {
             "id": generate_id(),
             "inspection_id": inspection_id,
@@ -577,11 +575,10 @@ async def add_finding(inspection_id: str, finding: FindingCreate, current_user: 
         response = supabase.table("sheq_findings")\
             .insert(finding_data)\
             .execute()
-        
-        if not response.data:
+
+        db_finding = one_row(response)
+        if db_finding is None:
             raise HTTPException(status_code=500, detail="Failed to add finding")
-        
-        db_finding = response.data[0]
         return map_db_finding_to_camel(db_finding)
         
     except HTTPException:
@@ -601,14 +598,15 @@ async def update_finding(finding_id: str, updated: FindingUpdate, current_user: 
             .select("*")\
             .eq("id", finding_id)\
             .execute()
-        
-        if not existing.data:
+
+        existing_row = one_row(existing)
+        if existing_row is None:
             raise HTTPException(status_code=404, detail="Finding not found")
-        
+
         # Prepare update data
         data_to_update = {}
         update_dict = updated.dict(exclude_unset=True)
-        
+
         # Map to lowercase column names
         field_mapping = {
             "finding": "finding",
@@ -621,23 +619,22 @@ async def update_finding(finding_id: str, updated: FindingUpdate, current_user: 
             "completedDate": "completeddate",
             "remarks": "remarks"
         }
-        
+
         for key, value in update_dict.items():
             if key in field_mapping and value is not None:
                 data_to_update[field_mapping[key]] = value
-        
+
         if not data_to_update:
-            return map_db_finding_to_camel(existing.data[0])
-        
+            return map_db_finding_to_camel(existing_row)
+
         response = supabase.table("sheq_findings")\
             .update(data_to_update)\
             .eq("id", finding_id)\
             .execute()
-        
-        if not response.data:
+
+        db_finding = one_row(response)
+        if db_finding is None:
             raise HTTPException(status_code=500, detail="Update failed")
-        
-        db_finding = response.data[0]
         return map_db_finding_to_camel(db_finding)
         
     except HTTPException:
@@ -657,10 +654,10 @@ async def delete_finding(finding_id: str, current_user: dict = Depends(require_r
             .select("*")\
             .eq("id", finding_id)\
             .execute()
-        
-        if not existing.data:
+
+        if one_row(existing) is None:
             raise HTTPException(status_code=404, detail="Finding not found")
-        
+
         supabase.table("sheq_findings")\
             .delete()\
             .eq("id", finding_id)\

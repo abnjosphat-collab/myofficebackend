@@ -4,7 +4,7 @@
 from fastapi import APIRouter, HTTPException, Query, Depends
 from pydantic import BaseModel, Field, validator
 from typing import Optional, List, Dict, Any
-from app.supabase_client import supabase
+from app.supabase_client import supabase, rows, one_row
 from app.auth import get_current_user, require_role
 from app.aggregation import count_by
 from app.db_helpers import get_or_404, apply_date_range, or_ilike, distinct_suggestions, status_choice_validator
@@ -144,13 +144,10 @@ async def get_pachedu_reports(
         query = query.range(offset, offset + limit - 1)
         
         response = query.execute()
-        
-        if hasattr(response, 'data'):
-            db_reports = response.data or []
-            result = [map_db_pachedu_to_camel(report) for report in db_reports]
-            return result
-        
-        return []
+
+        db_reports = rows(response)
+        result = [map_db_pachedu_to_camel(report) for report in db_reports]
+        return result
         
     except Exception as e:
         logger.error(f"Error fetching Pachedu reports: {str(e)}")
@@ -169,7 +166,7 @@ async def get_pachedu_stats():
         
         # Get all reports
         reports_response = supabase.table("pachedu_reports").select("*").execute()
-        reports = reports_response.data if hasattr(reports_response, 'data') else []
+        reports = rows(reports_response)
         
         # Calculate stats
         total = len(reports)
@@ -260,10 +257,10 @@ async def get_pachedu_report(report_id: str):
             .eq("id", report_id)\
             .execute()
         
-        if not report_response.data:
+        db_report = one_row(report_response)
+        if db_report is None:
             raise HTTPException(status_code=404, detail="Report not found")
-        
-        db_report = report_response.data[0]
+
         camel_report = map_db_pachedu_to_camel(db_report)
         
         return camel_report
@@ -312,10 +309,9 @@ async def create_pachedu_report(report: PacheduReportCreate, current_user: dict 
             .insert(report_data)\
             .execute()
         
-        if not report_response.data:
+        created_report = one_row(report_response)
+        if created_report is None:
             raise HTTPException(status_code=500, detail="Failed to create report")
-        
-        created_report = report_response.data[0]
         
         # Map to camelCase for response
         result = map_db_pachedu_to_camel(created_report)
@@ -338,10 +334,11 @@ async def update_pachedu_report(report_id: str, updated: PacheduReportUpdate, cu
             .select("*")\
             .eq("id", report_id)\
             .execute()
-        
-        if not existing.data:
+
+        existing_row = one_row(existing)
+        if existing_row is None:
             raise HTTPException(status_code=404, detail="Report not found")
-        
+
         # Prepare update data - map camelCase to snake_case for DB
         data_to_update = {}
         update_dict = updated.dict(exclude_unset=True)
@@ -381,12 +378,11 @@ async def update_pachedu_report(report_id: str, updated: PacheduReportUpdate, cu
                 .eq("id", report_id)\
                 .execute()
             
-            if not update_response.data:
+            updated_report = one_row(update_response)
+            if updated_report is None:
                 raise HTTPException(status_code=500, detail="Update failed")
-            
-            updated_report = update_response.data[0]
         else:
-            updated_report = existing.data[0]
+            updated_report = existing_row
         
         # Map to camelCase for response
         result = map_db_pachedu_to_camel(updated_report)
@@ -410,10 +406,10 @@ async def delete_pachedu_report(report_id: str, current_user: dict = Depends(req
             .select("*")\
             .eq("id", report_id)\
             .execute()
-        
-        if not existing.data:
+
+        if one_row(existing) is None:
             raise HTTPException(status_code=404, detail="Report not found")
-        
+
         supabase.table("pachedu_reports")\
             .delete()\
             .eq("id", report_id)\
