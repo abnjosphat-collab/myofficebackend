@@ -267,14 +267,13 @@ async def get_stats_summary(
         }
         
     except Exception as e:
+        # Was returning an all-zero 200 here — indistinguishable from a genuinely
+        # quiet period with no reports. Matches the documented anti-pattern
+        # (ENGINEERING_STANDARDS.md "Never fake a 200 on failure") already fixed in
+        # breakdowns.py/issues.py; re-raising lets the global handler return a real
+        # 500 instead (2026-08-30).
         logger.error(f"❌ Error in get_stats_summary: {str(e)}")
-        return {
-            "total_reports": 0,
-            "avg_plant_availability": 0,
-            "total_callouts": 0,
-            "total_callout_hours": 0,
-            "avg_dam_level": 0
-        }
+        raise
 
 # Trends endpoints
 @router.get("/trends/plant-availability", dependencies=[Depends(get_current_user)])
@@ -323,8 +322,11 @@ async def get_plant_availability_trend(
         }
         
     except Exception as e:
+        # Same fake-200 anti-pattern as get_stats_summary above — an empty result here
+        # is indistinguishable from "genuinely no reports in range" vs. "the DB call
+        # failed." Re-raise instead (2026-08-30).
         logger.error(f"❌ Error in plant availability trend: {str(e)}")
-        return {"dates": [], "plant_availability": [], "dam_levels": []}
+        raise
 
 @router.get("/trends/equipment-performance", dependencies=[Depends(get_current_user)])
 async def get_equipment_performance_trend(
@@ -388,8 +390,9 @@ async def get_equipment_performance_trend(
         }
         
     except Exception as e:
+        # Same fake-200 anti-pattern as get_stats_summary above (2026-08-30).
         logger.error(f"❌ Error in equipment performance trend: {str(e)}")
-        return {"equipment_data": [], "categories": []}
+        raise
 
 # Delete all reports
 @router.delete("/")
