@@ -2,18 +2,13 @@
 # get_comparison_analytics, get_management_summary. Zero coverage before this
 # file.
 #
-# NOTE — flagged, not fixed (see task scope / ENGINEERING_STANDARDS.md #2
-# "Never fake a 200 on failure"): all three of these already catch every
-# exception and return a 200 with a `"success": False` body instead of
-# raising/propagating. The standards doc explicitly names "compressors.py in
-# a few places" as a pre-existing, already-tracked instance of this pattern —
-# these three ARE that instance. They're honest about failure in the body
-# (unlike the worse breakdowns.py/daily_reports.py cases already fixed
-# elsewhere this session, which faked a *healthy* 200), but still return an
-# HTTP 200 on a genuine DB failure rather than a real error status. Left
-# alone here as pre-existing, already-documented debt rather than a
-# surprise bug — the tests below cover the actual current behavior (both the
-# happy path and this exact fallback shape) rather than silently changing it.
+# All three used to catch every exception and return a 200 with a
+# `"success": False` body instead of raising/propagating — the exact "never
+# fake a 200 on failure" anti-pattern named in ENGINEERING_STANDARDS.md #2,
+# and the specific "compressors.py in a few places" instance that doc
+# already called out. Fixed 2026-08-31 to re-raise as a real HTTPException
+# 500 instead, matching get_performance_metrics below (which never had this
+# problem) and every other fix of this pattern elsewhere this session.
 
 import pytest
 from fastapi import HTTPException
@@ -114,13 +109,12 @@ async def test_trends_stable_when_within_5_points():
     assert result["data"][0]["efficiency_trend"] == "stable"
 
 
-async def test_trends_db_failure_returns_success_false_200_not_a_raised_error():
+async def test_trends_db_failure_raises_500_not_a_fake_200():
     fake = FakeSupabase({})
     fake.always_fail(READINGS_TABLE, "boom")
-    result = await get_trend_analysis(period="monthly", supabase_client=fake)
-    assert result["success"] is False
-    assert result["has_data"] is False
-    assert result["data"] == []
+    with pytest.raises(HTTPException) as exc:
+        await get_trend_analysis(period="monthly", supabase_client=fake)
+    assert exc.value.status_code == 500
 
 
 # ─── get_comparison_analytics ────────────────────────────────────────────────────────
@@ -167,13 +161,12 @@ async def test_comparison_unknown_metric_defaults_value_to_zero():
     assert result["data"][0]["rating"] == "Low"
 
 
-async def test_comparison_db_failure_returns_success_false_200_not_a_raised_error():
+async def test_comparison_db_failure_raises_500_not_a_fake_200():
     fake = FakeSupabase({})
     fake.always_fail(COMPRESSORS_TABLE, "boom")
-    result = await get_comparison_analytics(metric="efficiency", supabase_client=fake)
-    assert result["success"] is False
-    assert result["data"] == []
-    assert result["count"] == 0
+    with pytest.raises(HTTPException) as exc:
+        await get_comparison_analytics(metric="efficiency", supabase_client=fake)
+    assert exc.value.status_code == 500
 
 
 # ─── get_management_summary ──────────────────────────────────────────────────────────
@@ -198,9 +191,9 @@ async def test_management_summary_empty_fleet():
     assert result["status_distribution"] == {}
 
 
-async def test_management_summary_db_failure_returns_success_false_200_not_a_raised_error():
+async def test_management_summary_db_failure_raises_500_not_a_fake_200():
     fake = FakeSupabase({})
     fake.always_fail(COMPRESSORS_TABLE, "boom")
-    result = await get_management_summary(supabase_client=fake)
-    assert result["success"] is False
-    assert "message" in result
+    with pytest.raises(HTTPException) as exc:
+        await get_management_summary(supabase_client=fake)
+    assert exc.value.status_code == 500

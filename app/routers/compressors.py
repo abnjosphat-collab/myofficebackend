@@ -1138,13 +1138,12 @@ async def get_trend_analysis(
         }
         
     except Exception as e:
+        # Was returning a 200 with success:false here — indistinguishable from a
+        # genuinely empty trends dataset to any caller checking the HTTP status, the
+        # exact "never fake a 200 on failure" anti-pattern named in
+        # ENGINEERING_STANDARDS.md #2. Re-raise instead (2026-08-31).
         logger.error(f"Error getting trend analysis: {str(e)}")
-        return {
-            "success": False,
-            "data": [],
-            "message": f"Error getting trend analysis: {str(e)}",
-            "has_data": False
-        }
+        raise HTTPException(status_code=500, detail="Failed to load trend analysis")
 
 @router.get("/analytics/comparison", dependencies=[Depends(get_current_user)])
 async def get_comparison_analytics(
@@ -1211,13 +1210,10 @@ async def get_comparison_analytics(
         }
 
     except Exception as e:
+        # Same anti-pattern as get_trend_analysis above — was a fake 200 on failure.
+        # Re-raise instead (2026-08-31).
         logger.error(f"Error getting comparison analytics: {str(e)}")
-        return {
-            "success": False,
-            "data": [],
-            "message": f"Error getting comparison analytics: {str(e)}",
-            "count": 0
-        }
+        raise HTTPException(status_code=500, detail="Failed to load comparison analytics")
 
 @router.get("/management/summary", dependencies=[Depends(get_current_user)])
 async def get_management_summary(supabase_client = Depends(get_supabase)):
@@ -1248,11 +1244,10 @@ async def get_management_summary(supabase_client = Depends(get_supabase)):
             "message": "Management summary loaded successfully"
         }
     except Exception as e:
+        # Same anti-pattern as get_trend_analysis above — was a fake 200 on failure.
+        # Re-raise instead (2026-08-31).
         logger.error(f"Error getting management summary: {str(e)}")
-        return {
-            "success": False,
-            "message": f"Error getting management summary: {str(e)}"
-        }
+        raise HTTPException(status_code=500, detail="Failed to load management summary")
 
 # Export/Import endpoints
 @router.post("/export")

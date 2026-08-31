@@ -44,11 +44,14 @@ except Exception as e:
     return []   # looks like "no data", not "the DB call failed"
 ```
 
-Both shapes exist in this codebase today (`breakdowns.py`'s dashboard
-endpoint, `compressors.py` in a few places) and at least one has a confirmed
-live consequence: a DB hiccup makes the homepage KPI show "0 Open
-Breakdowns," indistinguishable from an actually-healthy plant. Being on the
-remediation list doesn't mean it's fine to add a new one meanwhile.
+Both shapes existed in this codebase (`breakdowns.py`'s dashboard endpoint,
+`compressors.py`'s trend/comparison/management-summary endpoints — all now
+fixed) and at least one had a confirmed live consequence: a DB hiccup made
+the homepage KPI show "0 Open Breakdowns," indistinguishable from an
+actually-healthy plant. A prior instance being fixed doesn't mean it's fine
+to add a new one — this has been found and fixed independently in at least
+6 different files across this project's history; treat every new
+`except Exception` block as a place this bug likes to hide.
 
 Also avoid `raise HTTPException(500, detail=f"Error: {str(e)}")` where it can
 be avoided — that leaks the raw internal error string to the client. Let it
