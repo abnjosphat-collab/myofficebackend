@@ -21,8 +21,21 @@ DOCUMENT_EXTS = {
 }
 SPREADSHEET_EXTS = {"csv", "tsv", "xls", "xlsx"}
 
+# Noticeboard attachments cover a wider practical range than the Document Hub
+# (safety briefing videos, voice-note announcements, scanned memos, OpenDocument
+# files from non-MS-Office machines) — a real request, not "accept literally
+# anything": still an explicit allowlist, still excludes executables/scripts
+# (.exe, .sh, .bat, .msi, .ps1, .apk, etc.), just a broader one than DOCUMENT_EXTS.
+NOTICE_ATTACHMENT_EXTS = DOCUMENT_EXTS | {
+    "rtf", "odt", "ods", "odp", "svg", "bmp", "tif", "tiff", "heic",
+    "rar", "7z", "tar", "gz",
+    "mp3", "wav", "m4a", "ogg", "aac",
+    "mp4", "mov", "avi", "webm", "mkv",
+    "json", "xml",
+}
 
-def _ext(filename: str) -> str:
+
+def _ext(filename: str | None) -> str:
     name = (filename or "").lower()
     return name.rsplit(".", 1)[-1] if "." in name else ""
 
