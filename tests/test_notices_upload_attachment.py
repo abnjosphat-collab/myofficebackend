@@ -63,9 +63,9 @@ class _FakeUploadFile:
 async def test_upload_attachment_happy_path(patch_supabase):
     state = patch_supabase()
     result = await upload_notice_attachment(file=_FakeUploadFile("memo.pdf", b"hello world"))
-    assert result["attachment_name"] == "memo.pdf"
-    assert result["attachment_url"] == f"https://cdn.example.com/{state['uploaded'][0][0]}"
-    assert result["attachment_size"] == f"{len(b'hello world') / (1024 * 1024):.2f} MB"
+    assert result["name"] == "memo.pdf"
+    assert result["url"] == f"https://cdn.example.com/{state['uploaded'][0][0]}"
+    assert result["size"] == f"{len(b'hello world') / (1024 * 1024):.2f} MB"
     assert state["storage_bucket"] == ATTACHMENT_BUCKET
     assert state["uploaded"][0][0].startswith("notices/")
 
@@ -78,7 +78,7 @@ async def test_upload_attachment_accepts_a_wider_range_than_documents(patch_supa
     patch_supabase()
     for filename in ("briefing.mp4", "voice_note.mp3", "policy.odt", "photo.heic"):
         result = await upload_notice_attachment(file=_FakeUploadFile(filename, b"x"))
-        assert result["attachment_name"] == filename
+        assert result["name"] == filename
 
 
 async def test_upload_attachment_still_rejects_executables(patch_supabase):
@@ -102,5 +102,5 @@ async def test_upload_attachment_storage_failure_raises_500(patch_supabase):
 async def test_upload_attachment_public_url_failure_still_returns_empty_url(patch_supabase):
     patch_supabase(public_url_raises=True)
     result = await upload_notice_attachment(file=_FakeUploadFile("memo.pdf", b"x"))
-    assert result["attachment_url"] == ""
-    assert result["attachment_name"] == "memo.pdf"
+    assert result["url"] == ""
+    assert result["name"] == "memo.pdf"

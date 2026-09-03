@@ -23,7 +23,7 @@ hand-added alongside the base, same pattern as contractors.py.
 """
 from fastapi import HTTPException, Depends, UploadFile, File
 from pydantic import BaseModel
-from typing import Optional
+from typing import Optional, List
 from datetime import datetime, date as DateType
 from app.supabase_client import supabase, rows
 from app.auth import get_current_user
@@ -43,6 +43,15 @@ logger = logging.getLogger(__name__)
 # to any real Document Hub category.
 ATTACHMENT_BUCKET = "ams-documents"
 
+# One file: {name, url, size}. `attachments` replaced the old singular
+# attachment_name/attachment_url/attachment_size columns (see
+# supabase_migration_notices_multi_attachment.sql) so a notice can carry as many
+# files as needed instead of exactly one.
+class Attachment(BaseModel):
+    name: str
+    url: str
+    size: str
+
 # Pydantic Model - matches SQL exactly
 class NoticeCreate(BaseModel):
     title: str
@@ -58,9 +67,7 @@ class NoticeCreate(BaseModel):
     expires_at: Optional[DateType] = None
     target_audience: Optional[str] = "All Employees"
     notification_type: Optional[str] = "General Announcement"
-    attachment_name: Optional[str] = None
-    attachment_url: Optional[str] = None
-    attachment_size: Optional[str] = None
+    attachments: List[Attachment] = []
 
 class NoticeUpdate(BaseModel):
     title: Optional[str] = None
@@ -76,9 +83,7 @@ class NoticeUpdate(BaseModel):
     expires_at: Optional[DateType] = None
     target_audience: Optional[str] = None
     notification_type: Optional[str] = None
-    attachment_name: Optional[str] = None
-    attachment_url: Optional[str] = None
-    attachment_size: Optional[str] = None
+    attachments: Optional[List[Attachment]] = None
 
 
 def _dates_to_iso(data: dict) -> dict:
@@ -140,9 +145,9 @@ async def upload_notice_attachment(file: UploadFile = File(...)):
 
     size_mb = len(content) / (1024 * 1024)
     return {
-        "attachment_name": original_name,
-        "attachment_url": file_url,
-        "attachment_size": f"{size_mb:.2f} MB",
+        "name": original_name,
+        "url": file_url,
+        "size": f"{size_mb:.2f} MB",
     }
 
 
