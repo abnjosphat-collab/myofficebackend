@@ -273,7 +273,7 @@ import calendar
 # interval 0 = no expiry (item doesn't expire / isn't replaced on a schedule).
 PPE_MATRIX_DEFAULTS = {
     "worksuit": 6, "gumboots": 6, "safety_shoes": 6,
-    "helmet": 24, "Cap_lamp_belt": 24, "pneumo_jacket": 24, "harness": 24,
+    "helmet": 24, "Cap_lamp_belt": 24, "pneumo_jacket": 24, "harness": 24, "safety_chain_belt": 24,
     "vest": 3, "glasses": 3, "respirator": 1, "rainsuit": 6,
     "gloves": 0, "overall": 6,
 }

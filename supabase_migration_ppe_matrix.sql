@@ -12,7 +12,7 @@ CREATE TABLE IF NOT EXISTS ppe_matrix (
 -- Seed the company defaults (safe to re-run; existing rows are left untouched).
 INSERT INTO ppe_matrix (ppe_type, interval_months) VALUES
     ('worksuit', 6), ('gumboots', 6), ('safety_shoes', 6),
-    ('helmet', 24), ('Cap_lamp_belt', 24), ('pneumo_jacket', 24), ('harness', 24),
+    ('helmet', 24), ('Cap_lamp_belt', 24), ('pneumo_jacket', 24), ('harness', 24), ('safety_chain_belt', 24),
     ('vest', 3), ('glasses', 3), ('respirator', 1), ('rainsuit', 6),
     ('gloves', 0), ('overall', 6)   -- gloves: 0 = no expiry / not required
 ON CONFLICT (ppe_type) DO NOTHING;
