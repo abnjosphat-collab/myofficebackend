@@ -53,6 +53,28 @@ class OvertimeCreate(BaseModel):
             raise ValueError('Provide either start_time and end_time, or hours directly.')
         return v
 
+class BulkStatusUpdate(BaseModel):
+    ids: List[int] = Field(..., min_items=1)
+    status: str
+    approved_by: Optional[str] = None
+    approved_at: Optional[str] = None
+    approval_signature: Optional[str] = None
+    rejected_by: Optional[str] = None
+    rejected_at: Optional[str] = None
+
+    @validator('status')
+    def status_must_be_approval(cls, v):
+        if v not in ('approved', 'rejected'):
+            raise ValueError('status must be approved or rejected')
+        return v
+
+
+class BulkStatusResponse(BaseModel):
+    succeeded: int
+    failed: int
+    updated: List[Dict[str, Any]]
+
+
 class OvertimeUpdate(BaseModel):
     employee_name: Optional[str] = None
     employee_id: Optional[str] = None
@@ -154,6 +176,48 @@ async def create_overtime(overtime: OvertimeCreate, current_user: dict = Depends
     except Exception as e:
         logger.error(f"Error creating overtime: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Error creating overtime: {str(e)}")
+
+# POST bulk approve/reject — one request instead of N sequential PATCHes from the browser.
+@router.post("/bulk-status", response_model=BulkStatusResponse)
+async def bulk_update_overtime_status(
+    body: BulkStatusUpdate,
+    authorization: Optional[str] = Header(None),
+    current_user: dict = Depends(get_current_user),
+):
+    await require_role_if_status_in(
+        body.status, {'approved', 'rejected'}, 'manager', authorization, context="Bulk approval action",
+    )
+    try:
+        ids = list(dict.fromkeys(body.ids))
+        data_to_update: Dict[str, Any] = {"status": body.status}
+        if body.status == 'approved':
+            if body.approved_by is not None:
+                data_to_update['approved_by'] = body.approved_by
+            if body.approved_at is not None:
+                data_to_update['approved_at'] = body.approved_at
+            if body.approval_signature is not None:
+                data_to_update['approval_signature'] = body.approval_signature
+        else:
+            if body.rejected_by is not None:
+                data_to_update['rejected_by'] = body.rejected_by
+            if body.rejected_at is not None:
+                data_to_update['rejected_at'] = body.rejected_at
+
+        response = (
+            supabase.table("overtime")
+            .update(data_to_update)
+            .in_("id", ids)
+            .eq("status", "pending")
+            .execute()
+        )
+        updated = [decode_json_fields(row, ['spares_used']) for row in (response.data or [])]
+        succeeded = len(updated)
+        failed = max(0, len(ids) - succeeded)
+        return BulkStatusResponse(succeeded=succeeded, failed=failed, updated=updated)
+    except Exception as e:
+        logger.error(f"Error bulk-updating overtime status: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error bulk-updating overtime: {str(e)}")
+
 
 # PATCH update overtime
 @router.patch("/{overtime_id}")

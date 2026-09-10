@@ -6,6 +6,7 @@ from datetime import date, datetime
 from app.supabase_client import supabase, rows, one_row
 from app.auth import get_current_user, require_role_if_status_in
 from app.db_helpers import get_or_404
+from app.leave_days import calculate_total_days
 import logging
 import traceback
 
@@ -26,6 +27,7 @@ class LeaveCreate(BaseModel):
     emergency_contact: Optional[str] = None
     handover_to: Optional[str] = None
     notes: Optional[str] = None
+    exclude_weekends_holidays: bool = False
 
     @validator('end_date')
     def end_date_after_start_date(cls, v, values):
@@ -42,6 +44,7 @@ class LeaveUpdate(BaseModel):
     handover_to: Optional[str] = None
     status: Optional[str] = None
     notes: Optional[str] = None
+    exclude_weekends_holidays: Optional[bool] = None
 
     @validator('end_date')
     def end_date_after_start_date(cls, v, values):
@@ -59,6 +62,7 @@ class LeaveResponse(BaseModel):
     start_date: date
     end_date: date
     total_days: int
+    exclude_weekends_holidays: bool = False
     reason: str
     emergency_contact: Optional[str]
     handover_to: Optional[str]
@@ -75,9 +79,6 @@ class LeaveResponse(BaseModel):
         }
 
 # ---------- Helper ----------
-def calculate_total_days(start_date: date, end_date: date) -> int:
-    return (end_date - start_date).days + 1
-
 def get_supabase_data(response):
     if hasattr(response, 'data'):
         return response.data
@@ -88,7 +89,9 @@ def get_supabase_data(response):
 @router.post("/", response_model=LeaveResponse)
 async def create_leave(leave: LeaveCreate, current_user: dict = Depends(get_current_user)):
     try:
-        total_days = calculate_total_days(leave.start_date, leave.end_date)
+        total_days = calculate_total_days(
+            leave.start_date, leave.end_date, leave.exclude_weekends_holidays,
+        )
 
         data_to_insert = {
             "employee_id": leave.employee_id,
@@ -99,6 +102,7 @@ async def create_leave(leave: LeaveCreate, current_user: dict = Depends(get_curr
             "start_date": leave.start_date.isoformat(),
             "end_date": leave.end_date.isoformat(),
             "total_days": total_days,
+            "exclude_weekends_holidays": leave.exclude_weekends_holidays,
             "reason": leave.reason,
             "emergency_contact": leave.emergency_contact,
             "handover_to": leave.handover_to,
@@ -182,10 +186,22 @@ async def update_leave(leave_id: int, updated: LeaveUpdate, authorization: Optio
 
         data_to_update = updated.dict(exclude_unset=True)
 
-        if 'start_date' in data_to_update or 'end_date' in data_to_update:
+        if (
+            'start_date' in data_to_update
+            or 'end_date' in data_to_update
+            or 'exclude_weekends_holidays' in data_to_update
+        ):
             start = data_to_update.get('start_date', date.fromisoformat(existing['start_date']))
             end = data_to_update.get('end_date', date.fromisoformat(existing['end_date']))
-            data_to_update['total_days'] = calculate_total_days(start, end)
+            if isinstance(start, str):
+                start = date.fromisoformat(start)
+            if isinstance(end, str):
+                end = date.fromisoformat(end)
+            exclude = data_to_update.get(
+                'exclude_weekends_holidays',
+                existing.get('exclude_weekends_holidays', False),
+            )
+            data_to_update['total_days'] = calculate_total_days(start, end, exclude)
 
         if 'start_date' in data_to_update and isinstance(data_to_update['start_date'], date):
             data_to_update['start_date'] = data_to_update['start_date'].isoformat()

@@ -26,7 +26,7 @@ class Employee(BaseModel):
     email: Optional[str] = None
     phone: Optional[str] = None
     address: Optional[str] = None
-    date_of_engagement: date = Field(..., description="Date of employment")
+    date_of_engagement: Optional[date] = Field(None, description="Date of employment")
     designation: str = Field(..., min_length=1, description="Job title / position")
     employee_class: Optional[str] = None  # Permanent, Contract, Internship, Part-Time
     employment_type: Optional[str] = None  # NEC or SALARIED
@@ -41,9 +41,16 @@ class Employee(BaseModel):
     awards_recognition: Optional[List[str]] = Field(default_factory=list)
     other_positions: Optional[List[str]] = Field(default_factory=list)
     previous_employer: Optional[str] = None
+    archived: Optional[bool] = False
 
     class Config:
         json_encoders = {date: lambda v: v.isoformat()}
+
+    @validator('date_of_engagement', pre=True)
+    def empty_engagement_date(cls, v):
+        if v is None or v == '':
+            return None
+        return v
 
     @validator('employee_id')
     def clean_employee_id(cls, v: str) -> str:
@@ -58,14 +65,50 @@ class Employee(BaseModel):
         return v if isinstance(v, list) else []
 
 
+class BulkNormalizeItem(BaseModel):
+    """Partial employee update produced by roster normalization."""
+    id: int = Field(..., gt=0)
+    designation: Optional[str] = None
+    section: Optional[str] = None
+    phone: Optional[str] = None
+    archived: Optional[bool] = None
+
+
+class BulkNormalizeRequest(BaseModel):
+    updates: List[BulkNormalizeItem] = Field(..., min_items=1)
+
+
+class BulkNormalizeResponse(BaseModel):
+    succeeded: int
+    failed: int
+    errors: List[str] = Field(default_factory=list)
+
+
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
 def _dates_to_db(data: dict) -> dict:
     """Convert date objects → ISO strings for Supabase."""
     out = data.copy()
     for field in ('date_of_engagement', 'ppe_issue_date'):
-        if isinstance(out.get(field), date):
-            out[field] = out[field].isoformat()
+        val = out.get(field)
+        if val == '':
+            out[field] = None
+        elif isinstance(val, date):
+            out[field] = val.isoformat()
+    return out
+
+
+def _prepare_employee_write(data: dict, existing: Optional[dict] = None) -> dict:
+    """
+    Build a Supabase write payload. Omit `archived` when unchanged or still
+    active (false) so routine edits work even if PostgREST's schema cache is
+    briefly stale after the column was added.
+    """
+    out = _dates_to_db(data)
+    new_archived = bool(out.get('archived', False))
+    old_archived = bool((existing or {}).get('archived', False))
+    if new_archived == old_archived or (not new_archived and not old_archived):
+        out.pop('archived', None)
     return out
 
 
@@ -129,6 +172,49 @@ async def search_employees(
         raise HTTPException(500, detail=f"Search error: {e}")
 
 
+@router.post("/bulk-normalize", dependencies=[Depends(require_role('manager'))])
+async def bulk_normalize_employees(body: BulkNormalizeRequest):
+    """
+    Apply roster normalization patches in one request.
+    Updates only the fields provided per employee — no full-record validation.
+    """
+    succeeded = 0
+    failed = 0
+    errors: List[str] = []
+
+    for item in body.updates:
+        patch: dict = {}
+        if item.designation is not None:
+            patch["designation"] = item.designation
+        if item.section is not None:
+            patch["section"] = item.section
+        if item.phone is not None:
+            patch["phone"] = item.phone
+        if item.archived is not None:
+            patch["archived"] = item.archived
+
+        if not patch:
+            continue
+
+        try:
+            rows = _data(
+                supabase.table("employees").update(patch).eq("id", item.id).execute()
+            )
+            if rows:
+                succeeded += 1
+            else:
+                failed += 1
+                errors.append(f"Employee #{item.id} not found")
+        except Exception as e:
+            failed += 1
+            errors.append(f"Employee #{item.id}: {e}")
+
+    if succeeded:
+        await invalidate_namespace("employees")
+
+    return BulkNormalizeResponse(succeeded=succeeded, failed=failed, errors=errors[:25])
+
+
 @router.get("", dependencies=[Depends(get_current_user)])
 @router.get("/", dependencies=[Depends(get_current_user)])
 @cached("employees", ttl=60)
@@ -172,7 +258,7 @@ async def create_employee(employee: Employee, current_user: dict = Depends(get_c
                        "Choose a different ID."
             )
 
-        payload = _dates_to_db(employee.dict())
+        payload = _prepare_employee_write(employee.dict())
         rows = _data(supabase.table("employees").insert(payload).execute())
         if not rows:
             raise HTTPException(500, detail="No data returned after insertion")
@@ -195,13 +281,21 @@ async def update_employee(id: int, updated: Employee, current_user: dict = Depen
     """
     try:
         # Confirm the employee exists
-        existing_rows = _data(
-            supabase.table("employees").select("id,employee_id").eq("id", id).execute()
-        )
+        try:
+            existing_rows = _data(
+                supabase.table("employees").select("id,employee_id,archived").eq("id", id).execute()
+            )
+        except Exception:
+            existing_rows = _data(
+                supabase.table("employees").select("id,employee_id").eq("id", id).execute()
+            )
+            for row in existing_rows:
+                row.setdefault("archived", False)
         if not existing_rows:
             raise HTTPException(404, detail=f"Employee #{id} not found")
 
-        old_emp_id = existing_rows[0]['employee_id']
+        existing = existing_rows[0]
+        old_emp_id = existing['employee_id']
         new_emp_id = updated.employee_id
 
         # If employee_id is changing, make sure the new one isn't taken
@@ -219,7 +313,7 @@ async def update_employee(id: int, updated: Employee, current_user: dict = Depen
                     detail=f"Employee ID '{new_emp_id}' is already used by another employee."
                 )
 
-        payload = _dates_to_db(updated.dict())
+        payload = _prepare_employee_write(updated.dict(), existing)
         rows = _data(
             supabase.table("employees").update(payload).eq("id", id).execute()
         )

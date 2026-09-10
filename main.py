@@ -223,6 +223,7 @@ for _name, _prefix, _tags in [
     ("safety_complaints", None, None),
     ("services", None, None),
     ("documents", None, None),
+    ("sops", None, None),
     ("photos", "/api", ["Photos"]),
     ("ai_safety", "/api", ["AI Safety"]),
 ]:
@@ -239,6 +240,7 @@ for _name, _prefix, _tags, _key in [
     ("employees", "/api/employees", ["Employees"], None),
     ("admin", None, None, None),
     ("timesheets", "/api/timesheets", ["Timesheets"], None),
+    ("artisan_timesheets", "/api/artisan-timesheets", ["Artisan Timesheets"], None),
     ("requisitions", "/api/requisitions", ["Requisitions"], None),
     ("schedules", "/api/schedules", ["Schedules"], None),
     ("equipment", "/api/equipment", ["Equipment"], None),

@@ -18,8 +18,9 @@ from fastapi import HTTPException
 from app import auth as auth_mod
 from app.routers import overtime as overtime_mod
 from app.routers.overtime import (
-    OvertimeCreate, OvertimeUpdate,
+    OvertimeCreate, OvertimeUpdate, BulkStatusUpdate,
     get_overtime, create_overtime, update_overtime, delete_overtime,
+    bulk_update_overtime_status,
 )
 
 
@@ -44,6 +45,10 @@ class _Query:
 
     def eq(self, col, val):
         self._filters.append((col, val))
+        return self
+
+    def in_(self, col, vals):
+        self._filters.append((col, "in", vals))
         return self
 
     def order(self, *a, **k):
@@ -477,4 +482,53 @@ async def test_delete_overtime_db_error_is_500(patch_supabase):
     with pytest.raises(HTTPException) as exc:
         await delete_overtime(3, current_user=CURRENT_USER)
     assert exc.value.status_code == 500
+
+
+# ─── bulk_update_overtime_status ─────────────────────────────────────────────────────
+
+async def test_bulk_update_overtime_status_approve_happy_path(patch_supabase, patch_auth):
+    fake = patch_supabase({
+        "update_return": [
+            {"id": 1, "status": "approved", "approved_by": "Mgr", "spares_used": None},
+            {"id": 2, "status": "approved", "approved_by": "Mgr", "spares_used": None},
+        ],
+    })
+    patch_auth(role="manager")
+
+    result = await bulk_update_overtime_status(
+        BulkStatusUpdate(ids=[1, 2, 3], status="approved", approved_by="Mgr", approved_at="2024-01-01T12:00:00Z"),
+        authorization="Bearer good-token", current_user=CURRENT_USER,
+    )
+
+    assert result.succeeded == 2
+    assert result.failed == 1
+    assert len(result.updated) == 2
+    update_call = next(c for c in fake.state["calls"] if c["op"] == "update")
+    assert update_call["payload"]["status"] == "approved"
+    assert update_call["payload"]["approved_by"] == "Mgr"
+    assert ("id", "in", [1, 2, 3]) in update_call["filters"]
+    assert ("status", "pending") in update_call["filters"]
+
+
+async def test_bulk_update_overtime_status_reject_without_manager_is_403(patch_supabase, patch_auth):
+    patch_supabase({"update_return": []})
+    patch_auth(role="user")
+    with pytest.raises(HTTPException) as exc:
+        await bulk_update_overtime_status(
+            BulkStatusUpdate(ids=[5], status="rejected", rejected_by="Mgr"),
+            authorization="Bearer good-token", current_user=CURRENT_USER,
+        )
+    assert exc.value.status_code == 403
+
+
+async def test_bulk_update_overtime_status_db_error_is_500(patch_supabase, patch_auth):
+    patch_supabase({"raise_op": "update", "raise_msg": "bulk failed"})
+    patch_auth(role="manager")
+    with pytest.raises(HTTPException) as exc:
+        await bulk_update_overtime_status(
+            BulkStatusUpdate(ids=[1], status="approved", approved_by="Mgr"),
+            authorization="Bearer good-token", current_user=CURRENT_USER,
+        )
+    assert exc.value.status_code == 500
+    assert "bulk failed" in exc.value.detail
     assert "delete failed" in exc.value.detail

@@ -8,7 +8,8 @@ from datetime import date, timedelta
 import pytest
 
 import app.routers.leaves as leaves_mod
-from app.routers.leaves import calculate_total_days, get_leave_stats
+from app.leave_days import calculate_total_days
+from app.routers.leaves import get_leave_stats
 
 
 # ─── calculate_total_days ────────────────────────────────────────────────────────────
@@ -24,6 +25,16 @@ def test_multi_day_leave_is_inclusive_of_both_ends():
 
 def test_leave_spanning_a_month_boundary():
     assert calculate_total_days(date(2024, 1, 30), date(2024, 2, 2)) == 4
+
+
+def test_working_days_exclude_weekend():
+    # Fri 2026-09-11 through Mon 2026-09-14 → Fri + Mon = 2
+    assert calculate_total_days(date(2026, 9, 11), date(2026, 9, 14), True) == 2
+
+
+def test_working_days_exclude_public_holiday():
+    # Thu–Mon spanning Workers' Day (2026-05-01) → Thu, Fri = 2
+    assert calculate_total_days(date(2026, 4, 30), date(2026, 5, 4), True) == 2
 
 
 # ─── get_leave_stats — on_leave_now / upcoming date windows ────────────────────────
