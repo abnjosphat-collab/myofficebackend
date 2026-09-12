@@ -26,3 +26,6 @@ Thumbs.db
 
 # Environment variables
 .env
+
+# NEC import rollback snapshots (local payroll data — do not commit)
+data/nec_import_snapshots/*.json
