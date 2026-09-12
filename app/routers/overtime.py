@@ -92,6 +92,11 @@ class OvertimeUpdate(BaseModel):
     emergency_contact: Optional[str] = None
     spares_used: Optional[List[Dict[str, Any]]] = None
     status: Optional[str] = None
+    approved_by: Optional[str] = None
+    approved_at: Optional[str] = None
+    approval_signature: Optional[str] = None
+    rejected_by: Optional[str] = None
+    rejected_at: Optional[str] = None
 
 # GET all overtime
 @router.get("", dependencies=[Depends(get_current_user)])

@@ -17,8 +17,9 @@ from fastapi import HTTPException
 
 import app.routers.leaves as leaves_mod
 from app.routers.leaves import (
-    LeaveCreate, LeaveUpdate,
+    LeaveCreate, LeaveUpdate, BulkLeaveStatusUpdate,
     create_leave, get_leaves, get_leave, update_leave, delete_leave,
+    bulk_update_leave_status,
 )
 
 
@@ -42,6 +43,9 @@ class _FakeQuery:
     def select(self, *a, **k): return self
     def eq(self, col, val):
         self._filters.append((col, val))
+        return self
+    def in_(self, col, vals):
+        self._filters.append((col, "in", vals))
         return self
     def order(self, col, desc=False):
         self._order = (col, desc)
@@ -295,6 +299,63 @@ async def test_update_leave_approving_without_manager_role_is_rejected(patch_sup
     assert exc_info.value.status_code == 403
     # No DB mutation should have happened once the role gate rejected the request.
     assert [c for c in state["calls"] if c["op"] == "update"] == []
+
+
+# ─── bulk_update_leave_status ────────────────────────────────────────────────────
+
+def _leave_row(**overrides):
+    base = dict(
+        id=1, employee_id="E1", employee_name="Jane", position="Op", contact_number="077",
+        leave_type="annual", start_date="2024-06-10", end_date="2024-06-12", total_days=3,
+        reason="Trip", status="pending", applied_date="2024-06-01T10:00:00",
+    )
+    base.update(overrides)
+    return base
+
+
+async def test_bulk_update_leave_status_approve_happy_path(patch_supabase, monkeypatch):
+    async def _allow_gate(*a, **k):
+        return None
+    monkeypatch.setattr(leaves_mod, "require_role_if_status_in", _allow_gate)
+
+    state = patch_supabase({
+        "leaves": {
+            "update_return": [
+                _leave_row(id=1, status="approved"),
+                _leave_row(id=2, status="approved"),
+            ],
+        },
+    })
+    result = await bulk_update_leave_status(
+        BulkLeaveStatusUpdate(ids=[1, 2, 3], status="approved"),
+        authorization=None,
+        current_user={"user_id": "u1"},
+    )
+    assert result.succeeded == 2
+    assert result.failed == 1
+    update_calls = [c for c in state["calls"] if c["op"] == "update"]
+    assert len(update_calls) == 1
+    assert update_calls[0]["payload"]["status"] == "approved"
+    assert ("id", "in", [1, 2, 3]) in update_calls[0]["filters"]
+    assert ("status", "pending") in update_calls[0]["filters"]
+
+
+async def test_bulk_update_leave_status_without_manager_is_403(patch_supabase, monkeypatch):
+    patch_supabase({"leaves": {"update_return": []}})
+
+    async def _fake_gate(status, trigger_statuses, min_role, authorization, context="Status change"):
+        if status in trigger_statuses:
+            raise HTTPException(status_code=403, detail="Permission denied.")
+        return None
+    monkeypatch.setattr(leaves_mod, "require_role_if_status_in", _fake_gate)
+
+    with pytest.raises(HTTPException) as exc_info:
+        await bulk_update_leave_status(
+            BulkLeaveStatusUpdate(ids=[5], status="rejected"),
+            authorization=None,
+            current_user={"user_id": "u1"},
+        )
+    assert exc_info.value.status_code == 403
 
 
 # ─── delete_leave ────────────────────────────────────────────────────────────────

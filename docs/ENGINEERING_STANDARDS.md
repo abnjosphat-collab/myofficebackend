@@ -1,5 +1,7 @@
 # Backend engineering standards
 
+**See also:** [PRODUCT.md](./PRODUCT.md) and workspace `docs/WORK_ORDERS.md` for work-order rules.
+
 Short, on purpose. Four rules, each pointing at a real example already in this
 codebase — this is the wiring standard, not a process. Not enforced by CI yet;
 follow it because it's the pattern that's already proven out, not because

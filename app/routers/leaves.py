@@ -1,7 +1,7 @@
 # leaves.py – simplified, no department/manager, with error logging
 from fastapi import APIRouter, HTTPException, Header, Depends
 from pydantic import BaseModel, Field, validator
-from typing import Optional, List
+from typing import Optional, List, Dict, Any
 from datetime import date, datetime
 from app.supabase_client import supabase, rows, one_row
 from app.auth import get_current_user, require_role_if_status_in
@@ -77,6 +77,23 @@ class LeaveResponse(BaseModel):
             date: lambda v: v.isoformat(),
             datetime: lambda v: v.isoformat()
         }
+
+
+class BulkLeaveStatusUpdate(BaseModel):
+    ids: List[int] = Field(..., min_items=1)
+    status: str
+
+    @validator('status')
+    def status_must_be_approval(cls, v):
+        if v not in ('approved', 'rejected'):
+            raise ValueError('status must be approved or rejected')
+        return v
+
+
+class BulkLeaveStatusResponse(BaseModel):
+    succeeded: int
+    failed: int
+    updated: List[Dict[str, Any]]
 
 # ---------- Helper ----------
 def get_supabase_data(response):
@@ -165,6 +182,35 @@ async def get_leave_stats():
         # these stats client-side instead of calling this endpoint) but a landmine for
         # whoever wires a dashboard widget to it next.
         raise HTTPException(status_code=500, detail="Failed to load leave stats")
+
+# POST bulk approve/reject — one round trip instead of N PATCHes from the browser.
+@router.post("/bulk-status", response_model=BulkLeaveStatusResponse)
+async def bulk_update_leave_status(
+    body: BulkLeaveStatusUpdate,
+    authorization: Optional[str] = Header(None),
+    current_user: dict = Depends(get_current_user),
+):
+    await require_role_if_status_in(
+        body.status, {'approved', 'rejected'}, 'manager', authorization, context="Bulk leave approval",
+    )
+    try:
+        ids = list(dict.fromkeys(body.ids))
+        data_to_update: Dict[str, Any] = {"status": body.status}
+        response = (
+            supabase.table("leaves")
+            .update(data_to_update)
+            .in_("id", ids)
+            .eq("status", "pending")
+            .execute()
+        )
+        updated = response.data or []
+        succeeded = len(updated)
+        failed = max(0, len(ids) - succeeded)
+        return BulkLeaveStatusResponse(succeeded=succeeded, failed=failed, updated=updated)
+    except Exception as e:
+        logger.error(f"Error bulk-updating leave status: {str(e)}\n{traceback.format_exc()}")
+        raise HTTPException(status_code=500, detail=f"Error bulk-updating leaves: {str(e)}")
+
 
 # ---------- GET leave by id ----------
 @router.get("/{leave_id}", response_model=LeaveResponse, dependencies=[Depends(get_current_user)])
