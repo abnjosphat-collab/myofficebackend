@@ -47,6 +47,9 @@ class _FakeQuery:
     def gte(self, *a, **k): return self
     def lte(self, *a, **k): return self
     def order(self, *a, **k): return self
+    def range(self, start, end):
+        self.state.setdefault("ranges", []).append((start, end))
+        return self
     def insert(self, data):
         self._op = "insert"
         self._payload = data

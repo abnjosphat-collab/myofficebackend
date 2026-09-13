@@ -2,10 +2,10 @@ from fastapi import APIRouter, HTTPException, Query, Depends
 from pydantic import BaseModel
 from typing import Optional, List, Dict, Any
 from datetime import datetime, date
-from app.supabase_client import supabase, rows, one_row
+from app.supabase_client import supabase, one_row
 from app.auth import get_current_user, require_role
 from app.aggregation import count_by
-from app.db_helpers import apply_date_range, get_or_404
+from app.db_helpers import apply_date_range, fetch_all_pages, get_or_404
 from app.serialization import encode_json_fields, decode_json_fields
 import logging
 
@@ -56,14 +56,23 @@ async def get_timesheets(
 ):
     """Get timesheet entries with optional filters"""
     try:
-        query = supabase.table("timesheets").select("*")
-        
-        if employee_id:
-            query = query.eq("employee_id", employee_id)
-        query = apply_date_range(query, "date", start_date.isoformat() if start_date else None, end_date.isoformat() if end_date else None)
-            
-        response = query.order("date", desc=True).execute()
-        return rows(response)
+        def _base_query():
+            q = supabase.table("timesheets").select("*")
+            if employee_id:
+                q = q.eq("employee_id", employee_id)
+            q = apply_date_range(
+                q, "date",
+                start_date.isoformat() if start_date else None,
+                end_date.isoformat() if end_date else None,
+            )
+            # Stable ascending order so pagination is deterministic (date desc + no range
+            # dropped the oldest days once the period exceeded PostgREST's 1000-row cap).
+            return q.order("date", desc=False).order("id", desc=False)
+
+        def _page(start: int, end: int):
+            return _base_query().range(start, end).execute()
+
+        return fetch_all_pages(_page)
         
     except Exception as e:
         logger.error(f"Error fetching timesheets: {str(e)}")
@@ -182,12 +191,15 @@ async def get_timesheet_stats(
 ):
     """Get summary statistics for timesheets"""
     try:
-        query = supabase.table("timesheets").select("*")
-        
-        query = apply_date_range(query, "date", start_date.isoformat() if start_date else None, end_date.isoformat() if end_date else None)
-            
-        response = query.execute()
-        records = rows(response)
+        def _base_query():
+            q = supabase.table("timesheets").select("*")
+            return apply_date_range(
+                q, "date",
+                start_date.isoformat() if start_date else None,
+                end_date.isoformat() if end_date else None,
+            ).order("date", desc=False).order("id", desc=False)
+
+        records = fetch_all_pages(lambda s, e: _base_query().range(s, e).execute())
         
         # Simple calculations
         total_entries = len(records)

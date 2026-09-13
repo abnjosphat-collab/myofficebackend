@@ -23,6 +23,7 @@ from dotenv import load_dotenv
 load_dotenv(ROOT / ".env")
 
 from app.supabase_client import supabase  # noqa: E402
+from app.db_helpers import fetch_all_pages  # noqa: E402
 
 PERIOD_START = "2026-08-13"
 PERIOD_END = "2026-09-12"
@@ -87,16 +88,23 @@ def resolve_employee(sheet: dict, by_code: Dict[str, dict], by_name: Dict[str, d
 
 
 def fetch_timesheets(start: str, end: str) -> Dict[str, dict]:
-    resp = (
-        supabase.table("timesheets")
-        .select("*")
-        .gte("date", start)
-        .lte("date", end)
-        .execute()
-    )
+    def _base():
+        return (
+            supabase.table("timesheets")
+            .select("*")
+            .gte("date", start)
+            .lte("date", end)
+            .order("date", desc=False)
+            .order("id", desc=False)
+        )
+
+    rows = fetch_all_pages(lambda s, e: _base().range(s, e).execute())
     out: Dict[str, dict] = {}
-    for row in resp.data or []:
-        out[f"{row['employee_id']}:{row['date']}"] = row
+    for row in rows:
+        key = f"{row['employee_id']}:{row['date']}"
+        if key in out:
+            raise RuntimeError(f"Duplicate timesheet key {key} — resolve before import")
+        out[key] = row
     return out
 
 
@@ -164,12 +172,13 @@ def build_patch(
 
     reg = float(normal) if status != "off" else 0.0
     night_h = interp.get("night_allowance_hours")
-    patch = {
+    patch: Dict[str, Any] = {
         "status": status,
         "regular_hours": reg,
-        "overtime_hours": 0,
-        "holiday_overtime_hours": 0,
     }
+    if not existing:
+        patch["overtime_hours"] = 0
+        patch["holiday_overtime_hours"] = 0
     if night_h is not None and night_h > 0:
         patch["nightshift_hours"] = float(night_h)
         patch["nightshift_allowance"] = True
@@ -182,8 +191,13 @@ def build_patch(
     patch["total_hours"] = reg + nh
 
     if existing:
-        unchanged = all(existing.get(k) == v for k, v in patch.items())
-        if unchanged:
+        def _eq(field: str, new_val: Any) -> bool:
+            old = existing.get(field)
+            if isinstance(new_val, float) and isinstance(old, (int, float)):
+                return abs(float(old) - new_val) < 1e-6
+            return old == new_val
+
+        if all(_eq(k, v) for k, v in patch.items()):
             return None, "skip_unchanged"
     return patch, "upsert"
 

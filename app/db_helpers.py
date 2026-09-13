@@ -7,9 +7,14 @@
 # a hand-written loop/query-building block with a call parameterized by the
 # table/column/value that varied per call site, the same idea as count_by.
 
-from typing import Any, Callable, List, Optional
+from typing import Any, Callable, List, Optional, TypeVar
 
 from fastapi import HTTPException
+
+T = TypeVar("T")
+
+# PostgREST / Supabase default page size — unbounded .execute() silently truncates here.
+POSTGREST_PAGE_SIZE = 1000
 
 # db (the Supabase client) is a required parameter here, not a module-level
 # import — every router's tests monkeypatch that router's own `supabase` name
@@ -29,6 +34,28 @@ def get_or_404(db, table: str, id_value: Any, *, id_col: str = "id", detail: str
     if not r.data:
         raise HTTPException(status_code=404, detail=detail)
     return r.data[0]
+
+
+def fetch_all_pages(
+    fetch_range: Callable[[int, int], T],
+    *,
+    page_size: int = POSTGREST_PAGE_SIZE,
+    extract_rows: Callable[[T], List[dict]] = lambda r: (r.data if hasattr(r, "data") else r) or [],
+) -> List[dict]:
+    """Page through `.range(start, end)` until a short page — avoids silent payroll truncation."""
+    out: List[dict] = []
+    start = 0
+    while True:
+        try:
+            raw = fetch_range(start, start + page_size - 1)
+        except Exception:
+            raise
+        batch = extract_rows(raw)
+        out.extend(batch)
+        if len(batch) < page_size:
+            break
+        start += page_size
+    return out
 
 
 def apply_date_range(query, column: str, date_from: Optional[str] = None, date_to: Optional[str] = None):

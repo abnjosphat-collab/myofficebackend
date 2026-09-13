@@ -17,11 +17,20 @@ class _Resp:
 class _FakeQuery:
     def __init__(self, response_data):
         self._response = response_data
+        self._range = None
 
     def select(self, *a, **k): return self
     def gte(self, *a, **k): return self
     def lte(self, *a, **k): return self
-    def execute(self): return _Resp(self._response)
+    def order(self, *a, **k): return self
+    def range(self, start, end):
+        self._range = (start, end)
+        return self
+    def execute(self):
+        if self._range is not None:
+            s, e = self._range
+            return _Resp(self._response[s : e + 1])
+        return _Resp(self._response)
 
 
 class _FakeSupabase:
