@@ -240,6 +240,7 @@ for _name, _prefix, _tags, _key in [
     ("employees", "/api/employees", ["Employees"], None),
     ("admin", None, None, None),
     ("timesheets", "/api/timesheets", ["Timesheets"], None),
+    ("nec_timesheet_import", "/api/nec-timesheet-import", ["NEC Timesheet Import"], None),
     ("artisan_timesheets", "/api/artisan-timesheets", ["Artisan Timesheets"], None),
     ("requisitions", "/api/requisitions", ["Requisitions"], None),
     ("schedules", "/api/schedules", ["Schedules"], None),
