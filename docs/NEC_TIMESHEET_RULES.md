@@ -6,7 +6,7 @@ Scoped product rules confirmed for **NEC cycle** timesheets (13th–12th). Perio
 
 - NEC payroll month runs **13th → 12th** (not calendar month).
 - **Leaves** and **Overtime** are authoritative from their modules; scan columns are reconciliation only.
-- **Night shift column** on paper = **night-shift allowance** (separate from normal hours). Count allowance **once** (stored as `nightshift_hours` + `nightshift_allowance` on saved rows; grid totals use `nightAllowanceBonus` only, not double-counted in `night`).
+- **Night shift column** on paper = **night-shift allowance** (separate from normal hours): any **18:00–06:00** hours from a **rostered shift** (start/end on the row). **Automatic** — not a manual toggle. **Callout** / breakdown work at night uses `callout_overtime_hours`, not night allowance. Grid totals: `rosterNightAllowanceHours` → `nightAllowanceBonus` (see frontend `calcTotals.ts`).
 - **Standby** = flat 8h per contiguous flagged run (calendar gaps start a new run).
 
 ## Normal hours
