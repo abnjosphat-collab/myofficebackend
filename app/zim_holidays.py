@@ -4,6 +4,8 @@ from __future__ import annotations
 from datetime import date, timedelta
 from functools import lru_cache
 
+MUNHUMUTAPA_DAY_FIRST_YEAR = 2026
+
 
 def _easter_sunday(year: int) -> date:
     a = year % 19
@@ -42,6 +44,11 @@ def zim_holidays_for_year(year: int) -> dict[str, str]:
         f"{year}-04-18": "Independence Day",
         f"{year}-05-01": "Workers' Day",
         f"{year}-05-25": "Africa Day",
+        **(
+            {f"{year}-09-15": "Munhumutapa Day"}
+            if year >= MUNHUMUTAPA_DAY_FIRST_YEAR
+            else {}
+        ),
         heroes.isoformat(): "Heroes' Day",
         (heroes + timedelta(days=1)).isoformat(): "Defence Forces Day",
         f"{year}-12-22": "Unity Day",
