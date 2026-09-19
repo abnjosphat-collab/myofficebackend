@@ -8,6 +8,8 @@
 # broke, and a combined test locks in the documented invariant that all caps sum to
 # exactly 100.
 
+from datetime import datetime, timedelta
+
 from app.routers.ai_safety import (
     analyse, SafetyDataInput, _risk_level, _trend_direction, _date, _split_halves, _top,
 )
@@ -148,13 +150,40 @@ def test_date_malformed_value_is_none_not_a_crash():
 
 def test_split_halves_orders_by_date():
     records = [{"id": "late", "date": "2024-03-01"}, {"id": "early", "date": "2024-01-01"}]
-    older, newer = _split_halves(records)
+    ref = datetime(2024, 3, 1)
+    older, newer = _split_halves(records, reference=ref)
     assert [r["id"] for r in older] == ["early"]
     assert [r["id"] for r in newer] == ["late"]
 
 
 def test_split_halves_empty_input():
     assert _split_halves([]) == ([], [])
+
+
+def test_split_halves_uses_time_not_record_count():
+    """Nine early incidents + one recent must not become equal 5-vs-5 buckets."""
+    records = [{"id": f"old-{i}", "date": "2024-01-01"} for i in range(9)]
+    records.append({"id": "new-1", "date": "2024-12-31"})
+    ref = datetime(2024, 12, 31, 12, 0, 0)
+    older, newer = _split_halves(records, reference=ref)
+    assert len(older) == 9
+    assert len(newer) == 1
+
+
+def test_split_halves_equal_duration_halves_of_observation_span():
+    """Cut point divides [min_date, reference] into two equal-length periods."""
+    ref = datetime(2024, 6, 30)
+    records = [
+        {"id": "a", "date": "2024-01-01"},
+        {"id": "b", "date": "2024-06-30"},
+    ]
+    older, newer = _split_halves(records, reference=ref)
+    span_seconds = (ref - datetime(2024, 1, 1)).total_seconds()
+    cut = datetime(2024, 1, 1) + timedelta(seconds=span_seconds / 2)
+    for r, d in [(r, _date(r)) for r in older]:
+        assert d < cut
+    for r, d in [(r, _date(r)) for r in newer]:
+        assert d >= cut
 
 
 # ─── _top ─────────────────────────────────────────────────────────────────────────

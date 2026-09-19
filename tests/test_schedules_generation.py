@@ -160,6 +160,15 @@ def test_generate_one_happy_path_raises_work_order_and_rolls_schedule_forward(pa
     assert ("id", 1) in schedule_update["filters"]
 
 
+def test_generate_one_claim_insert_outage_raises_not_skips(patch_supabase):
+    s = _schedule()
+    patch_supabase({
+        "maintenance_schedule_runs": {"insert_raises": RuntimeError("connection reset")},
+    })
+    with pytest.raises(RuntimeError, match="connection reset"):
+        _generate_one(s, date(2026, 8, 1))
+
+
 def test_generate_one_already_claimed_skips_without_raising_a_work_order(patch_supabase):
     # UNIQUE(schedule_id, due_date) violation on the claim insert means a work order
     # already exists for this due date -> nothing new should be raised.

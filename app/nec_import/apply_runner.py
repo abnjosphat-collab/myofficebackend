@@ -7,6 +7,7 @@ from typing import Any, Dict, List, Optional
 from app.db_helpers import fetch_all_pages
 from app.nec_import.employee_match import index_employees, normalize_code, resolve_employee, sheet_human_code
 from app.nec_import.patch_builder import build_patch
+from app.nec_import.sheet_selection import duplicate_sheet_groups, eligible_review_sheets
 from app.supabase_client import supabase
 
 
@@ -78,8 +79,9 @@ def run_import_from_review(
     apply: bool,
     snapshot_dir,
 ) -> Dict[str, Any]:
-    sheets = [s for s in review.get("sheets", []) if s.get("disposition") != "superseded"]
-    _, by_code, by_name = index_employees(load_employees())
+    sheets = eligible_review_sheets(review.get("sheets", []))
+    conflicts = duplicate_sheet_groups(sheets)
+    by_code, by_name = index_employees(load_employees())
     existing_ts = fetch_timesheets_map(period_start, period_end)
     leaves = fetch_leaves()
 
@@ -92,12 +94,18 @@ def run_import_from_review(
         "period": {"start": period_start, "end": period_end},
         "apply": apply,
         "snapshot": str(snap_path),
+        "duplicate_sheet_groups": conflicts,
         "employees": [],
         "stats": {
             "created": 0, "updated": 0, "skipped": 0,
             "planned_create": 0, "planned_update": 0, "exceptions": [],
         },
     }
+
+    if conflicts and apply:
+        report["aborted"] = True
+        report["abort_reason"] = "duplicate_sheet_groups"
+        return report
 
     for sheet in sheets:
         emp_row, match_evidence, amb = resolve_employee(sheet, by_code, by_name)

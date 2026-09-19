@@ -444,11 +444,23 @@ async def test_update_overtime_approve_with_manager_role_succeeds(patch_supabase
     assert result["status"] == "approved"
 
 
-async def test_update_overtime_non_status_field_edit_needs_no_role_check(patch_supabase):
-    # Editing a plain field (not status: approved/rejected) must not go through the
-    # manager-role gate at all — no Authorization header is needed.
+async def test_update_overtime_status_paid_without_manager_is_403(patch_supabase, patch_auth):
+    patch_supabase({"select_return": [{"id": 7}]})
+    patch_auth(role="viewer")
+    with pytest.raises(HTTPException) as exc:
+        await update_overtime(
+            7,
+            OvertimeUpdate(status="paid", approved_by="Someone Else"),
+            authorization="Bearer good-token",
+            current_user=CURRENT_USER,
+        )
+    assert exc.value.status_code == 403
+
+
+async def test_update_overtime_non_status_field_edit_on_pending_needs_no_role_check(patch_supabase):
+    # Pending records: plain field edits do not require manager role.
     fake = patch_supabase({
-        "select_return": [{"id": 7}],
+        "select_return": [{"id": 7, "status": "pending"}],
         "update_return": [{"id": 7, "reason": "Updated reason", "spares_used": "[]"}],
     })
 
@@ -458,29 +470,45 @@ async def test_update_overtime_non_status_field_edit_needs_no_role_check(patch_s
     assert result["reason"] == "Updated reason"
 
 
+async def test_update_overtime_hours_on_approved_record_requires_manager(patch_supabase, patch_auth):
+    patch_supabase({"select_return": [{"id": 7, "status": "approved"}]})
+    patch_auth(role="viewer")
+    with pytest.raises(HTTPException) as exc:
+        await update_overtime(
+            7,
+            OvertimeUpdate(hours=20),
+            authorization="Bearer good-token",
+            current_user=CURRENT_USER,
+        )
+    assert exc.value.status_code == 403
+
+
 # ─── delete_overtime ─────────────────────────────────────────────────────────────────
 
-async def test_delete_overtime_happy_path(patch_supabase):
+async def test_delete_overtime_happy_path(patch_supabase, patch_auth):
     fake = patch_supabase({"select_return": [{"id": 3}]})
+    patch_auth(role="manager")
 
-    result = await delete_overtime(3, current_user=CURRENT_USER)
+    result = await delete_overtime(3, authorization="Bearer good-token", current_user=CURRENT_USER)
 
     assert result == {"success": True, "message": "Overtime deleted successfully"}
     delete_call = next(c for c in fake.state["calls"] if c["op"] == "delete")
     assert ("id", 3) in delete_call["filters"]
 
 
-async def test_delete_overtime_not_found_is_404(patch_supabase):
+async def test_delete_overtime_not_found_is_404(patch_supabase, patch_auth):
     patch_supabase({"select_return": None})
+    patch_auth(role="manager")
     with pytest.raises(HTTPException) as exc:
-        await delete_overtime(404, current_user=CURRENT_USER)
+        await delete_overtime(404, authorization="Bearer good-token", current_user=CURRENT_USER)
     assert exc.value.status_code == 404
 
 
-async def test_delete_overtime_db_error_is_500(patch_supabase):
+async def test_delete_overtime_db_error_is_500(patch_supabase, patch_auth):
     patch_supabase({"select_return": [{"id": 3}], "raise_op": "delete", "raise_msg": "delete failed"})
+    patch_auth(role="manager")
     with pytest.raises(HTTPException) as exc:
-        await delete_overtime(3, current_user=CURRENT_USER)
+        await delete_overtime(3, authorization="Bearer good-token", current_user=CURRENT_USER)
     assert exc.value.status_code == 500
 
 
@@ -531,4 +559,3 @@ async def test_bulk_update_overtime_status_db_error_is_500(patch_supabase, patch
         )
     assert exc.value.status_code == 500
     assert "bulk failed" in exc.value.detail
-    assert "delete failed" in exc.value.detail

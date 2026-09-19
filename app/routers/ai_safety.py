@@ -98,15 +98,32 @@ def _date(r: dict) -> Optional[datetime]:
     return None
 
 
-def _split_halves(records: list[dict]) -> tuple[list[dict], list[dict]]:
-    """Split records by date into older half vs newer half for trend comparison."""
+def _split_halves(
+    records: list[dict],
+    *,
+    reference: datetime | None = None,
+) -> tuple[list[dict], list[dict]]:
+    """Split into two buckets of equal calendar duration (not equal record counts).
+
+    The comparison window runs from the earliest dated record through ``reference``
+    (defaults to now). The midpoint divides that span into two equal-length periods.
+    """
+    reference = reference or datetime.now(timezone.utc).replace(tzinfo=None)
     dated = [(r, _date(r)) for r in records]
     dated = [(r, d) for r, d in dated if d]
     if not dated:
         return [], []
     dated.sort(key=lambda x: x[1])
-    mid = len(dated) // 2
-    return [r for r, _ in dated[:mid]], [r for r, _ in dated[mid:]]
+    min_d = dated[0][1]
+    span_end = max(dated[-1][1], reference)
+    if span_end <= min_d:
+        mid_i = len(dated) // 2
+        return [r for r, _ in dated[:mid_i]], [r for r, _ in dated[mid_i:]]
+    span_seconds = (span_end - min_d).total_seconds()
+    cut = min_d + timedelta(seconds=span_seconds / 2)
+    older = [r for r, d in dated if d < cut]
+    newer = [r for r, d in dated if d >= cut]
+    return older, newer
 
 
 def _trend_direction(older: int, newer: int) -> str:
@@ -215,11 +232,11 @@ def analyse(data: SafetyDataInput) -> dict:
     pach_locs = _top_pl(pach,    "location",  5)
 
     # ── Trends ────────────────────────────────────────────────────────────────
-    nm_old,   nm_new   = _split_halves(nm)
-    vfl_old,  vfl_new  = _split_halves(vfl)
-    pto_old,  pto_new  = _split_halves(pto)
-    insp_old, insp_new = _split_halves(insp)
-    pach_old, pach_new = _split_halves(pach)
+    nm_old,   nm_new   = _split_halves(nm, reference=now)
+    vfl_old,  vfl_new  = _split_halves(vfl, reference=now)
+    pto_old,  pto_new  = _split_halves(pto, reference=now)
+    insp_old, insp_new = _split_halves(insp, reference=now)
+    pach_old, pach_new = _split_halves(pach, reference=now)
 
     # Higher incidents = worsening for NM/WS; higher for VFL/Inspections = improving
     nm_dir   = _trend_direction(len(nm_old),   len(nm_new))

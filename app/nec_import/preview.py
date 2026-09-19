@@ -5,15 +5,16 @@ from datetime import date
 from typing import Any, Dict, List, Set
 
 from app.nec_import.apply_runner import fetch_leaves, fetch_timesheets_map, load_employees
+from app.nec_import.sheet_selection import duplicate_sheet_groups, eligible_review_sheets
 from app.nec_import.employee_match import index_employees, normalize_code, resolve_employee, sheet_human_code
 from app.nec_import.patch_builder import build_patch
 from app.nec_import.period import iter_period_dates
 
 
 def build_preview(review: dict, period_start: str, period_end: str) -> Dict[str, Any]:
-    sheets = [s for s in review.get("sheets", []) if s.get("disposition") != "superseded"]
+    sheets = eligible_review_sheets(review.get("sheets", []))
     employees = load_employees()
-    _, by_code, by_name = index_employees(employees)
+    by_code, by_name = index_employees(employees)
     existing_ts = fetch_timesheets_map(period_start, period_end)
     leaves = fetch_leaves()
     period_dates = iter_period_dates(date.fromisoformat(period_start), date.fromisoformat(period_end))
@@ -94,15 +95,7 @@ def build_preview(review: dict, period_start: str, period_end: str) -> Dict[str,
                 "name": f"{e.get('first_name', '')} {e.get('last_name', '')}".strip(),
             })
 
-    dup_groups: Dict[str, List[str]] = {}
-    for s in sheets:
-        code = sheet_human_code(s) or (s.get("employee") or {}).get("name_raw") or "unknown"
-        dup_groups.setdefault(code, []).append(s.get("sheet_id") or "?")
-    conflicts = [
-        {"key": k, "sheet_ids": v}
-        for k, v in dup_groups.items()
-        if len(v) > 1
-    ]
+    conflicts = duplicate_sheet_groups(sheets)
 
     stats = {
         "create": sum(1 for x in line_items if x["kind"] == "create"),

@@ -23,6 +23,12 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["Maintenance Schedules"])
 
+
+def _is_schedule_run_claim_conflict(err: Exception) -> bool:
+    """True when UNIQUE(schedule_id, due_date) rejected the idempotent claim insert."""
+    s = str(err).lower()
+    return "23505" in s or "duplicate key" in s or "unique constraint" in s
+
 RECURRENCE_TYPES = ('daily', 'weekly', 'biweekly', 'monthly', 'quarterly', 'yearly', 'custom')
 PRIORITIES = ('low', 'medium', 'high', 'urgent')
 FAR_FUTURE = date(9999, 1, 1)
@@ -263,9 +269,12 @@ def _generate_one(s: dict, today: date) -> Optional[dict]:
         supabase.table('maintenance_schedule_runs').insert(
             {'schedule_id': s['id'], 'due_date': due.isoformat()}
         ).execute()
-    except Exception:
-        logger.info(f"schedule {s['id']} already generated for {due} — skipping")
-        return None
+    except Exception as e:
+        if _is_schedule_run_claim_conflict(e):
+            logger.info(f"schedule {s['id']} already generated for {due} — skipping")
+            return None
+        logger.error(f"schedule {s['id']}: run claim failed (not duplicate): {e}")
+        raise
 
     now = datetime.now()
     work_order = {

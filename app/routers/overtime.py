@@ -2,7 +2,7 @@ from fastapi import APIRouter, HTTPException, Header, Depends
 from pydantic import BaseModel, Field, validator
 from typing import Optional, List, Dict, Any
 from app.supabase_client import supabase
-from app.auth import get_current_user, require_role_if_status_in
+from app.auth import get_current_user, require_role, require_role_if_status_in
 from app.db_helpers import get_or_404
 from app.serialization import encode_json_fields, decode_json_fields
 import logging
@@ -73,6 +73,10 @@ class BulkStatusResponse(BaseModel):
     succeeded: int
     failed: int
     updated: List[Dict[str, Any]]
+
+
+# After approval/payment/rejection, business-field edits must not bypass workflow (F03).
+_OT_LOCKED_STATUSES = frozenset({"approved", "paid", "rejected"})
 
 
 class OvertimeUpdate(BaseModel):
@@ -227,18 +231,30 @@ async def bulk_update_overtime_status(
 # PATCH update overtime
 @router.patch("/{overtime_id}")
 async def update_overtime(overtime_id: int, updated: OvertimeUpdate, authorization: Optional[str] = Header(None), current_user: dict = Depends(get_current_user)):
-    # Any edit requires a signed-in user (current_user); approve/reject additionally
-    # requires manager+ (checked below against the same Authorization header).
+    # Any edit requires a signed-in user (current_user); lifecycle fields require manager+.
     await require_role_if_status_in(updated.status, {'approved', 'rejected'}, 'manager', authorization, context="Approval action")
     try:
         logger.info(f"Updating overtime {overtime_id}")
         
-        # Check if exists
-        get_or_404(supabase, "overtime", overtime_id, detail="Overtime not found")
+        existing_row = get_or_404(supabase, "overtime", overtime_id, detail="Overtime not found")
         
         # exclude_unset, not a None-filter: an explicitly-sent null must clear the
         # field, not be silently dropped. See work_orders (backend edec24a).
         data_to_update = updated.model_dump(exclude_unset=True)
+
+        existing_status = (existing_row.get("status") or "pending").lower()
+        if existing_status in _OT_LOCKED_STATUSES and data_to_update:
+            await require_role("manager")(authorization)
+
+        _OT_LIFECYCLE_FIELDS = frozenset({
+            'status', 'approved_by', 'approved_at', 'approval_signature', 'rejected_by', 'rejected_at',
+        })
+        if _OT_LIFECYCLE_FIELDS.intersection(data_to_update):
+            status_val = data_to_update.get('status')
+            if status_val is not None and status_val not in ('approved', 'rejected'):
+                await require_role('manager')(authorization)
+            elif any(k in data_to_update for k in _OT_LIFECYCLE_FIELDS if k != 'status'):
+                await require_role('manager')(authorization)
         if 'spares_used' in data_to_update:
             data_to_update = encode_json_fields(data_to_update, ['spares_used'])
 
@@ -257,7 +273,12 @@ async def update_overtime(overtime_id: int, updated: OvertimeUpdate, authorizati
 
 # DELETE overtime
 @router.delete("/{overtime_id}")
-async def delete_overtime(overtime_id: int, current_user: dict = Depends(get_current_user)):
+async def delete_overtime(
+    overtime_id: int,
+    authorization: Optional[str] = Header(None),
+    current_user: dict = Depends(get_current_user),
+):
+    await require_role('manager')(authorization)
     try:
         logger.info(f"Deleting overtime {overtime_id}")
         

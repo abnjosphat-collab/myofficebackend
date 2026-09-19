@@ -46,6 +46,7 @@ class FakeRedis:
 def fake_redis(monkeypatch):
     fr = FakeRedis()
     monkeypatch.setattr(cache_mod, "redis_client", fr)
+    monkeypatch.setattr(cache_mod, "_redis_down_until", 0.0)
     return fr
 
 
