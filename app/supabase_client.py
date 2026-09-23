@@ -19,7 +19,13 @@ if not SUPABASE_URL or not SUPABASE_KEY:
         "Database operations will fail. Set them in your .env file or deployment environment."
     )
 
-supabase: Client = create_client(SUPABASE_URL or "", SUPABASE_KEY or "")
+# Newer supabase-py versions reject empty configuration at construction time. Keep
+# imports and mocked tests usable without granting CI production credentials; any
+# unmocked database call still fails loudly against this non-existent host.
+supabase: Client = create_client(
+    SUPABASE_URL or "https://unconfigured.supabase.invalid",
+    SUPABASE_KEY or "unconfigured-service-key",
+)
 
 
 # postgrest types `.execute().data` as a recursive JSON union (str | int | float |
