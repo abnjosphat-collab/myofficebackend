@@ -247,6 +247,7 @@ for _name, _prefix, _tags, _key in [
     ("equipment", "/api/equipment", ["Equipment"], None),
     ("maintenance", "/api/maintenance", ["Maintenance"], None),
     ("issues", "/api/issues", ["Stock Issues"], None),
+    ("tools_workspace", "/api/tools-workspace", ["Tools Workspace Prototype"], None),
     ("drivers", "/api/drivers", ["Drivers"], None),
     ("lookup_lists", "/api/lookup-lists", ["Lookup Lists"], None),
 ]:

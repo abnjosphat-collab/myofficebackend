@@ -64,8 +64,15 @@ something to fix everywhere at once, but don't add more of it.)
 
 ## 3. Tests: two sanctioned recipes, pick whichever fits
 
-No real DB in tests, ever — Supabase is always mocked. Two patterns coexist
-here on purpose, for different situations:
+Default tests mock Supabase. Two patterns coexist here on purpose, for
+different situations. A **narrow, opt-in disposable Postgres suite** is
+allowed when a feature's invariants cannot be proven by mocks (unique
+custody, rollback, concurrent issue). That suite must skip unless
+`PORTABLE_TOOLS_TEST_DATABASE_URL` (or a future similarly named DSN) is set
+to a disposable database — never production — and a green run without that
+DSN must not be described as proof of transaction behaviour.
+
+Two mocked patterns:
 
 - **Mount a real (minimal) FastAPI app + `TestClient`**, when the thing under
   test is the HTTP/routing layer itself — request shape, status codes, query

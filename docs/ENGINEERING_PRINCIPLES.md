@@ -46,6 +46,12 @@ Add tests for calculations, transitions, permissions, and failure paths — not 
 - Record **specific** lessons (what broke, rule adopted, file/test to guard it).
 - No secrets in memory, rules, or docs.
 
+## Substantial features
+
+Keep identity, physical condition and transactional state separate. Custody
+commands need atomic writes and idempotency. Mocked tests do not prove
+database races — use an opt-in disposable DSN.
+
 ## Feature delivery skill
 
 For substantial features, use MyOffice workspace `.cursor/skills/feature-delivery/SKILL.md` checklist.
