@@ -53,6 +53,7 @@ Define metrics precisely (numerator, denominator, period, statuses included, reo
 | Work order map | [WORK_ORDERS.md](./WORK_ORDERS.md) |
 | NEC timesheet payroll rules | [NEC_TIMESHEET_RULES.md](./NEC_TIMESHEET_RULES.md) |
 | Engineering process | [ENGINEERING_PRINCIPLES.md](./ENGINEERING_PRINCIPLES.md) |
+| Tools & Equipment backend contract | [TOOLS_WORKSPACE.md](./TOOLS_WORKSPACE.md) |
 
 ## Reference projects (optional read)
 

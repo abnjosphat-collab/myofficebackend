@@ -42,6 +42,21 @@ def test_viewer_cannot_issue_but_issuer_creates_complete_history():
     assert all(event["event_at"] for event in trail[:2])
 
 
+def test_viewer_cannot_create_register_records():
+    admin = register("admin", True)
+    viewer = register("viewer", False)
+    viewer_auth = {"Authorization": f"Bearer {viewer}"}
+
+    employee = client.post("/api/tools-workspace/employees", headers=viewer_auth, json={"employee_number": "E-2", "name": "Viewer Person", "department": "Engineering"})
+    tool = client.post("/api/tools-workspace/tools", headers=viewer_auth, json={"register_number": "T-2", "name": "Viewer Tool", "storage_location": "Workshop"})
+
+    assert employee.status_code == 403
+    assert tool.status_code == 403
+    admin_auth = {"Authorization": f"Bearer {admin}"}
+    assert client.get("/api/tools-workspace/employees", headers=admin_auth).json() == []
+    assert client.get("/api/tools-workspace/tools", headers=admin_auth).json() == []
+
+
 def test_transfer_extension_edit_archive_and_undo_are_durable():
     token = register("operator", True)
     auth = {"Authorization": f"Bearer {token}"}
@@ -78,6 +93,42 @@ def test_usage_errors_and_feedback_are_available_to_analytics():
     assert client.post("/api/tools-workspace/feedback", headers=auth, data={"text": "Make search faster"}).status_code == 201
     data = client.get("/api/tools-workspace/analytics", headers=auth).json()
     assert data["totals"] == {"usage": 1, "errors": 1, "feedback": 1}
+
+
+def test_notification_reads_are_scoped_to_each_account():
+    admin = register("admin", True)
+    viewer = register("viewer", False)
+    admin_auth = {"Authorization": f"Bearer {admin}"}
+    viewer_auth = {"Authorization": f"Bearer {viewer}"}
+    employee = client.post("/api/tools-workspace/employees", headers=admin_auth, json={"employee_number": "E-7", "name": "Tariro", "department": "Engineering"}).json()
+    tool = client.post("/api/tools-workspace/tools", headers=admin_auth, json={"register_number": "T-7", "name": "Clamp meter", "storage_location": "Workshop"}).json()
+    client.post(f"/api/tools-workspace/tools/{tool['id']}/issue", headers=admin_auth, json={"employee_id": employee["id"], "location": "Plant"})
+    client.post(f"/api/tools-workspace/tools/{tool['id']}/return", headers=admin_auth, json={"location": "Tool room", "condition": "Damaged"})
+
+    admin_alerts = client.get("/api/tools-workspace/notifications", headers=admin_auth).json()
+    viewer_alerts = client.get("/api/tools-workspace/notifications", headers=viewer_auth).json()
+    assert admin_alerts["unread_count"] == viewer_alerts["unread_count"] == 1
+
+    key = admin_alerts["alerts"][0]["key"]
+    assert client.post("/api/tools-workspace/notifications/read", headers=admin_auth, json={"keys": [key]}).status_code == 202
+    assert client.get("/api/tools-workspace/notifications", headers=admin_auth).json()["unread_count"] == 0
+    assert client.get("/api/tools-workspace/notifications", headers=viewer_auth).json()["unread_count"] == 1
+
+
+def test_past_return_deadline_is_derived_as_overdue_without_a_scheduler():
+    admin = register("admin", True)
+    auth = {"Authorization": f"Bearer {admin}"}
+    employee = client.post("/api/tools-workspace/employees", headers=auth, json={"employee_number": "E-8", "name": "Rudo", "department": "Engineering"}).json()
+    tool = client.post("/api/tools-workspace/tools", headers=auth, json={"register_number": "T-8", "name": "Test meter", "storage_location": "Workshop"}).json()
+    issued = client.post(f"/api/tools-workspace/tools/{tool['id']}/issue", headers=auth, json={"employee_id": employee["id"], "location": "Plant", "expected_return_at": "2000-01-01T10:00:00Z"})
+    assert issued.status_code == 200
+
+    listed = client.get("/api/tools-workspace/tools", headers=auth).json()
+    alerts = client.get("/api/tools-workspace/notifications", headers=auth).json()
+
+    assert listed[0]["status"] == "overdue"
+    assert alerts["unread_count"] == 1
+    assert alerts["alerts"][0]["kind"] == "overdue"
 
 
 def test_import_and_attachment_metadata_persist():

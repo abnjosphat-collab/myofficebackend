@@ -12,7 +12,7 @@ from pydantic import BaseModel, Field
 from app.supabase_client import rows, supabase
 
 router = APIRouter()
-TABLE = {"accounts":"tools_workspace_accounts","sessions":"tools_workspace_sessions","employees":"tools_workspace_employees","tools":"tools_workspace_equipment","history":"tools_workspace_history","changes":"tools_workspace_changes","evidence":"tools_workspace_evidence","usage":"tools_workspace_usage","errors":"tools_workspace_errors","feedback":"tools_workspace_feedback"}
+TABLE = {"accounts":"tools_workspace_accounts","sessions":"tools_workspace_sessions","employees":"tools_workspace_employees","tools":"tools_workspace_equipment","history":"tools_workspace_history","changes":"tools_workspace_changes","evidence":"tools_workspace_evidence","usage":"tools_workspace_usage","errors":"tools_workspace_errors","feedback":"tools_workspace_feedback","notification_reads":"tools_workspace_notification_reads"}
 FEEDBACK_BUCKET = "tools-workspace-feedback"
 EVIDENCE_BUCKET = "tools-workspace-evidence"
 _test_mode = False
@@ -103,6 +103,35 @@ class ImportCommit(BaseModel):
     target:Literal["equipment","employees"]; rows:list[dict[str,Any]]=Field(max_length=500)
 class UsageInput(BaseModel): event:str=Field(min_length=1,max_length=100); detail:Optional[str]=Field(default=None,max_length=500)
 class ErrorInput(BaseModel): message:str=Field(min_length=1,max_length=2000); source:Optional[str]=Field(default=None,max_length=500); stack:Optional[str]=Field(default=None,max_length=8000)
+class NotificationReadInput(BaseModel): keys:list[str]=Field(max_length=500)
+
+def _notification_key(tool:dict[str,Any],kind:str):
+    marker=(tool.get("custody") or {}).get("expected_return_at") if kind=="overdue" else tool.get("row_version",1)
+    return f"{kind}:{tool['id']}:{marker or 'current'}"
+
+def _effective_status(tool:dict[str,Any], now:Optional[datetime]=None):
+    """Derive overdue state from custody so alerts do not depend on a scheduler."""
+    status=tool.get("status")
+    if status!="issued" or tool.get("archived"): return status
+    due=(tool.get("custody") or {}).get("expected_return_at")
+    if not due: return status
+    try:
+        deadline=datetime.fromisoformat(str(due).replace("Z","+00:00"))
+        if deadline.tzinfo is None: deadline=deadline.replace(tzinfo=timezone.utc)
+        return "overdue" if deadline.astimezone(timezone.utc)<(now or datetime.now(timezone.utc)) else status
+    except (TypeError,ValueError):
+        return status
+
+def _effective_tool(tool:dict[str,Any]):
+    return {**tool,"status":_effective_status(tool)}
+
+def _active_notifications():
+    alerts=[]
+    for stored_tool in _all("tools"):
+        tool=_effective_tool(stored_tool); kind=tool.get("status")
+        if tool.get("archived") or kind not in {"overdue","attention"}: continue
+        alerts.append({"key":_notification_key(tool,kind),"kind":kind,"tool_id":tool["id"],"tool_name":tool.get("name","Equipment"),"department":tool.get("department","Engineering")})
+    return alerts
 
 def _new_session(account_id):
     token=secrets.token_urlsafe(32); _insert("sessions",{"id":str(uuid.uuid4()),"token_hash":_token_hash(token),"account_id":account_id,"created_at":_now(),"expires_at":(datetime.now(timezone.utc)+timedelta(days=7)).isoformat()}); return token
@@ -125,10 +154,29 @@ def login(body:Login):
 @router.get("/auth/me")
 def me(account=Depends(_session)): return _public(account)
 
+@router.get("/notifications")
+def notifications(account=Depends(_session)):
+    read_rows=[row for row in _memory["notification_reads"] if row.get("account_id")==account["id"]] if _test_mode else rows(supabase.table(TABLE["notification_reads"]).select("alert_key").eq("account_id",account["id"]).execute())
+    read={row["alert_key"] for row in read_rows}
+    alerts=[{**alert,"read":alert["key"] in read} for alert in _active_notifications()]
+    return {"alerts":alerts,"unread_count":sum(not alert["read"] for alert in alerts)}
+
+@router.post("/notifications/read",status_code=202)
+def read_notifications(body:NotificationReadInput,account=Depends(_session)):
+    active={alert["key"] for alert in _active_notifications()}; accepted=list(dict.fromkeys(key for key in body.keys if key in active))
+    for key in accepted:
+        row={"account_id":account["id"],"alert_key":key,"read_at":_now()}
+        if _test_mode:
+            existing=next((item for item in _memory["notification_reads"] if item["account_id"]==account["id"] and item["alert_key"]==key),None)
+            if existing: existing.update(row)
+            else: _memory["notification_reads"].append(row)
+        else: supabase.table(TABLE["notification_reads"]).upsert(row,on_conflict="account_id,alert_key").execute()
+    return {"read":accepted}
+
 @router.get("/employees")
 def list_employees(_=Depends(_session)): return _all("employees")
 @router.post("/employees",status_code=201)
-def create_employee(body:EmployeeInput,account=Depends(_session)):
+def create_employee(body:EmployeeInput,account=Depends(_issuer)):
     number=body.employee_number.strip()
     if any(row["employee_number"].lower()==number.lower() for row in _all("employees")): raise HTTPException(409,"That employee number already exists.")
     return _insert("employees",{"id":str(uuid.uuid4()),**body.model_dump(),"employee_number":number,"active":True,"created_at":_now(),"created_by":account["name"]})
@@ -146,9 +194,9 @@ def list_tools(_=Depends(_session)):
                 row["url"]=signed.get("signedURL") or signed.get("signedUrl")
             except Exception: row["url"]=None
         by_tool.setdefault(item["tool_id"],[]).append(row)
-    return [{**tool,"evidence":by_tool.get(tool["id"],[])} for tool in tools]
+    return [{**_effective_tool(tool),"evidence":by_tool.get(tool["id"],[])} for tool in tools]
 @router.post("/tools",status_code=201)
-def create_tool(body:ToolInput,account=Depends(_session)):
+def create_tool(body:ToolInput,account=Depends(_issuer)):
     number=body.register_number.strip()
     if any(row["register_number"].lower()==number.lower() for row in _all("tools")): raise HTTPException(409,"That register number already exists.")
     result=_apply_change(None,{"id":str(uuid.uuid4()),**body.model_dump(),"register_number":number,"status":"available","custody":None},"created",account["name"],f"Added {number} to the register")

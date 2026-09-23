@@ -3,10 +3,9 @@
 # previously untested (services.py was 44% covered). The OCR tests deliberately use the
 # REAL PyMuPDF (fitz) / Pillow / numpy libraries rather than mocking them — they're
 # actually installed in this venv — to exercise the genuine "digital PDF, no OCR needed"
-# text-extraction path end to end. `easyocr` is DELIBERATELY absent from this venv (see
-# services.py's own comment — it drags in PyTorch), so the "scanned page / image" path
-# naturally hits a real ImportError inside _get_ocr_reader(); that's used here as a real
-# (not simulated) exercise of the 502 error-handling branch, not a mock.
+# text-extraction path end to end. The scanned-page tests replace the optional OCR
+# reader with a deterministic ImportError so the 502 path remains valid whether or not
+# a developer has EasyOCR installed locally.
 
 import io
 
@@ -318,10 +317,11 @@ async def test_ocr_document_extracts_text_from_a_real_digital_pdf():
     assert result["supplier"] == "Bearing Solutions Pty Ltd"
 
 
-async def test_ocr_document_scanned_page_hits_missing_easyocr_dependency_as_502():
-    # easyocr is genuinely not installed in this venv (see services.py's own comment on
-    # _get_ocr_reader) — a blank-text PDF page forces the OCR fallback path, which must
-    # surface as a clean 502, not an unhandled ImportError.
+async def test_ocr_document_scanned_page_hits_missing_easyocr_dependency_as_502(monkeypatch):
+    def missing_reader():
+        raise ImportError("EasyOCR is unavailable")
+
+    monkeypatch.setattr(services_mod, "_get_ocr_reader", missing_reader)
     pdf_bytes = _make_blank_pdf_bytes()
     file = _FakeUploadFile("scanned.pdf", pdf_bytes, content_type="application/pdf")
 
@@ -331,7 +331,11 @@ async def test_ocr_document_scanned_page_hits_missing_easyocr_dependency_as_502(
     assert "OCR extraction failed" in exc.value.detail
 
 
-async def test_ocr_document_image_mime_also_requires_ocr_and_hits_missing_dependency():
+async def test_ocr_document_image_mime_also_requires_ocr_and_hits_missing_dependency(monkeypatch):
+    def missing_reader():
+        raise ImportError("EasyOCR is unavailable")
+
+    monkeypatch.setattr(services_mod, "_get_ocr_reader", missing_reader)
     from PIL import Image
     buf = io.BytesIO()
     Image.new("RGB", (10, 10), color="white").save(buf, format="PNG")
