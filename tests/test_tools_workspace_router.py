@@ -17,6 +17,12 @@ def register(username: str, can_issue: bool):
     return response.json()["token"]
 
 
+def test_registration_accepts_email_style_username():
+    response = client.post("/api/tools-workspace/auth/register", json={"name": "Jos Phat", "username": "josphat@gmail.com", "password": "secret12", "can_issue": True})
+    assert response.status_code == 201
+    assert response.json()["account"]["username"] == "josphat@gmail.com"
+
+
 def test_viewer_cannot_issue_but_issuer_creates_complete_history():
     issuer = register("issuer", True)
     viewer = register("viewer", False)

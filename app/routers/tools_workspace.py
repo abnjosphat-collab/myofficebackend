@@ -85,7 +85,7 @@ def _apply_change(before: Optional[dict[str,Any]], after: dict[str,Any], action:
         raise
 
 class RegisterAccount(BaseModel):
-    name:str=Field(min_length=2,max_length=100); username:str=Field(min_length=3,max_length=60,pattern=r"^[a-zA-Z0-9._-]+$"); password:str=Field(min_length=6,max_length=128); can_issue:bool=False
+    name:str=Field(min_length=2,max_length=100); username:str=Field(min_length=3,max_length=254,pattern=r"^[^\s]+$"); password:str=Field(min_length=6,max_length=128); can_issue:bool=False
 class Login(BaseModel): username:str; password:str
 class EmployeeInput(BaseModel):
     employee_number:str=Field(min_length=1,max_length=60); name:str=Field(min_length=2,max_length=120); department:str=Field(min_length=1,max_length=100); job_title:Optional[str]=Field(default=None,max_length=100)
