@@ -45,7 +45,11 @@ def _update(kind: str, row_id: str, values: dict[str,Any]):
     data=rows(supabase.table(TABLE[kind]).update(values).eq("id",row_id).execute())
     if not data: raise HTTPException(404,"Record not found.")
     return data[0]
-def _public(account): return {key:account[key] for key in ("id","name","username","can_issue","created_at")}
+def _account_role(account:dict[str,Any]):
+    return account.get("role") or ("admin" if account.get("can_issue") else "viewer")
+def _public(account):
+    role=_account_role(account)
+    return {"id":account["id"],"name":account["name"],"username":account["username"],"role":role,"department":account.get("department"),"can_issue":role=="issuer","created_at":account["created_at"]}
 def _session(authorization: Optional[str]=Header(default=None)):
     if not authorization or not authorization.startswith("Bearer "): raise HTTPException(401,"Sign in to continue.")
     session=_find("sessions","token_hash",_token_hash(authorization[7:].strip()))
@@ -54,8 +58,18 @@ def _session(authorization: Optional[str]=Header(default=None)):
     if not account: raise HTTPException(401,"This session is no longer valid.")
     return account
 def _issuer(account=Depends(_session)):
-    if not account["can_issue"]: raise HTTPException(403,"This account can view records but cannot issue or receive equipment.")
+    if _account_role(account)!="issuer": raise HTTPException(403,"Only an Issuer account can issue, receive, transfer or extend equipment.")
+    if not account.get("department"): raise HTTPException(403,"This Issuer account needs an assigned department.")
     return account
+def _admin(account=Depends(_session)):
+    if _account_role(account)!="admin": raise HTTPException(403,"An administrator account is required.")
+    return account
+def _operator(account=Depends(_session)):
+    if _account_role(account) not in {"admin","issuer"}: raise HTTPException(403,"An administrator or Issuer account is required.")
+    return account
+def _ensure_managed_department(account:dict[str,Any],department:Optional[str]):
+    if _account_role(account)=="issuer" and department!=account.get("department"):
+        raise HTTPException(403,f"This Issuer may manage only {account.get('department')} records.")
 
 def _tool_state(tool: dict[str,Any], actor: str) -> dict[str,Any]:
     state=dict(tool)
@@ -87,18 +101,20 @@ def _apply_change(before: Optional[dict[str,Any]], after: dict[str,Any], action:
 class RegisterAccount(BaseModel):
     name:str=Field(min_length=2,max_length=100); username:str=Field(min_length=3,max_length=254,pattern=r"^[^\s]+$"); password:str=Field(min_length=6,max_length=128); can_issue:bool=False
 class Login(BaseModel): username:str; password:str
+class AccountRoleUpdate(BaseModel):
+    role:Literal["admin","issuer","viewer"]; department:Optional[str]=Field(default=None,max_length=100)
 class EmployeeInput(BaseModel):
     employee_number:str=Field(min_length=1,max_length=60); name:str=Field(min_length=2,max_length=120); department:str=Field(min_length=1,max_length=100); job_title:Optional[str]=Field(default=None,max_length=100)
 class ToolInput(BaseModel):
-    register_number:str=Field(min_length=1,max_length=80); name:str=Field(min_length=2,max_length=160); make_model:Optional[str]=Field(default=None,max_length=200); serial_number:Optional[str]=Field(default=None,max_length=120); category:Optional[str]=Field(default=None,max_length=100); equipment_kind:str=Field(default="other-equipment",max_length=80); storage_location:str=Field(min_length=1,max_length=240); department:str=Field(default="Engineering",max_length=100); section:Optional[str]=Field(default=None,max_length=100); condition:str=Field(default="Good",max_length=60); notes:Optional[str]=Field(default=None,max_length=2000); approval_ref:Optional[str]=Field(default=None,max_length=160); calibration:Optional[str]=Field(default=None,max_length=160)
+    register_number:str=Field(min_length=1,max_length=80); name:str=Field(min_length=2,max_length=160); make_model:Optional[str]=Field(default=None,max_length=200); serial_number:Optional[str]=Field(default=None,max_length=120); category:Optional[str]=Field(default=None,max_length=100); equipment_kind:str=Field(default="other-equipment",max_length=80); storage_location:str=Field(min_length=1,max_length=240); department:str=Field(default="Engineering",max_length=100); section:Optional[str]=Field(default=None,max_length=100); condition:str=Field(default="Good",max_length=60); notes:Optional[str]=Field(default=None,max_length=2000); approval_ref:Optional[str]=Field(default=None,max_length=160); calibration:Optional[str]=Field(default=None,max_length=160); specifications:dict[str,str]=Field(default_factory=dict)
 class ToolUpdate(BaseModel):
-    register_number:Optional[str]=Field(default=None,min_length=1,max_length=80); name:Optional[str]=Field(default=None,min_length=2,max_length=160); make_model:Optional[str]=Field(default=None,max_length=200); serial_number:Optional[str]=Field(default=None,max_length=120); category:Optional[str]=Field(default=None,max_length=100); equipment_kind:Optional[str]=Field(default=None,max_length=80); storage_location:Optional[str]=Field(default=None,min_length=1,max_length=240); department:Optional[str]=Field(default=None,max_length=100); section:Optional[str]=Field(default=None,max_length=100); condition:Optional[str]=Field(default=None,max_length=60); notes:Optional[str]=Field(default=None,max_length=2000); approval_ref:Optional[str]=Field(default=None,max_length=160); calibration:Optional[str]=Field(default=None,max_length=160)
+    register_number:Optional[str]=Field(default=None,min_length=1,max_length=80); name:Optional[str]=Field(default=None,min_length=2,max_length=160); make_model:Optional[str]=Field(default=None,max_length=200); serial_number:Optional[str]=Field(default=None,max_length=120); category:Optional[str]=Field(default=None,max_length=100); equipment_kind:Optional[str]=Field(default=None,max_length=80); storage_location:Optional[str]=Field(default=None,min_length=1,max_length=240); department:Optional[str]=Field(default=None,max_length=100); section:Optional[str]=Field(default=None,max_length=100); condition:Optional[str]=Field(default=None,max_length=60); notes:Optional[str]=Field(default=None,max_length=2000); approval_ref:Optional[str]=Field(default=None,max_length=160); calibration:Optional[str]=Field(default=None,max_length=160); specifications:Optional[dict[str,str]]=None
 class IssueInput(BaseModel):
-    employee_id:str; location:str=Field(min_length=1,max_length=240); expected_return_at:Optional[str]=None; job_reference:Optional[str]=Field(default=None,max_length=160); notes:Optional[str]=Field(default=None,max_length=1000)
+    employee_id:str; location:str=Field(min_length=1,max_length=240); expected_return_at:Optional[str]=None; job_reference:Optional[str]=Field(default=None,max_length=160); assigned_equipment:list[str]=Field(default_factory=list,max_length=30); notes:Optional[str]=Field(default=None,max_length=1000)
 class ReturnInput(BaseModel):
     location:str=Field(min_length=1,max_length=240); condition:Literal["Good","Damaged","Missing parts"]="Good"; notes:Optional[str]=Field(default=None,max_length=1000)
 class MovementInput(BaseModel):
-    kind:Literal["issue","return","transfer","extend"]; employee_id:Optional[str]=None; employee_name:Optional[str]=None; department:Optional[str]=None; location:Optional[str]=Field(default=None,max_length=240); expected_return_at:Optional[str]=None; job_reference:Optional[str]=Field(default=None,max_length=160); condition:Optional[str]=Field(default="Good",max_length=60); notes:Optional[str]=Field(default=None,max_length=2000); approval_ref:Optional[str]=Field(default=None,max_length=160); calibration:Optional[str]=Field(default=None,max_length=160); idempotency_key:Optional[str]=None
+    kind:Literal["issue","return","transfer","extend"]; employee_id:Optional[str]=None; employee_name:Optional[str]=None; department:Optional[str]=None; location:Optional[str]=Field(default=None,max_length=240); expected_return_at:Optional[str]=None; job_reference:Optional[str]=Field(default=None,max_length=160); assigned_equipment:list[str]=Field(default_factory=list,max_length=30); condition:Optional[str]=Field(default="Good",max_length=60); notes:Optional[str]=Field(default=None,max_length=2000); approval_ref:Optional[str]=Field(default=None,max_length=160); calibration:Optional[str]=Field(default=None,max_length=160); idempotency_key:Optional[str]=None
 class ImportCommit(BaseModel):
     target:Literal["equipment","employees"]; rows:list[dict[str,Any]]=Field(max_length=500)
 class UsageInput(BaseModel): event:str=Field(min_length=1,max_length=100); detail:Optional[str]=Field(default=None,max_length=500)
@@ -139,10 +155,10 @@ def _new_session(account_id):
 def register(body:RegisterAccount):
     username=body.username.strip().lower()
     if _find("accounts","username",username): raise HTTPException(409,"That username is already in use.")
-    # Bootstrap is deliberate: only the first account may self-select issuer access.
-    # Later role changes belong to an administrator workflow, not public registration.
-    can_issue=bool(body.can_issue and not _all("accounts"))
-    salt,digest=_hash_password(body.password); account=_insert("accounts",{"id":str(uuid.uuid4()),"name":body.name.strip(),"username":username,"salt":salt,"password_hash":digest,"can_issue":can_issue,"created_at":_now()})
+    # The first account bootstraps administration. Every later self-registration is view-only;
+    # an administrator explicitly assigns Issuer access and its department.
+    role="admin" if not _all("accounts") else "viewer"
+    salt,digest=_hash_password(body.password); account=_insert("accounts",{"id":str(uuid.uuid4()),"name":body.name.strip(),"username":username,"salt":salt,"password_hash":digest,"role":role,"department":None,"can_issue":False,"created_at":_now()})
     return {"token":_new_session(account["id"]),"account":_public(account)}
 @router.post("/auth/login")
 def login(body:Login):
@@ -153,6 +169,17 @@ def login(body:Login):
     return {"token":_new_session(account["id"]),"account":_public(account)}
 @router.get("/auth/me")
 def me(account=Depends(_session)): return _public(account)
+@router.get("/accounts")
+def list_accounts(_=Depends(_admin)): return [_public(account) for account in _all("accounts")]
+@router.patch("/accounts/{account_id}")
+def update_account_role(account_id:str,body:AccountRoleUpdate,admin=Depends(_admin)):
+    account=_find("accounts","id",account_id)
+    if not account: raise HTTPException(404,"Account was not found.")
+    department=(body.department or "").strip() or None
+    if body.role=="issuer" and not department: raise HTTPException(422,"Choose the department this Issuer may manage.")
+    if account_id==admin["id"] and body.role!="admin": raise HTTPException(409,"Assign another administrator before changing your own administrator role.")
+    updated=_update("accounts",account_id,{"role":body.role,"department":department if body.role=="issuer" else None,"can_issue":body.role=="issuer"})
+    return _public(updated)
 
 @router.get("/notifications")
 def notifications(account=Depends(_session)):
@@ -176,7 +203,8 @@ def read_notifications(body:NotificationReadInput,account=Depends(_session)):
 @router.get("/employees")
 def list_employees(_=Depends(_session)): return _all("employees")
 @router.post("/employees",status_code=201)
-def create_employee(body:EmployeeInput,account=Depends(_issuer)):
+def create_employee(body:EmployeeInput,account=Depends(_operator)):
+    _ensure_managed_department(account,body.department)
     number=body.employee_number.strip()
     if any(row["employee_number"].lower()==number.lower() for row in _all("employees")): raise HTTPException(409,"That employee number already exists.")
     return _insert("employees",{"id":str(uuid.uuid4()),**body.model_dump(),"employee_number":number,"active":True,"created_at":_now(),"created_by":account["name"]})
@@ -196,21 +224,31 @@ def list_tools(_=Depends(_session)):
         by_tool.setdefault(item["tool_id"],[]).append(row)
     return [{**_effective_tool(tool),"evidence":by_tool.get(tool["id"],[])} for tool in tools]
 @router.post("/tools",status_code=201)
-def create_tool(body:ToolInput,account=Depends(_issuer)):
+def create_tool(body:ToolInput,account=Depends(_operator)):
+    _ensure_managed_department(account,body.department)
     number=body.register_number.strip()
     if any(row["register_number"].lower()==number.lower() for row in _all("tools")): raise HTTPException(409,"That register number already exists.")
     result=_apply_change(None,{"id":str(uuid.uuid4()),**body.model_dump(),"register_number":number,"status":"available","custody":None},"created",account["name"],f"Added {number} to the register")
     return result["tool"]
 @router.patch("/tools/{tool_id}")
-def update_tool(tool_id:str,body:ToolUpdate,account=Depends(_issuer)):
+def update_tool(tool_id:str,body:ToolUpdate,account=Depends(_operator)):
     tool=_find("tools","id",tool_id)
     if not tool: raise HTTPException(404,"Tool was not found.")
+    _ensure_managed_department(account,tool.get("department"))
     values=body.model_dump(exclude_unset=True); after={**tool,**values}
-    return _apply_change(tool,after,"updated",account["name"],"Equipment details updated")["tool"]
+    result=_apply_change(tool,after,"updated",account["name"],"Equipment details updated")
+    # The additive specifications column post-dates the original atomic RPC. Keep the
+    # privilege boundary in Python instead of broadening a SECURITY DEFINER function.
+    if "specifications" in values:
+        saved=_update("tools",tool_id,{"specifications":values["specifications"] or {}})
+        _update("changes",result["change_id"],{"after_state":saved})
+        return saved
+    return result["tool"]
 @router.post("/tools/{tool_id}/archive")
-def archive_tool(tool_id:str,account=Depends(_issuer)):
+def archive_tool(tool_id:str,account=Depends(_operator)):
     tool=_find("tools","id",tool_id)
     if not tool: raise HTTPException(404,"Tool was not found.")
+    _ensure_managed_department(account,tool.get("department"))
     if tool.get("custody"): raise HTTPException(409,"Receive this tool before archiving it.")
     after={**tool,"archived":not bool(tool.get("archived"))}
     action="restored" if after["archived"] is False else "archived"
@@ -223,7 +261,7 @@ def capture_usage(body:UsageInput,account=Depends(_session)): return _insert("us
 @router.post("/analytics/errors",status_code=202)
 def capture_error(body:ErrorInput,account=Depends(_session)): return _insert("errors",{"id":str(uuid.uuid4()),**body.model_dump(),"account_id":account["id"],"account_name":account["name"],"created_at":_now()})
 @router.get("/analytics")
-def analytics(_=Depends(_session)):
+def analytics(_=Depends(_admin)):
     usage,errors,feedback=_all("usage",True),_all("errors",True),_all("feedback",True)
     if not _test_mode:
         for item in feedback:
@@ -248,6 +286,8 @@ async def create_feedback(text:str=Form(default=""),audio:Optional[UploadFile]=F
 def _move(tool_id:str,body:MovementInput,account:dict[str,Any]):
     tool=_find("tools","id",tool_id)
     if not tool: raise HTTPException(404,"Tool was not found.")
+    assigned_department=(account.get("department") or "").strip()
+    if tool.get("department")!=assigned_department: raise HTTPException(403,f"This Issuer may record movements only for {assigned_department} equipment.")
     open_loan=tool.get("custody") and tool.get("status") in {"issued","overdue"}
     if body.kind=="issue" and (tool.get("archived") or tool.get("status")!="available"): raise HTTPException(409,"This tool is not available to issue.")
     if body.kind!="issue" and not open_loan: raise HTTPException(409,"This tool has no open loan.")
@@ -256,14 +296,16 @@ def _move(tool_id:str,body:MovementInput,account:dict[str,Any]):
         if body.employee_id: employee=_find("employees","id",body.employee_id) or _find("employees","employee_number",body.employee_id)
         if not employee and body.employee_name: employee=next((row for row in _all("employees") if row["name"].lower()==body.employee_name.lower()),None)
         if not employee: raise HTTPException(404,"Choose an employee from the Tools employee register.")
+        if employee.get("department")!=assigned_department: raise HTTPException(403,f"Choose an employee from {assigned_department}.")
     now=_now(); after=dict(tool); location=(body.location or tool.get("storage_location") or "Unspecified").strip()
     if body.kind=="return":
         after.update(status="available" if body.condition=="Good" else "attention",storage_location=location,condition=body.condition or "Good",notes=body.notes,custody=None,calibration=body.calibration or tool.get("calibration"))
     elif body.kind=="extend":
         custody={**tool["custody"],"expected_return_at":body.expected_return_at,"notes":body.notes}; after.update(status="issued",custody=custody,notes=body.notes)
     else:
-        old=tool.get("custody") or {}; custody={**old,"employee_id":employee["id"],"employee_number":employee["employee_number"],"employee_name":employee["name"],"department":body.department or employee["department"],"location":location,"job_reference":body.job_reference or old.get("job_reference"),"expected_return_at":body.expected_return_at or old.get("expected_return_at"),"issued_at":old.get("issued_at") or now,"original_due_at":old.get("original_due_at") or body.expected_return_at,"issued_by":account["name"],"notes":body.notes,"approval_ref":body.approval_ref}; after.update(status="issued",storage_location=location,custody=custody,notes=body.notes,approval_ref=body.approval_ref or tool.get("approval_ref"))
-    detail={"issue":f"Issued to {employee['name']}" if employee else "Issued","return":f"Returned to {location}","transfer":f"Transferred to {employee['name']}" if employee else "Transferred","extend":f"Return date changed to {body.expected_return_at}"}[body.kind]
+        old=tool.get("custody") or {}; custody={**old,"employee_id":employee["id"],"employee_number":employee["employee_number"],"employee_name":employee["name"],"department":employee["department"],"location":location,"job_reference":body.job_reference or old.get("job_reference"),"assigned_equipment":body.assigned_equipment or old.get("assigned_equipment",[]),"expected_return_at":body.expected_return_at or old.get("expected_return_at"),"issued_at":old.get("issued_at") or now,"original_due_at":old.get("original_due_at") or body.expected_return_at,"issued_by":account["name"],"notes":body.notes,"approval_ref":body.approval_ref}; after.update(status="issued",storage_location=location,custody=custody,notes=body.notes,approval_ref=body.approval_ref or tool.get("approval_ref"))
+    targets=", ".join(body.assigned_equipment)
+    detail={"issue":f"Issued to {employee['name']}"+(f" for {targets}" if targets else "") if employee else "Issued","return":f"Returned to {location}","transfer":f"Transferred to {employee['name']}" if employee else "Transferred","extend":f"Return date changed to {body.expected_return_at}"}[body.kind]
     result=_apply_change(tool,after,body.kind,account["name"],detail,employee,body.idempotency_key)
     return {"tool":result["tool"],"change_id":result["change_id"]}
 
@@ -271,15 +313,16 @@ def _move(tool_id:str,body:MovementInput,account:dict[str,Any]):
 def move_tool(tool_id:str,body:MovementInput,account=Depends(_issuer)): return _move(tool_id,body,account)
 @router.post("/tools/{tool_id}/issue")
 def issue_tool(tool_id:str,body:IssueInput,account=Depends(_issuer)):
-    return _move(tool_id,MovementInput(kind="issue",employee_id=body.employee_id,location=body.location,expected_return_at=body.expected_return_at,job_reference=body.job_reference,notes=body.notes),account)
+    return _move(tool_id,MovementInput(kind="issue",employee_id=body.employee_id,location=body.location,expected_return_at=body.expected_return_at,job_reference=body.job_reference,assigned_equipment=body.assigned_equipment,notes=body.notes),account)
 @router.post("/tools/{tool_id}/return")
 def return_tool(tool_id:str,body:ReturnInput,account=Depends(_issuer)):
     return _move(tool_id,MovementInput(kind="return",location=body.location,condition=body.condition,notes=body.notes),account)
 
 @router.post("/tools/{tool_id}/evidence",status_code=201)
-async def upload_evidence(tool_id:str,files:list[UploadFile]=File(...),account=Depends(_issuer)):
+async def upload_evidence(tool_id:str,files:list[UploadFile]=File(...),account=Depends(_operator)):
     tool=_find("tools","id",tool_id)
     if not tool: raise HTTPException(404,"Tool was not found.")
+    _ensure_managed_department(account,tool.get("department"))
     allowed={"image/jpeg","image/png","image/webp","image/gif","image/avif","application/pdf"}; saved=[]
     for upload in files:
         content=await upload.read(); content_type=upload.content_type or "application/octet-stream"
@@ -303,7 +346,7 @@ def changes(account=Depends(_session)):
     return {"undo":next((row for row in own if not row.get("undone_at")),None),"redo":next((row for row in own if row.get("undone_at")),None)}
 
 @router.post("/changes/{direction}")
-def restore_change(direction:Literal["undo","redo"],account=Depends(_issuer)):
+def restore_change(direction:Literal["undo","redo"],account=Depends(_operator)):
     own=[row for row in _all("changes",True) if row.get("actor_name")==account["name"]]
     change=next((row for row in own if bool(row.get("undone_at"))==(direction=="redo")),None)
     if not change: raise HTTPException(409,f"Nothing to {direction}.")
@@ -338,16 +381,18 @@ async def preview_import(target:Literal["equipment","employees"]=Form(...),file:
     return {"target":target,"columns":headers,"rows":preview,"valid":sum(not row["errors"] for row in preview),"invalid":sum(bool(row["errors"]) for row in preview),"truncated":len(raw)>501}
 
 @router.post("/imports/commit")
-def commit_import(body:ImportCommit,account=Depends(_issuer)):
+def commit_import(body:ImportCommit,account=Depends(_operator)):
     accepted=[]; rejected=[]
     for index,item in enumerate(body.rows,1):
         try:
             if body.target=="employees":
                 model=EmployeeInput.model_validate(item)
+                _ensure_managed_department(account,model.department)
                 if _find("employees","employee_number",model.employee_number): raise ValueError("Employee number already exists")
                 accepted.append(_insert("employees",{"id":str(uuid.uuid4()),**model.model_dump(),"active":True,"created_by":account["name"],"created_at":_now()}))
             else:
                 model=ToolInput.model_validate(item)
+                _ensure_managed_department(account,model.department)
                 if _find("tools","register_number",model.register_number): raise ValueError("Register number already exists")
                 accepted.append(_apply_change(None,{"id":str(uuid.uuid4()),**model.model_dump(),"status":"available","custody":None},"imported",account["name"],"Imported into the register")["tool"])
         except Exception as exc:
