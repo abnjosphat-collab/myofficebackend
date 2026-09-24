@@ -12,9 +12,10 @@ from pydantic import BaseModel, Field
 from app.supabase_client import rows, supabase
 
 router = APIRouter()
-TABLE = {"accounts":"tools_workspace_accounts","sessions":"tools_workspace_sessions","employees":"tools_workspace_employees","tools":"tools_workspace_equipment","history":"tools_workspace_history","changes":"tools_workspace_changes","evidence":"tools_workspace_evidence","usage":"tools_workspace_usage","errors":"tools_workspace_errors","feedback":"tools_workspace_feedback","notification_reads":"tools_workspace_notification_reads"}
+TABLE = {"accounts":"tools_workspace_accounts","sessions":"tools_workspace_sessions","employees":"tools_workspace_employees","tools":"tools_workspace_equipment","history":"tools_workspace_history","changes":"tools_workspace_changes","evidence":"tools_workspace_evidence","source_registers":"tools_workspace_source_registers","usage":"tools_workspace_usage","errors":"tools_workspace_errors","feedback":"tools_workspace_feedback","notification_reads":"tools_workspace_notification_reads"}
 FEEDBACK_BUCKET = "tools-workspace-feedback"
 EVIDENCE_BUCKET = "tools-workspace-evidence"
+SOURCE_REGISTERS_BUCKET = "tools-workspace-source-registers"
 _test_mode = False
 _memory: dict[str,list[dict[str,Any]]] = {key:[] for key in TABLE}
 
@@ -27,7 +28,7 @@ def _all(kind: str, newest=False):
     if _test_mode:
         data=[dict(row) for row in _memory[kind]]; return list(reversed(data)) if newest else data
     query=supabase.table(TABLE[kind]).select("*")
-    if newest: query=query.order("event_at" if kind=="history" else "created_at",desc=True)
+    if newest: query=query.order({"history":"event_at","source_registers":"uploaded_at"}.get(kind,"created_at"),desc=True)
     return rows(query.execute())
 def _find(kind: str, field: str, value: Any):
     if _test_mode: return next((dict(row) for row in _memory[kind] if row.get(field)==value),None)
@@ -104,7 +105,7 @@ class Login(BaseModel): username:str; password:str
 class AccountRoleUpdate(BaseModel):
     role:Literal["admin","issuer","viewer"]; department:Optional[str]=Field(default=None,max_length=100)
 class EmployeeInput(BaseModel):
-    employee_number:str=Field(min_length=1,max_length=60); name:str=Field(min_length=2,max_length=120); department:str=Field(min_length=1,max_length=100); job_title:Optional[str]=Field(default=None,max_length=100)
+    employee_number:str=Field(min_length=1,max_length=60); name:str=Field(min_length=2,max_length=120); department:str=Field(min_length=1,max_length=100); job_title:Optional[str]=Field(default=None,max_length=100); supervisor_name:Optional[str]=Field(default=None,max_length=120)
 class ToolInput(BaseModel):
     register_number:str=Field(min_length=1,max_length=80); name:str=Field(min_length=2,max_length=160); make_model:Optional[str]=Field(default=None,max_length=200); serial_number:Optional[str]=Field(default=None,max_length=120); category:Optional[str]=Field(default=None,max_length=100); equipment_kind:str=Field(default="other-equipment",max_length=80); storage_location:str=Field(min_length=1,max_length=240); department:str=Field(default="Engineering",max_length=100); section:Optional[str]=Field(default=None,max_length=100); condition:str=Field(default="Good",max_length=60); notes:Optional[str]=Field(default=None,max_length=2000); approval_ref:Optional[str]=Field(default=None,max_length=160); calibration:Optional[str]=Field(default=None,max_length=160); specifications:dict[str,str]=Field(default_factory=dict)
 class ToolUpdate(BaseModel):
@@ -120,6 +121,8 @@ class ImportCommit(BaseModel):
 class UsageInput(BaseModel): event:str=Field(min_length=1,max_length=100); detail:Optional[str]=Field(default=None,max_length=500)
 class ErrorInput(BaseModel): message:str=Field(min_length=1,max_length=2000); source:Optional[str]=Field(default=None,max_length=500); stack:Optional[str]=Field(default=None,max_length=8000)
 class NotificationReadInput(BaseModel): keys:list[str]=Field(max_length=500)
+class MarkReadyInput(BaseModel):
+    resolution_note:str=Field(min_length=2,max_length=1000)
 
 def _notification_key(tool:dict[str,Any],kind:str):
     marker=(tool.get("custody") or {}).get("expected_return_at") if kind=="overdue" else tool.get("row_version",1)
@@ -253,6 +256,18 @@ def archive_tool(tool_id:str,account=Depends(_operator)):
     after={**tool,"archived":not bool(tool.get("archived"))}
     action="restored" if after["archived"] is False else "archived"
     return _apply_change(tool,after,action,account["name"],f"Equipment {action}")["tool"]
+
+@router.post("/tools/{tool_id}/mark-ready")
+def mark_tool_ready(tool_id:str,body:MarkReadyInput,account=Depends(_operator)):
+    tool=_find("tools","id",tool_id)
+    if not tool: raise HTTPException(404,"Tool was not found.")
+    _ensure_managed_department(account,tool.get("department"))
+    if tool.get("archived"): raise HTTPException(409,"Restore this tool before marking it ready for use.")
+    if tool.get("custody"): raise HTTPException(409,"Receive this tool before marking it ready for use.")
+    if tool.get("status")!="attention": raise HTTPException(409,"Only equipment held for attention can be marked ready for use.")
+    note=body.resolution_note.strip()
+    after={**tool,"status":"available","condition":"Good","notes":note}
+    return _apply_change(tool,after,"released",account["name"],f"Marked ready for use: {note}")["tool"]
 @router.get("/history")
 def history(_=Depends(_session)): return _all("history",True)
 
@@ -278,10 +293,12 @@ async def create_feedback(text:str=Form(default=""),audio:Optional[UploadFile]=F
     data=await audio.read() if audio else b""
     if len(data)>25*1024*1024: raise HTTPException(413,"Audio feedback must be smaller than 25 MB.")
     row_id,path=str(uuid.uuid4()),None
+    content_type=(audio.content_type or "audio/webm").split(";",1)[0].lower() if audio else None
+    if audio and content_type not in {"audio/webm","audio/ogg","audio/mp4","audio/mpeg","audio/wav","audio/x-wav"}: raise HTTPException(415,"Choose a WebM, OGG, MP4, MP3 or WAV audio recording.")
     if audio and not _test_mode:
-        ext=(audio.filename or "feedback.webm").rsplit(".",1)[-1]; path=f"{account['id']}/{row_id}.{ext}"
-        supabase.storage.from_(FEEDBACK_BUCKET).upload(path,data,{"content-type":audio.content_type or "audio/webm"})
-    return _insert("feedback",{"id":row_id,"text":text.strip() or None,"audio_path":path,"audio_filename":audio.filename if audio else None,"audio_content_type":audio.content_type if audio else None,"audio_size":len(data),"account_id":account["id"],"account_name":account["name"],"created_at":_now()})
+        extensions={"audio/webm":"webm","audio/ogg":"ogg","audio/mp4":"m4a","audio/mpeg":"mp3","audio/wav":"wav","audio/x-wav":"wav"}; path=f"{account['id']}/{row_id}.{extensions[content_type]}"
+        supabase.storage.from_(FEEDBACK_BUCKET).upload(path,data,{"content-type":content_type,"cache-control":"3600"})
+    return _insert("feedback",{"id":row_id,"text":text.strip() or None,"audio_path":path,"audio_filename":audio.filename if audio else None,"audio_content_type":content_type,"audio_size":len(data),"account_id":account["id"],"account_name":account["name"],"created_at":_now()})
 
 def _move(tool_id:str,body:MovementInput,account:dict[str,Any]):
     tool=_find("tools","id",tool_id)
@@ -339,6 +356,34 @@ async def upload_evidence(tool_id:str,files:list[UploadFile]=File(...),account=D
             raise
     _apply_change(tool,tool,"attachments",account["name"],f"Added {len(saved)} attachment(s)")
     return saved
+
+@router.get("/source-registers")
+def list_source_registers(_=Depends(_session)):
+    saved=_all("source_registers",True)
+    if not _test_mode:
+        for item in saved:
+            try:
+                signed=supabase.storage.from_(SOURCE_REGISTERS_BUCKET).create_signed_url(item["storage_path"],3600)
+                item["url"]=signed.get("signedURL") or signed.get("signedUrl")
+            except Exception: item["url"]=None
+    return saved
+
+@router.post("/source-registers",status_code=201)
+async def upload_source_register(department:str=Form(...),notes:str=Form(default=""),file:UploadFile=File(...),account=Depends(_session)):
+    content=await file.read(); filename=file.filename or "Source register"; extension=filename.lower().rsplit(".",1)[-1] if "." in filename else ""
+    allowed_extensions={"pdf","xlsx","xlsm","xls","csv","docx","doc","ods","odt","jpg","jpeg","png","webp"}
+    if extension not in allowed_extensions: raise HTTPException(415,"Choose a PDF, Excel, CSV, Word, OpenDocument or image file.")
+    if not content: raise HTTPException(422,"The source register was empty.")
+    if len(content)>50*1024*1024: raise HTTPException(413,"Source registers must be smaller than 50 MB.")
+    register_id=str(uuid.uuid4()); path=f"{datetime.now(timezone.utc):%Y/%m}/{register_id}.{extension}"; content_type=file.content_type or "application/octet-stream"
+    if not _test_mode: supabase.storage.from_(SOURCE_REGISTERS_BUCKET).upload(path,content,{"content-type":content_type})
+    row={"id":register_id,"department":department.strip() or "Unassigned","notes":notes.strip() or None,"storage_path":path,"original_name":filename,"content_type":content_type,"size_bytes":len(content),"uploaded_by_account_id":account["id"],"uploaded_by":account["name"],"uploaded_at":_now()}
+    try: return _insert("source_registers",row)
+    except Exception:
+        if not _test_mode:
+            try: supabase.storage.from_(SOURCE_REGISTERS_BUCKET).remove([path])
+            except Exception: pass
+        raise
 
 @router.get("/changes")
 def changes(account=Depends(_session)):

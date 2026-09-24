@@ -5,7 +5,7 @@
 ## Business rules
 
 - Signed-in viewers can read tools, employees, history and notifications.
-- Administrators manage accounts, the register, imports, evidence, archive/restore, undo/redo, feedback and analytics. Administrators cannot record custody movements.
+- Administrators manage accounts, the register, imports, evidence, archive/restore, feedback and analytics. Administrators cannot record custody movements.
 - Only Issuers can issue, transfer, extend and return equipment. Each Issuer has one assigned department; the API rejects movements for a tool or employee outside that department.
 - New self-registered accounts are Viewers. The first account bootstraps as Admin, and an Admin may promote a Viewer to Issuer with a department or revoke that access later.
 - Cross-account analytics and the feedback inbox are administrator-only. Usage and errors may still be captured from any authenticated account.
@@ -16,6 +16,9 @@
 - Notification reads are stored per account in `tools_workspace_notification_reads`.
 - A condition requiring inspection produces an `attention` alert.
 - Evidence and audio feedback stay in private buckets and are returned with temporary signed URLs.
+- Original source registers stay in the private `tools-workspace-source-registers` bucket with permanent metadata and temporary signed download URLs.
+- Employee records include an employee number and optional supervisor name.
+- Browser audio codec parameters are normalized before storage so recorded feedback remains playable across supported browsers.
 - Flexible equipment specifications are stored in `tools_workspace_equipment.specifications`; custody can retain multiple `assigned_equipment` names and a free-text work location.
 
 ## Verification

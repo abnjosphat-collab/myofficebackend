@@ -73,6 +73,31 @@ def test_admin_assigns_departmental_issuer_but_cannot_issue():
     assert allowed.json()["tool"]["custody"]["assigned_equipment"] == ["Conveyor CV-01", "Pump P-12"]
 
 
+def test_repaired_equipment_can_be_marked_ready_with_an_audit_event():
+    admin, issuer = admin_and_issuer("Engineering")
+    viewer = register("viewer")
+    admin_auth = {"Authorization": f"Bearer {admin}"}
+    issuer_auth = {"Authorization": f"Bearer {issuer}"}
+    viewer_auth = {"Authorization": f"Bearer {viewer}"}
+    employee = client.post("/api/tools-workspace/employees", headers=admin_auth, json={"employee_number": "E-READY", "name": "Tafadzwa", "department": "Engineering"}).json()
+    tool = client.post("/api/tools-workspace/tools", headers=admin_auth, json={"register_number": "T-READY", "name": "Impact drill", "storage_location": "Workshop", "department": "Engineering"}).json()
+    client.post(f"/api/tools-workspace/tools/{tool['id']}/issue", headers=issuer_auth, json={"employee_id": employee["id"], "location": "Crusher"})
+    held = client.post(f"/api/tools-workspace/tools/{tool['id']}/return", headers=issuer_auth, json={"location": "Workshop", "condition": "Damaged", "notes": "Trigger switch failed"})
+    assert held.status_code == 200 and held.json()["tool"]["status"] == "attention"
+
+    denied = client.post(f"/api/tools-workspace/tools/{tool['id']}/mark-ready", headers=viewer_auth, json={"resolution_note": "Switch replaced and function tested"})
+    released = client.post(f"/api/tools-workspace/tools/{tool['id']}/mark-ready", headers=issuer_auth, json={"resolution_note": "Switch replaced and function tested"})
+
+    assert denied.status_code == 403
+    assert released.status_code == 200
+    assert released.json()["status"] == "available"
+    assert released.json()["condition"] == "Good"
+    assert released.json()["notes"] == "Switch replaced and function tested"
+    trail = client.get("/api/tools-workspace/history", headers=viewer_auth).json()
+    assert trail[0]["action"] == "released"
+    assert "Switch replaced" in trail[0]["detail"]
+
+
 def test_viewer_cannot_create_register_records():
     admin = register("admin")
     viewer = register("viewer", False)
@@ -154,6 +179,26 @@ def test_usage_errors_and_feedback_are_available_to_analytics():
     assert client.get("/api/tools-workspace/analytics", headers={"Authorization": f"Bearer {viewer}"}).status_code == 403
 
 
+def test_audio_feedback_normalizes_browser_codec_content_type():
+    token = register("audio-admin")
+    response = client.post(
+        "/api/tools-workspace/feedback",
+        headers={"Authorization": f"Bearer {token}"},
+        files={"audio": ("feedback.webm", b"recorded-audio", "audio/webm;codecs=opus")},
+    )
+    assert response.status_code == 201
+    assert response.json()["audio_content_type"] == "audio/webm"
+
+
+def test_employee_register_preserves_supervisor_and_employee_number():
+    token = register("people-admin")
+    auth = {"Authorization": f"Bearer {token}"}
+    created = client.post("/api/tools-workspace/employees", headers=auth, json={"employee_number": "EMP-204", "name": "Rudo Moyo", "department": "Engineering", "supervisor_name": "C. Ncube"})
+    assert created.status_code == 201
+    assert created.json()["employee_number"] == "EMP-204"
+    assert created.json()["supervisor_name"] == "C. Ncube"
+
+
 def test_notification_reads_are_scoped_to_each_account():
     admin, issuer = admin_and_issuer()
     viewer = register("viewer", False)
@@ -202,3 +247,30 @@ def test_import_and_attachment_metadata_persist():
     assert attached.status_code == 201
     reloaded = client.get("/api/tools-workspace/tools", headers=auth).json()
     assert reloaded[0]["evidence"][0]["original_name"] == "condition.jpg"
+
+
+def test_signed_in_users_can_preserve_original_source_registers():
+    token = register("records-clerk")
+    auth = {"Authorization": f"Bearer {token}"}
+    uploaded = client.post(
+        "/api/tools-workspace/source-registers",
+        headers=auth,
+        data={"department": "Engineering", "notes": "Opening paper register scan"},
+        files={"file": ("engineering-register.pdf", b"%PDF-example", "application/pdf")},
+    )
+    assert uploaded.status_code == 201
+    assert uploaded.json()["original_name"] == "engineering-register.pdf"
+    assert uploaded.json()["uploaded_by"] == "Records-Clerk"
+
+    listed = client.get("/api/tools-workspace/source-registers", headers=auth)
+    assert listed.status_code == 200
+    assert listed.json()[0]["department"] == "Engineering"
+    assert listed.json()[0]["notes"] == "Opening paper register scan"
+
+    rejected = client.post(
+        "/api/tools-workspace/source-registers",
+        headers=auth,
+        data={"department": "Engineering"},
+        files={"file": ("unsafe.exe", b"binary", "application/octet-stream")},
+    )
+    assert rejected.status_code == 415
