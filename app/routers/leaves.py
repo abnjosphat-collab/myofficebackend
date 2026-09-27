@@ -5,7 +5,7 @@ from typing import Optional, List, Dict, Any
 from datetime import date, datetime
 from app.supabase_client import supabase, rows, one_row
 from app.auth import get_current_user, require_role_if_status_in
-from app.db_helpers import get_or_404
+from app.db_helpers import fetch_all_pages, get_or_404
 from app.leave_days import calculate_total_days
 import logging
 import traceback
@@ -142,15 +142,17 @@ async def create_leave(leave: LeaveCreate, current_user: dict = Depends(get_curr
 @router.get("/", response_model=List[LeaveResponse], dependencies=[Depends(get_current_user)])
 async def get_leaves(status: Optional[str] = None, leave_type: Optional[str] = None):
     try:
-        query = supabase.table("leaves").select("*")
-        if status:
-            query = query.eq("status", status)
-        if leave_type:
-            query = query.eq("leave_type", leave_type)
-        query = query.order("applied_date", desc=True)
-        response = query.execute()
-        data = rows(response)
-        return data
+        def _query():
+            query = supabase.table("leaves").select("*")
+            if status:
+                query = query.eq("status", status)
+            if leave_type:
+                query = query.eq("leave_type", leave_type)
+            # Stable ordering prevents records with the same application date
+            # from drifting between pages while the register is read.
+            return query.order("applied_date", desc=True).order("id", desc=True)
+
+        return fetch_all_pages(lambda start, end: _query().range(start, end).execute(), extract_rows=rows)
     except Exception as e:
         logger.error(f"Error fetching leaves: {str(e)}\n{traceback.format_exc()}")
         raise HTTPException(status_code=500, detail=f"Error fetching leaves: {str(e)}")

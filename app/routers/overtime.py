@@ -1,4 +1,5 @@
 from fastapi import APIRouter, HTTPException, Header, Depends
+from starlette.concurrency import run_in_threadpool
 from pydantic import BaseModel, Field, validator
 from typing import Optional, List, Dict, Any
 from app.supabase_client import supabase
@@ -123,15 +124,20 @@ async def get_overtime(status: Optional[str] = None, overtime_type: Optional[str
         # frontend (list view, Weekly Summary, analysis) even though they were
         # still safely in the database. Loop with .range() until exhausted, same
         # pattern as spares.py's list endpoint.
-        PAGE = 1000
-        data: list = []
-        start = 0
-        while True:
-            batch = (_build_query().range(start, start + PAGE - 1).execute().data or [])
-            data.extend(batch)
-            if len(batch) < PAGE:
-                break
-            start += PAGE
+        def _fetch_pages():
+            PAGE = 1000
+            data: list = []
+            start = 0
+            while True:
+                batch = (_build_query().range(start, start + PAGE - 1).execute().data or [])
+                data.extend(batch)
+                if len(batch) < PAGE:
+                    return data
+                start += PAGE
+
+        # supabase-py uses blocking HTTP. A large register spans multiple pages;
+        # keep those calls from stalling other requests on the async event loop.
+        data = await run_in_threadpool(_fetch_pages)
 
         logger.info(f"Returning {len(data)} records")
         return [decode_json_fields(record, ['spares_used']) for record in data]

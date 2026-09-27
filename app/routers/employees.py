@@ -1,5 +1,6 @@
 # backend/app/routers/employees.py
 from fastapi import APIRouter, HTTPException, Query, Depends
+from starlette.concurrency import run_in_threadpool
 from pydantic import BaseModel, Field, validator
 from typing import List, Optional
 from datetime import date
@@ -221,7 +222,9 @@ async def bulk_normalize_employees(body: BulkNormalizeRequest):
 async def get_employees():
     """Return all employees."""
     try:
-        rows = _data(supabase.table("employees").select("*").execute())
+        rows = _data(await run_in_threadpool(
+            lambda: supabase.table("employees").select("*").execute()
+        ))
         return [_dates_from_db(e) for e in rows] if rows else []
     except Exception as e:
         raise HTTPException(500, detail=f"Error fetching employees: {e}")

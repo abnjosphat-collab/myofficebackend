@@ -14,6 +14,9 @@
 #      to actions that don't need it.
 
 from fastapi import HTTPException, Header
+from starlette.concurrency import run_in_threadpool
+from supabase_auth.errors import AuthRetryableError
+import httpx
 from typing import Optional
 from app.supabase_client import supabase
 import logging
@@ -47,12 +50,17 @@ async def get_current_user(authorization: Optional[str] = Header(None)) -> dict:
     token = authorization.split(' ', 1)[1]
 
     try:
-        resp = supabase.auth.get_user(token)
+        # supabase-py is synchronous. Keep its network call off the event loop so
+        # concurrent authenticated reads cannot queue behind a slow Auth request.
+        resp = await run_in_threadpool(supabase.auth.get_user, token)
         user = resp.user
         if not user:
             raise HTTPException(status_code=401, detail='Invalid or expired session. Please sign in again.')
     except HTTPException:
         raise
+    except (AuthRetryableError, httpx.TransportError, httpx.TimeoutException) as e:
+        logger.warning(f'Auth service temporarily unavailable: {e}')
+        raise HTTPException(status_code=503, detail='Sign-in verification is temporarily unavailable. Please retry.')
     except Exception as e:
         logger.warning(f'Token verification failed: {e}')
         raise HTTPException(status_code=401, detail='Invalid or expired session. Please sign in again.')
@@ -63,7 +71,9 @@ async def get_current_user(authorization: Optional[str] = Header(None)) -> dict:
     # falling back to 'user' would strip a manager's privileges on a transient blip and hide
     # the outage. Fail loud with a retryable 503 instead of a silent downgrade.
     try:
-        role_resp = supabase.rpc('get_user_role_by_id', {'user_id': str(user.id)}).execute()
+        role_resp = await run_in_threadpool(
+            lambda: supabase.rpc('get_user_role_by_id', {'user_id': str(user.id)}).execute()
+        )
         role = role_resp.data if role_resp.data else 'user'
     except Exception as e:
         logger.error(f'Role lookup failed for {user.id}: {e}')

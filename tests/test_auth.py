@@ -2,7 +2,11 @@
 # the whole authorization scheme (get_current_user + require_role, applied to 159+
 # endpoints). Pure-logic + mocked-Supabase; no network, no live server.
 
+import asyncio
+import time
+
 import pytest
+from supabase_auth.errors import AuthRetryableError
 from fastapi import HTTPException
 
 from app import auth
@@ -91,10 +95,37 @@ async def test_get_current_user_invalid_token(patch_supabase):
     assert exc.value.status_code == 401
 
 
+async def test_auth_service_outage_is_retryable_not_invalid_session(patch_supabase):
+    patch_supabase(user=_FakeUser(), role="user")
+
+    def unavailable(_token):
+        raise AuthRetryableError("Service unavailable", 503)
+
+    auth.supabase.auth.get_user = unavailable
+    with pytest.raises(HTTPException) as exc:
+        await auth.get_current_user("Bearer good-token")
+    assert exc.value.status_code == 503
+
+
 async def test_get_current_user_valid(patch_supabase):
     patch_supabase(user=_FakeUser("u-9", "x@y.com"), role="manager")
     result = await auth.get_current_user("Bearer good-token")
     assert result == {"user_id": "u-9", "email": "x@y.com", "role": "manager"}
+
+
+async def test_slow_auth_does_not_block_other_requests(patch_supabase):
+    patch_supabase(user=_FakeUser(), role="user")
+    original = auth.supabase.auth.get_user
+
+    def slow_get_user(token):
+        time.sleep(0.1)
+        return original(token)
+
+    auth.supabase.auth.get_user = slow_get_user
+    pending = asyncio.create_task(auth.get_current_user("Bearer good-token"))
+    await asyncio.sleep(0.01)
+    assert not pending.done(), "The event loop should remain free during Auth I/O"
+    assert (await pending)["role"] == "user"
 
 
 # ─── require_role ─────────────────────────────────────────────────────────────

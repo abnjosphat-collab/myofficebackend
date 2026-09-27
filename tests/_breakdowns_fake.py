@@ -30,15 +30,18 @@ class _FakeQuery:
         self.state = state
         self._eq: Dict[str, Any] = {}
         self._ilike: Optional[Tuple[str, str]] = None
-        self._order_col: Optional[str] = None
-        self._order_desc: bool = False
+        self._orders: List[Tuple[str, bool]] = []
+        self._gte: Dict[str, Any] = {}
+        self._lte: Dict[str, Any] = {}
         self._range: Optional[Tuple[int, int]] = None
         self._op: Optional[Tuple[str, Any]] = None
 
     def select(self, *a, **k): return self
     def eq(self, col, val): self._eq[col] = val; return self
+    def gte(self, col, val): self._gte[col] = val; return self
+    def lte(self, col, val): self._lte[col] = val; return self
     def ilike(self, col, val): self._ilike = (col, val); return self
-    def order(self, col, desc=False): self._order_col = col; self._order_desc = desc; return self
+    def order(self, col, desc=False): self._orders.append((col, desc)); return self
     def range(self, start, end): self._range = (start, end); return self
     def limit(self, n): return self  # health_check only; no filtering needed here
     def insert(self, data): self._op = ("insert", data); return self
@@ -49,12 +52,16 @@ class _FakeQuery:
         rows = self.state.tables.get(self.table_name, [])
         for col, val in self._eq.items():
             rows = [r for r in rows if r.get(col) == val]
+        for col, val in self._gte.items():
+            rows = [r for r in rows if r.get(col) is not None and r[col] >= val]
+        for col, val in self._lte.items():
+            rows = [r for r in rows if r.get(col) is not None and r[col] <= val]
         if self._ilike:
             col, val = self._ilike
             needle = val.lower()
             rows = [r for r in rows if str(r.get(col, "")).lower() == needle]
-        if self._order_col:
-            rows = sorted(rows, key=lambda r: r.get(self._order_col) or "", reverse=self._order_desc)
+        for col, desc in reversed(self._orders):
+            rows = sorted(rows, key=lambda r: r.get(col) or "", reverse=desc)
         if self._range is not None:
             start, end = self._range
             rows = rows[start:end + 1]
@@ -65,6 +72,8 @@ class _FakeQuery:
             "table": self.table_name,
             "op": (self._op[0] if self._op else "select"),
             "eq": dict(self._eq),
+            "gte": dict(self._gte),
+            "lte": dict(self._lte),
             "ilike": self._ilike,
             "range": self._range,
             "payload": (self._op[1] if self._op else None),

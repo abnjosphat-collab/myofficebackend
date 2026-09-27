@@ -275,7 +275,10 @@ for _name in [
     "condition_monitoring", "contractors", "production",
     "failure_modes", "competency",
 ]:
-    register_router(_name, f"/api/{_name.replace('_', '-')}", [_name.title().replace('_', ' ')])
+    # These routers already declare their full /api/<name> prefix internally.
+    # Adding it again here made their public endpoints /api/name/api/name/*.
+    _prefix = None if _name in {"reports", "inventory", "training"} else f"/api/{_name.replace('_', '-')}"
+    register_router(_name, _prefix, [_name.title().replace('_', ' ')])
 
 # ===== VERCEL HANDLER =====
 from mangum import Mangum

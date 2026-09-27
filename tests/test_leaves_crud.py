@@ -37,6 +37,7 @@ class _FakeQuery:
         self._response_map = response_map
         self._filters = []
         self._order = None
+        self._range = None
         self._payload = None
         self._op = "select"
 
@@ -49,6 +50,9 @@ class _FakeQuery:
         return self
     def order(self, col, desc=False):
         self._order = (col, desc)
+        return self
+    def range(self, start, end):
+        self._range = (start, end)
         return self
     def insert(self, data):
         self._op = "insert"
@@ -78,7 +82,8 @@ class _FakeQuery:
             idx = self.state.setdefault("select_call_idx", {}).get(self.table_name, 0)
             self.state["select_call_idx"][self.table_name] = idx + 1
             return _Resp(select_returns[min(idx, len(select_returns) - 1)])
-        return _Resp(table_cfg.get("select_return", []))
+        records = table_cfg.get("select_return", [])
+        return _Resp(records[self._range[0]:self._range[1] + 1] if self._range else records)
 
 
 class _FakeSupabase:
@@ -157,11 +162,20 @@ async def test_get_leaves_filters_by_status_and_leave_type(patch_supabase):
     assert ("leave_type", "sick") in call["filters"]
 
 
+async def test_get_leaves_reads_beyond_first_database_page(patch_supabase):
+    records = [{"id": i, "status": "approved"} for i in range(1001)]
+    state = patch_supabase({"leaves": {"select_return": records}})
+    result = await get_leaves(status="approved", leave_type=None)
+    assert len(result) == 1001
+    assert len(state["calls"]) == 2
+
+
 async def test_get_leaves_raises_500_on_db_failure(monkeypatch):
     class _RaisingQuery:
         def select(self, *a, **k): return self
         def eq(self, *a, **k): return self
         def order(self, *a, **k): return self
+        def range(self, *a, **k): return self
         def execute(self): raise Exception("db unreachable")
 
     class _RaisingSupabase:

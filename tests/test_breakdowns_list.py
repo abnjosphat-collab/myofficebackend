@@ -94,6 +94,24 @@ async def test_breakdown_type_and_department_filters_combine(monkeypatch):
     assert result["data"][0]["id"] == "1"
 
 
+async def test_priority_location_and_date_filters_apply_before_pagination(monkeypatch):
+    records = [
+        {"id": "1", "created_at": "2026-09-20", "priority": "high", "location": "Plant", "breakdown_date": "2026-09-20"},
+        {"id": "2", "created_at": "2026-09-19", "priority": "high", "location": "Plant", "breakdown_date": "2026-08-19"},
+        {"id": "3", "created_at": "2026-09-18", "priority": "low", "location": "Plant", "breakdown_date": "2026-09-18"},
+        {"id": "4", "created_at": "2026-09-17", "priority": "high", "location": "Workshop", "breakdown_date": "2026-09-17"},
+    ]
+    fake = _patch(monkeypatch, records)
+    result = await get_breakdowns(
+        status=None, breakdown_type=None, department=None, limit=1, offset=0,
+        priority="high", location="Plant", start_date="2026-09-01", end_date="2026-09-30",
+    )
+    assert [row["id"] for row in result["data"]] == ["1"]
+    assert fake.state.calls[0]["eq"] == {"priority": "high", "location": "Plant"}
+    assert fake.state.calls[0]["gte"] == {"breakdown_date": "2026-09-01"}
+    assert fake.state.calls[0]["lte"] == {"breakdown_date": "2026-09-30"}
+
+
 async def test_pagination_uses_range(monkeypatch):
     fake = _patch(monkeypatch)
     await get_breakdowns(status=None, breakdown_type=None, department=None, limit=1, offset=1)

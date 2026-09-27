@@ -1,5 +1,6 @@
 # app/routers/breakdowns.py
 from fastapi import APIRouter, HTTPException, Query, Depends
+from starlette.concurrency import run_in_threadpool
 from app.auth import get_current_user, require_role
 from pydantic import BaseModel, Field, validator
 from typing import Optional, List
@@ -11,6 +12,7 @@ from collections import defaultdict
 from app.cache import cached, cache_get, cache_set, build_key, invalidate_namespace
 from app.serialization import encode_json_fields, decode_json_fields
 from app.supabase_client import rows, one_row
+from app.db_helpers import fetch_all_pages
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -240,14 +242,19 @@ async def get_breakdowns(
     breakdown_type: Optional[str] = Query(None),
     department: Optional[str] = Query(None),
     limit: int = Query(100, ge=1, le=1000),
-    offset: int = Query(0, ge=0)
+    offset: int = Query(0, ge=0),
+    priority: Optional[str] = None,
+    location: Optional[str] = None,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
 ):
     """Get breakdowns with filtering"""
     db = check_supabase()
 
     cache_key = build_key(
         "breakdowns", _fn="get_breakdowns", status=status, breakdown_type=breakdown_type,
-        department=department, limit=limit, offset=offset,
+        department=department, priority=priority, location=location,
+        start_date=start_date, end_date=end_date, limit=limit, offset=offset,
     )
     cached_result = await cache_get(cache_key)
     if cached_result is not None:
@@ -262,8 +269,18 @@ async def get_breakdowns(
             query = query.eq("breakdown_type", breakdown_type)
         if department and department != "all":
             query = query.eq("department", department)
+        if priority and priority != "all":
+            query = query.eq("priority", priority)
+        if location and location != "all":
+            query = query.eq("location", location)
+        if start_date:
+            query = query.gte("breakdown_date", start_date)
+        if end_date:
+            query = query.lte("breakdown_date", end_date)
         
-        response = query.order("created_at", desc=True).range(offset, offset + limit - 1).execute()
+        response = await run_in_threadpool(
+            lambda: query.order("created_at", desc=True).order("id", desc=True).range(offset, offset + limit - 1).execute()
+        )
         
         records = [decode_json_fields(r, ['spares_used']) for r in rows(response)]
 
@@ -590,8 +607,12 @@ async def get_breakdown_heatmap(
         if location and location != "all":
             query = query.eq("location", location)
         
-        response = query.execute()
-        records = rows(response)
+        # An unpaged read silently stops at PostgREST's default first 1,000 rows.
+        # Apply a stable order before paging so the charts include the full range.
+        query = query.order("breakdown_date", desc=True).order("id", desc=True)
+        records = await run_in_threadpool(
+            lambda: fetch_all_pages(lambda start, end: query.range(start, end).execute(), extract_rows=rows)
+        )
 
         # ===== Initialize data structures =====
         hour_day_heatmap = [[0 for _ in range(7)] for _ in range(24)]  # 24 hours x 7 days

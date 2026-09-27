@@ -24,6 +24,7 @@ class _Result:
 class _FakeQuery:
     def __init__(self, rows):
         self._rows = rows
+        self._range = None
 
     def select(self, *_a, **_k):
         return self
@@ -37,8 +38,15 @@ class _FakeQuery:
     def eq(self, *_a, **_k):
         return self
 
+    def order(self, *_a, **_k):
+        return self
+
+    def range(self, start, end):
+        self._range = (start, end)
+        return self
+
     def execute(self):
-        return _Result(self._rows)
+        return _Result(self._rows[self._range[0]:self._range[1] + 1] if self._range else self._rows)
 
 
 class _FakeSupabase:
@@ -94,3 +102,10 @@ def test_heatmap_handles_empty_table(client, monkeypatch):
     monkeypatch.setattr(bd, "supabase", _FakeSupabase([]))
     resp = client.get("/api/breakdowns/analytics/heatmap")
     assert resp.status_code == 200, resp.text
+
+
+def test_heatmap_includes_records_after_first_database_page(client, monkeypatch):
+    monkeypatch.setattr(bd, "supabase", _FakeSupabase([dict(SAMPLE_RECORDS[0]) for _ in range(1001)]))
+    resp = client.get("/api/breakdowns/analytics/heatmap")
+    assert resp.status_code == 200, resp.text
+    assert sum(sum(hour) for hour in resp.json()["heatmap"]["hour_day"]) == 1001
