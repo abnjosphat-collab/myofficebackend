@@ -65,6 +65,22 @@ def admin_and_issuer(department: str = "Engineering"):
     return admin, viewer
 
 
+def make_eligible_and_current(auth, employee, tool):
+    competency = client.post(
+        "/api/tools-workspace/competencies",
+        headers=auth,
+        json={"employee_id": employee["id"], "tool_id": tool["id"], "trained": True, "qualified": True, "authorized": True},
+    )
+    assert competency.status_code == 201
+    for inspection_type in ("monthly", "quarterly"):
+        inspection = client.post(
+            f"/api/tools-workspace/tools/{tool['id']}/inspections",
+            headers=auth,
+            json={"inspection_type": inspection_type, "outcome": "passed", "next_due_at": "2035-01-01T00:00:00Z"},
+        )
+        assert inspection.status_code == 201
+
+
 def test_registration_accepts_email_style_username():
     response = client.post("/api/tools-workspace/auth/register", json={"name": "Jos Phat", "username": "josphat@gmail.com", "password": "secret12", "can_issue": True})
     assert response.status_code == 201
@@ -80,6 +96,7 @@ def test_viewer_cannot_issue_but_issuer_creates_complete_history():
     admin_auth = {"Authorization": f"Bearer {admin}"}
     employee = client.post("/api/tools-workspace/employees", headers=admin_auth, json={"employee_number": "E-1", "name": "Alex", "department": "Engineering"}).json()
     tool = client.post("/api/tools-workspace/tools", headers=admin_auth, json={"register_number": "T-1", "name": "Clamp meter", "storage_location": "Workshop"}).json()
+    make_eligible_and_current(admin_auth, employee, tool)
     payload = {"employee_id": employee["id"], "location": "Plant 4", "job_reference": "WO-9"}
     denied = client.post(f"/api/tools-workspace/tools/{tool['id']}/issue", headers={"Authorization": f"Bearer {viewer}"}, json=payload)
     assert denied.status_code == 403
@@ -100,10 +117,11 @@ def test_admin_assigns_departmental_issuer_but_cannot_issue():
     employee = client.post("/api/tools-workspace/employees", headers=admin_auth, json={"employee_number": "E-10", "name": "Nyasha", "department": "Engineering"}).json()
     engineering_tool = client.post("/api/tools-workspace/tools", headers=admin_auth, json={"register_number": "ENG-10", "name": "Drill", "storage_location": "Workshop", "department": "Engineering"}).json()
     mining_tool = client.post("/api/tools-workspace/tools", headers=admin_auth, json={"register_number": "MIN-10", "name": "Lamp", "storage_location": "Store", "department": "Mining"}).json()
+    make_eligible_and_current(admin_auth, employee, engineering_tool)
 
     denied_admin = client.post(f"/api/tools-workspace/tools/{engineering_tool['id']}/commands", headers=admin_auth, json={"kind": "issue", "employee_id": employee["id"], "location": "Plant"})
     denied_department = client.post(f"/api/tools-workspace/tools/{mining_tool['id']}/commands", headers=issuer_auth, json={"kind": "issue", "employee_id": employee["id"], "location": "Pit"})
-    allowed = client.post(f"/api/tools-workspace/tools/{engineering_tool['id']}/commands", headers=issuer_auth, json={"kind": "issue", "employee_id": employee["id"], "location": "Plant", "assigned_equipment": ["Conveyor CV-01", "Pump P-12"]})
+    allowed = client.post(f"/api/tools-workspace/tools/{engineering_tool['id']}/commands", headers=issuer_auth, json={"kind": "issue", "employee_id": employee["id"], "location": "Plant", "assigned_equipment": ["Conveyor CV-01", "Pump P-12"], "pre_use_check_completed": True})
 
     assert denied_admin.status_code == 403
     assert denied_department.status_code == 403
@@ -119,6 +137,7 @@ def test_repaired_equipment_can_be_marked_ready_with_an_audit_event():
     viewer_auth = {"Authorization": f"Bearer {viewer}"}
     employee = client.post("/api/tools-workspace/employees", headers=admin_auth, json={"employee_number": "E-READY", "name": "Tafadzwa", "department": "Engineering"}).json()
     tool = client.post("/api/tools-workspace/tools", headers=admin_auth, json={"register_number": "T-READY", "name": "Impact drill", "storage_location": "Workshop", "department": "Engineering"}).json()
+    make_eligible_and_current(admin_auth, employee, tool)
     client.post(f"/api/tools-workspace/tools/{tool['id']}/issue", headers=issuer_auth, json={"employee_id": employee["id"], "location": "Crusher"})
     held = client.post(f"/api/tools-workspace/tools/{tool['id']}/return", headers=issuer_auth, json={"location": "Workshop", "condition": "Damaged", "notes": "Trigger switch failed"})
     assert held.status_code == 200 and held.json()["tool"]["status"] == "attention"
@@ -183,8 +202,10 @@ def test_transfer_extension_edit_archive_and_undo_are_durable():
     first = client.post("/api/tools-workspace/employees", headers=admin_auth, json={"employee_number": "E-1", "name": "Alex", "department": "Engineering"}).json()
     second = client.post("/api/tools-workspace/employees", headers=admin_auth, json={"employee_number": "E-2", "name": "Jordan", "department": "Engineering"}).json()
     tool = client.post("/api/tools-workspace/tools", headers=admin_auth, json={"register_number": "T-9", "name": "Drill", "storage_location": "Workshop", "specifications": {"Voltage": "18 V"}}).json()
+    make_eligible_and_current(admin_auth, first, tool)
+    make_eligible_and_current(admin_auth, second, tool)
     assert client.patch(f"/api/tools-workspace/tools/{tool['id']}", headers=admin_auth, json={"name": "Cordless drill"}).status_code == 200
-    assert client.post(f"/api/tools-workspace/tools/{tool['id']}/commands", headers=auth, json={"kind": "issue", "employee_id": first["id"], "location": "Plant", "assigned_equipment": ["Primary crusher"], "expected_return_at": "2030-01-02T10:00:00Z"}).status_code == 200
+    assert client.post(f"/api/tools-workspace/tools/{tool['id']}/commands", headers=auth, json={"kind": "issue", "employee_id": first["id"], "location": "Plant", "assigned_equipment": ["Primary crusher"], "expected_return_at": "2030-01-02T10:00:00Z", "pre_use_check_completed": True}).status_code == 200
     assert client.post(f"/api/tools-workspace/tools/{tool['id']}/commands", headers=auth, json={"kind": "transfer", "employee_id": second["id"], "location": "Pit"}).status_code == 200
     assert client.post(f"/api/tools-workspace/tools/{tool['id']}/commands", headers=auth, json={"kind": "extend", "expected_return_at": "2030-01-03T10:00:00Z"}).status_code == 200
     returned = client.post(f"/api/tools-workspace/tools/{tool['id']}/commands", headers=auth, json={"kind": "return", "location": "Store", "condition": "Good"})
@@ -244,6 +265,7 @@ def test_notification_reads_are_scoped_to_each_account():
     viewer_auth = {"Authorization": f"Bearer {viewer}"}
     employee = client.post("/api/tools-workspace/employees", headers=admin_auth, json={"employee_number": "E-7", "name": "Tariro", "department": "Engineering"}).json()
     tool = client.post("/api/tools-workspace/tools", headers=admin_auth, json={"register_number": "T-7", "name": "Clamp meter", "storage_location": "Workshop"}).json()
+    make_eligible_and_current(admin_auth, employee, tool)
     issuer_auth = {"Authorization": f"Bearer {issuer}"}
     client.post(f"/api/tools-workspace/tools/{tool['id']}/issue", headers=issuer_auth, json={"employee_id": employee["id"], "location": "Plant"})
     client.post(f"/api/tools-workspace/tools/{tool['id']}/return", headers=issuer_auth, json={"location": "Tool room", "condition": "Damaged"})
@@ -264,6 +286,7 @@ def test_past_return_deadline_is_derived_as_overdue_without_a_scheduler():
     issuer_auth = {"Authorization": f"Bearer {issuer}"}
     employee = client.post("/api/tools-workspace/employees", headers=auth, json={"employee_number": "E-8", "name": "Rudo", "department": "Engineering"}).json()
     tool = client.post("/api/tools-workspace/tools", headers=auth, json={"register_number": "T-8", "name": "Test meter", "storage_location": "Workshop"}).json()
+    make_eligible_and_current(auth, employee, tool)
     issued = client.post(f"/api/tools-workspace/tools/{tool['id']}/issue", headers=issuer_auth, json={"employee_id": employee["id"], "location": "Plant", "expected_return_at": "2000-01-01T10:00:00Z"})
     assert issued.status_code == 200
 
@@ -272,7 +295,7 @@ def test_past_return_deadline_is_derived_as_overdue_without_a_scheduler():
 
     assert listed[0]["status"] == "overdue"
     assert alerts["unread_count"] == 1
-    assert alerts["alerts"][0]["kind"] == "overdue"
+    assert alerts["alerts"][0]["kind"] == "overdue_6h"
 
 
 def test_import_and_attachment_metadata_persist():
@@ -312,3 +335,165 @@ def test_signed_in_users_can_preserve_original_source_registers():
         files={"file": ("unsafe.exe", b"binary", "application/octet-stream")},
     )
     assert rejected.status_code == 415
+
+
+def test_generated_register_number_uses_sop_prefix_and_sequence():
+    token = register("number-admin")
+    auth = {"Authorization": f"Bearer {token}"}
+    first = client.post(
+        "/api/tools-workspace/tools",
+        headers=auth,
+        json={"name": "Angle grinder", "equipment_kind": "angle-grinder", "storage_location": "Main tool room", "department": "Engineering"},
+    )
+    second = client.post(
+        "/api/tools-workspace/tools",
+        headers=auth,
+        json={"name": "Angle grinder", "equipment_kind": "angle-grinder", "storage_location": "Main tool room", "department": "Engineering"},
+    )
+
+    assert first.status_code == second.status_code == 201
+    assert first.json()["register_number"] == "PP-UG-ENG-AG-01"
+    assert second.json()["register_number"] == "PP-UG-ENG-AG-02"
+
+
+def test_issue_requires_current_competency_checks_and_pre_use_confirmation():
+    admin, issuer = admin_and_issuer()
+    admin_auth = {"Authorization": f"Bearer {admin}"}
+    issuer_auth = {"Authorization": f"Bearer {issuer}"}
+    employee = client.post("/api/tools-workspace/employees", headers=admin_auth, json={"employee_number": "E-COMP", "name": "Competent User", "department": "Engineering"}).json()
+    tool = client.post("/api/tools-workspace/tools", headers=admin_auth, json={"register_number": "T-COMP", "name": "Grinder", "storage_location": "Store"}).json()
+
+    no_competency = client.post(f"/api/tools-workspace/tools/{tool['id']}/commands", headers=issuer_auth, json={"kind": "issue", "employee_id": employee["id"], "location": "Plant", "pre_use_check_completed": True})
+    make_eligible_and_current(admin_auth, employee, tool)
+    no_pre_use = client.post(f"/api/tools-workspace/tools/{tool['id']}/commands", headers=issuer_auth, json={"kind": "issue", "employee_id": employee["id"], "location": "Plant"})
+    issued = client.post(f"/api/tools-workspace/tools/{tool['id']}/commands", headers=issuer_auth, json={"kind": "issue", "employee_id": employee["id"], "location": "Plant", "pre_use_check_completed": True})
+
+    assert no_competency.status_code == 409
+    assert "trained, qualified and authorized" in no_competency.json()["detail"]
+    assert no_pre_use.status_code == 409
+    assert issued.status_code == 200
+    assert any(item["inspection_type"] == "pre_use" for item in client.get("/api/tools-workspace/compliance", headers=admin_auth).json()["inspections"])
+
+
+def test_failed_quarterly_inspection_quarantines_tool_and_uses_red_code():
+    token = register("inspection-admin")
+    auth = {"Authorization": f"Bearer {token}"}
+    tool = client.post("/api/tools-workspace/tools", headers=auth, json={"register_number": "T-INSP", "name": "Torque wrench", "storage_location": "Store"}).json()
+
+    result = client.post(
+        f"/api/tools-workspace/tools/{tool['id']}/inspections",
+        headers=auth,
+        json={"inspection_type": "quarterly", "outcome": "failed", "defects": "Cracked handle"},
+    )
+    listed = client.get("/api/tools-workspace/tools", headers=auth).json()[0]
+
+    assert result.status_code == 201
+    assert result.json()["colour_code"] == "Red"
+    assert listed["status"] == "attention"
+    assert listed["condition"] == "Defective"
+
+
+def test_repair_quote_records_the_sixty_percent_replacement_threshold():
+    token = register("repair-admin")
+    auth = {"Authorization": f"Bearer {token}"}
+    tool = client.post("/api/tools-workspace/tools", headers=auth, json={"register_number": "T-REPAIR", "name": "Impact drill", "storage_location": "Store"}).json()
+
+    within_limit = client.post(
+        f"/api/tools-workspace/tools/{tool['id']}/inspections",
+        headers=auth,
+        json={"inspection_type": "repair", "outcome": "conditional", "repair_quote": 600, "new_equipment_price": 1000},
+    )
+    above_limit = client.post(
+        f"/api/tools-workspace/tools/{tool['id']}/inspections",
+        headers=auth,
+        json={"inspection_type": "repair", "outcome": "conditional", "repair_quote": 601, "new_equipment_price": 1000},
+    )
+
+    assert within_limit.status_code == above_limit.status_code == 201
+    assert within_limit.json()["repair_eligible"] is True
+    assert above_limit.json()["repair_eligible"] is False
+
+
+def test_incident_opens_twenty_four_hour_investigation_and_records_recovery():
+    token = register("incident-admin")
+    auth = {"Authorization": f"Bearer {token}"}
+    tool = client.post("/api/tools-workspace/tools", headers=auth, json={"register_number": "T-LOSS", "name": "Laser level", "storage_location": "Survey store"}).json()
+
+    reported = client.post(
+        f"/api/tools-workspace/tools/{tool['id']}/incidents",
+        headers=auth,
+        json={"incident_type": "lost", "occurred_at": "2030-01-01T08:00:00Z", "explanation": "Equipment could not be located after the shift hand-back."},
+    )
+    assert reported.status_code == 201
+    incident = reported.json()
+    assert incident["status"] == "open"
+    assert incident["investigation_due_at"]
+    assert client.get("/api/tools-workspace/tools", headers=auth).json()[0]["status"] == "attention"
+
+    missing_cost = client.post(
+        f"/api/tools-workspace/incidents/{incident['id']}/close",
+        headers=auth,
+        json={"investigation_outcome": "Employee negligence was confirmed.", "negligence_confirmed": True},
+    )
+    closed = client.post(
+        f"/api/tools-workspace/incidents/{incident['id']}/close",
+        headers=auth,
+        json={"investigation_outcome": "Employee negligence was confirmed.", "negligence_confirmed": True, "replacement_cost": 900},
+    )
+
+    assert missing_cost.status_code == 422
+    assert closed.status_code == 200
+    assert closed.json()["recovery_months"] == 6
+    assert closed.json()["replacement_cost"] == 900
+
+
+def test_contractor_equipment_requires_owner_and_preserves_oem_reference():
+    token = register("contractor-admin")
+    auth = {"Authorization": f"Bearer {token}"}
+    rejected = client.post(
+        "/api/tools-workspace/tools",
+        headers=auth,
+        json={"name": "Contractor grinder", "storage_location": "Entry quarantine", "ownership_type": "contractor"},
+    )
+    created = client.post(
+        "/api/tools-workspace/tools",
+        headers=auth,
+        json={"name": "Contractor grinder", "storage_location": "Entry quarantine", "ownership_type": "contractor", "contractor_name": "ABC Mining", "oem_manual_ref": "OEM-AG-14"},
+    )
+
+    assert rejected.status_code == 422
+    assert created.status_code == 201
+    assert created.json()["contractor_name"] == "ABC Mining"
+    assert created.json()["oem_manual_ref"] == "OEM-AG-14"
+
+
+def test_external_gate_pass_requires_sequential_reauthenticated_signatures_and_pdf():
+    token = register("gate-admin")
+    auth = {"Authorization": f"Bearer {token}"}
+    account = client.get("/api/tools-workspace/auth/me", headers=auth).json()
+    roles = ["hos", "hod", "security", "finance", "general_manager"]
+    updated = client.patch(f"/api/tools-workspace/accounts/{account['id']}", headers=auth, json={"role": "admin", "approval_roles": roles})
+    assert updated.status_code == 200
+    pin = client.put("/api/tools-workspace/auth/signing-pin", headers=auth, json={"password": "secret12", "pin": "4826"})
+    assert pin.status_code == 200
+    tool = client.post("/api/tools-workspace/tools", headers=auth, json={"register_number": "T-GATE", "name": "Survey instrument", "storage_location": "Survey store"}).json()
+    created = client.post(
+        "/api/tools-workspace/gate-passes",
+        headers=auth,
+        json={"movement_scope": "external", "department": "Engineering", "destination": "OEM workshop", "purpose": "Calibration", "expected_out_at": "2030-01-01T08:00:00Z", "expected_return_at": "2030-01-03T16:00:00Z", "finance_required": True, "tool_ids": [tool["id"]]},
+    )
+    assert created.status_code == 201
+    gate_pass = created.json()
+    assert [item["role"] for item in gate_pass["approvals"]] == roles
+
+    for index, role in enumerate(roles):
+        credential = "secret12" if index == 0 else "4826"
+        decision = client.post(f"/api/tools-workspace/gate-passes/{gate_pass['id']}/decision", headers=auth, json={"decision": "approve", "credential": credential, "comment": f"Approved as {role}"})
+        assert decision.status_code == 200
+    assert decision.json()["status"] == "approved"
+    assert all(item["signer_name"] == "Gate-Admin" for item in decision.json()["approvals"])
+
+    pdf = client.get(f"/api/tools-workspace/gate-passes/{gate_pass['id']}/pdf", headers=auth)
+    assert pdf.status_code == 200
+    assert pdf.headers["content-type"] == "application/pdf"
+    assert pdf.content.startswith(b"%PDF")

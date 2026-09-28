@@ -54,6 +54,7 @@ pytz==2025.2
 PyYAML==6.0.3
 realtime==2.22.2
 redis==5.2.1
+reportlab==4.4.4
 rich==14.2.0
 rich-toolkit==0.15.1
 rignore==0.7.1
