@@ -106,10 +106,11 @@ async def test_get_saved_requisitions_happy_path(patch_supabase):
     assert result == [{"id": "r1", "name": "Q1 restock"}]
 
 
-async def test_get_saved_requisitions_table_missing_degrades_to_empty_list(patch_supabase):
+async def test_get_saved_requisitions_failure_is_not_reported_as_empty(patch_supabase):
     patch_supabase(raise_error=True)
-    result = await get_saved_spare_requisitions()
-    assert result == []
+    with pytest.raises(HTTPException) as exc_info:
+        await get_saved_spare_requisitions()
+    assert exc_info.value.status_code == 500
 
 
 # ─── create_saved_spare_requisition ─────────────────────────────────────────────────

@@ -19,10 +19,16 @@ class _Resp:
 class _FakeTable:
     def __init__(self, response_data):
         self._response = response_data
+        self._range = None
 
     def select(self, *a, **k): return self
     def eq(self, *a, **k): return self
-    def execute(self): return _Resp(self._response)
+    def order(self, *a, **k): return self
+    def range(self, start, end): self._range = (start, end); return self
+    def execute(self):
+        if self._range is None: return _Resp(self._response)
+        start, end = self._range
+        return _Resp(self._response[start:end + 1])
 
 
 class _FakeSupabase:
@@ -100,3 +106,9 @@ async def test_stats_breakdowns_use_documented_defaults(patch_supabase):
     assert stats["status_breakdown"] == {"Draft": 1}
     assert stats["priority_breakdown"] == {"Medium": 1}
     assert stats["category_breakdown"] == {"General": 1}
+
+
+async def test_stats_pages_past_postgrest_default(patch_supabase):
+    patch_supabase([{"id": f"n{i}"} for i in range(1001)])
+    stats = await get_stats()
+    assert stats["total_notices"] == 1001

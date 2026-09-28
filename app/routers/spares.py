@@ -929,8 +929,8 @@ async def get_saved_spare_requisitions():
         response = supabase.table("spare_requisitions").select("*").order("updated_at", desc=True).execute()
         return rows(response)
     except Exception as e:
-        logger.warning(f"spare_requisitions table may not exist yet: {e}")
-        return []
+        logger.error(f"Failed to load spare requisitions: {e}")
+        raise HTTPException(status_code=500, detail="Failed to load saved requisitions")
 
 @router.post("/saved-requisitions", status_code=201)
 async def create_saved_spare_requisition(data: SavedSpareReqCreate, current_user: dict = Depends(get_current_user)):

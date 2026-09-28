@@ -10,12 +10,14 @@
 # comment, which admin/page.tsx was the one exception to).
 import os
 from fastapi import APIRouter, HTTPException, Depends
+from starlette.concurrency import run_in_threadpool
 from pydantic import BaseModel
 from datetime import datetime, timezone
 import logging
 
 from app.supabase_client import supabase
 from app.auth import get_current_user, require_role, ROLE_ORDER
+from app.db_helpers import fetch_all_pages
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/admin", tags=["admin"])
@@ -66,8 +68,10 @@ def _assert_may_act_on(caller_role: str, caller_id: str, target: dict, action: s
 async def list_users(current_user: dict = Depends(require_role("admin"))):
     """List every user profile — admin+ only."""
     try:
-        result = supabase.table(TABLE).select("*").order("created_at", desc=False).execute()
-        return result.data or []
+        return await run_in_threadpool(lambda: fetch_all_pages(
+            lambda start, end: supabase.table(TABLE).select("*")
+            .order("created_at", desc=False).order("id", desc=False).range(start, end).execute()
+        ))
     except Exception as e:
         logger.error(f"Error listing users: {e}")
         raise HTTPException(status_code=500, detail=f"Error listing users: {e}")

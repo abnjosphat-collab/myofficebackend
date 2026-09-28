@@ -2,12 +2,13 @@
 # backend/app/routers/pachedu.py
 
 from fastapi import APIRouter, HTTPException, Query, Depends
+from starlette.concurrency import run_in_threadpool
 from pydantic import BaseModel, Field, validator
 from typing import Optional, List, Dict, Any
 from app.supabase_client import supabase, rows, one_row
 from app.auth import get_current_user, require_role
 from app.aggregation import count_by
-from app.db_helpers import get_or_404, apply_date_range, or_ilike, distinct_suggestions, status_choice_validator
+from app.db_helpers import fetch_all_pages, get_or_404, apply_date_range, or_ilike, distinct_suggestions, status_choice_validator
 import logging
 from datetime import datetime
 import uuid
@@ -140,10 +141,10 @@ async def get_pachedu_reports(
         query = apply_date_range(query, "date", from_date, to_date)
 
         # Order by most recent
-        query = query.order("created_at", desc=True)
+        query = query.order("created_at", desc=True).order("id", desc=True)
         query = query.range(offset, offset + limit - 1)
-        
-        response = query.execute()
+
+        response = await run_in_threadpool(query.execute)
 
         db_reports = rows(response)
         result = [map_db_pachedu_to_camel(report) for report in db_reports]
@@ -165,8 +166,8 @@ async def get_pachedu_stats():
         logger.info("Fetching Pachedu stats...")
         
         # Get all reports
-        reports_response = supabase.table("pachedu_reports").select("*").execute()
-        reports = rows(reports_response)
+        query = supabase.table("pachedu_reports").select("*").order("id")
+        reports = await run_in_threadpool(lambda: fetch_all_pages(lambda start,end:query.range(start,end).execute(),extract_rows=rows))
         
         # Calculate stats
         total = len(reports)

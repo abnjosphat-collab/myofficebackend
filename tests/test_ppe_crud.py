@@ -26,6 +26,7 @@ class _FakeQuery:
         self.state = state
         self._filters = []
         self._order = None
+        self._range = None
         self._mode = "select"
         self._payload = None
 
@@ -39,6 +40,10 @@ class _FakeQuery:
 
     def order(self, col, desc=False):
         self._order = (col, desc)
+        return self
+
+    def range(self, start, end):
+        self._range = (start, end)
         return self
 
     def insert(self, data):
@@ -74,6 +79,9 @@ class _FakeQuery:
             if self._order:
                 col, desc = self._order
                 matches = sorted(matches, key=lambda r: r.get(col) or "", reverse=desc)
+            if self._range:
+                start, end = self._range
+                matches = matches[start:end + 1]
             return _Resp(matches)
         if self._mode == "update":
             for r in matches:
@@ -191,6 +199,17 @@ async def test_list_value_all_is_not_filtered(patch_supabase):
     ])
     result = await get_ppe_records(status="all", ppe_type=None, department=None, location=None, employee_id=None)
     assert len(result) == 2
+
+
+async def test_list_pages_past_supabase_default_limit(patch_supabase):
+    patch_supabase([
+        {"id": index, "status": "active", "ppe_type": "helmet", "department": "Ops",
+         "location": "A", "employee_id": f"E{index}"}
+        for index in range(1, 1002)
+    ])
+    result = await get_ppe_records(status=None, ppe_type=None, department=None, location=None, employee_id=None)
+    assert len(result) == 1001
+    assert {row["id"] for row in result} == set(range(1, 1002))
 
 
 # ─── create_ppe_record ───────────────────────────────────────────────────────────────

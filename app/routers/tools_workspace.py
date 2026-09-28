@@ -10,6 +10,7 @@ from fastapi import APIRouter, Depends, File, Form, Header, HTTPException, Uploa
 from openpyxl import load_workbook
 from pydantic import BaseModel, Field
 from app.supabase_client import rows, supabase
+from app.db_helpers import fetch_all_pages
 
 router = APIRouter()
 TABLE = {"accounts":"tools_workspace_accounts","sessions":"tools_workspace_sessions","employees":"tools_workspace_employees","tools":"tools_workspace_equipment","history":"tools_workspace_history","changes":"tools_workspace_changes","evidence":"tools_workspace_evidence","source_registers":"tools_workspace_source_registers","usage":"tools_workspace_usage","errors":"tools_workspace_errors","feedback":"tools_workspace_feedback","notification_reads":"tools_workspace_notification_reads"}
@@ -28,8 +29,10 @@ def _all(kind: str, newest=False):
     if _test_mode:
         data=[dict(row) for row in _memory[kind]]; return list(reversed(data)) if newest else data
     query=supabase.table(TABLE[kind]).select("*")
-    if newest: query=query.order({"history":"event_at","source_registers":"uploaded_at"}.get(kind,"created_at"),desc=True)
-    return rows(query.execute())
+    order_column={"accounts":"created_at","sessions":"created_at","employees":"employee_number","tools":"register_number","history":"event_at","changes":"created_at","evidence":"uploaded_at","source_registers":"uploaded_at","usage":"created_at","errors":"created_at","feedback":"created_at"}.get(kind,"created_at")
+    query=query.order(order_column,desc=newest)
+    if kind!="notification_reads": query=query.order("id",desc=newest)
+    return fetch_all_pages(lambda start,end:query.range(start,end).execute(),extract_rows=rows)
 def _find(kind: str, field: str, value: Any):
     if _test_mode: return next((dict(row) for row in _memory[kind] if row.get(field)==value),None)
     data=rows(supabase.table(TABLE[kind]).select("*").eq(field,value).limit(1).execute()); return data[0] if data else None

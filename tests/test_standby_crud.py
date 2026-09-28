@@ -38,6 +38,9 @@ class _FakeQuery:
         self._filters.append((col, val))
         return self
     def order(self, *a, **k): return self
+    def range(self, start, end):
+        self._range = (start, end)
+        return self
     def insert(self, data):
         self._op = "insert"
         self._payload = data
@@ -55,7 +58,11 @@ class _FakeQuery:
             return _Resp(table_cfg.get("insert_return", [{"id": 1, **(self._payload or {})}]))
         if self._op == "delete":
             return _Resp(table_cfg.get("delete_return", []))
-        return _Resp(table_cfg.get("select_return", []))
+        data = table_cfg.get("select_return", [])
+        if getattr(self, "_range", None) and isinstance(data, list):
+            start, end = self._range
+            data = data[start:end + 1]
+        return _Resp(data)
 
 
 class _FakeSupabase:
@@ -102,6 +109,13 @@ async def test_list_assignments_empty_result_returns_empty_list_not_none(patch_s
     patch_supabase({"standby_schedules": {"select_return": None}})
     result = await list_assignments(active_only=False)
     assert result == []
+
+
+async def test_list_assignments_pages_past_postgrest_limit(patch_supabase):
+    records = [{"id": index, "created_at": f"2026-09-28T00:{index % 60:02d}:00Z"} for index in range(1001)]
+    patch_supabase({"standby_schedules": {"select_return": records}})
+    result = await list_assignments(active_only=False)
+    assert len(result) == 1001
 
 
 async def test_list_assignments_raises_500_on_db_failure(monkeypatch):

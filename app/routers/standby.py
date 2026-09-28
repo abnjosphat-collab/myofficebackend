@@ -43,12 +43,13 @@
 # ─────────────────────────────────────────────────────────────────────────────
 
 from fastapi import APIRouter, HTTPException, Depends
+from starlette.concurrency import run_in_threadpool
 from pydantic import BaseModel, Field, validator
 from typing import Optional, List
 from datetime import date, datetime
 from app.supabase_client import supabase
 from app.auth import get_current_user, require_role
-from app.db_helpers import get_or_404
+from app.db_helpers import fetch_all_pages, get_or_404
 import logging
 
 logger = logging.getLogger(__name__)
@@ -143,7 +144,7 @@ class ShiftRosterResponse(BaseModel):
 # ─── Helpers ──────────────────────────────────────────────────────────────────
 
 def _rows(response) -> list:
-    return response.data if hasattr(response, "data") else response or []
+    return (response.data if hasattr(response, "data") else response) or []
 
 
 def _require_exists(assignment_id: int) -> None:
@@ -160,8 +161,8 @@ async def list_assignments(active_only: bool = False):
         q = supabase.table(TABLE).select("*")
         if active_only:
             q = q.eq("is_active", True)
-        rows = _rows(q.order("created_at", desc=True).execute())
-        return rows or []
+        q = q.order("created_at", desc=True).order("id", desc=True)
+        return await run_in_threadpool(lambda: fetch_all_pages(lambda start,end:q.range(start,end).execute(),extract_rows=_rows))
     except Exception as e:
         logger.error(f"list_assignments error: {e}")
         raise HTTPException(status_code=500, detail=str(e))

@@ -1,12 +1,13 @@
 # app/routers/documents.py — AMS Document Hub (CRUD + Supabase Storage)
 from fastapi import APIRouter, HTTPException, UploadFile, File, Form, Depends
+from starlette.concurrency import run_in_threadpool
 from pydantic import BaseModel
 from typing import Optional
 from datetime import datetime
 from app.supabase_client import supabase
 from app.auth import get_current_user, require_role
 from app.uploads import read_and_validate_upload, DOCUMENT_EXTS
-from app.db_helpers import or_ilike
+from app.db_helpers import fetch_all_pages, or_ilike
 import logging, uuid as uuid_module
 
 logger = logging.getLogger(__name__)
@@ -33,13 +34,11 @@ def _file_type(filename: str) -> str:
 @router.get("/", dependencies=[Depends(get_current_user)])
 async def list_documents(category_id: str, folder_id: Optional[str] = None):
     try:
-        q = supabase.table("documents").select("*").eq("category_id", category_id)
-        if folder_id:
-            q = q.eq("folder_id", folder_id)
-        else:
-            q = q.is_("folder_id", "null")
-        r = q.order("created_at", desc=True).execute()
-        return r.data or []
+        def _page(start: int, end: int):
+            query = supabase.table("documents").select("*").eq("category_id", category_id)
+            query = query.eq("folder_id", folder_id) if folder_id else query.is_("folder_id", "null")
+            return query.order("created_at", desc=True).order("id", desc=True).range(start, end).execute()
+        return await run_in_threadpool(lambda: fetch_all_pages(_page))
     except Exception as e:
         logger.error("list_documents error: %s", e)
         raise HTTPException(500, str(e))
@@ -79,12 +78,10 @@ class FolderUpdate(BaseModel):
 @router.get("/folders", dependencies=[Depends(get_current_user)])
 async def list_folders(category_id: str):
     try:
-        r = (supabase.table("document_folders")
-             .select("*")
-             .eq("category_id", category_id)
-             .order("name")
-             .execute())
-        return r.data or []
+        return await run_in_threadpool(lambda: fetch_all_pages(
+            lambda start, end: supabase.table("document_folders").select("*")
+            .eq("category_id", category_id).order("name").order("id").range(start, end).execute()
+        ))
     except Exception as e:
         logger.error("list_folders error: %s", e)
         raise HTTPException(500, str(e))

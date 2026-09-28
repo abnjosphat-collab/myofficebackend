@@ -46,6 +46,9 @@ class _FakeQuery:
         return self
     def order(self, *a, **k): return self
     def limit(self, *a, **k): return self
+    def range(self, start, end):
+        self._range = (start, end)
+        return self
     def maybe_single(self):
         self._single = True
         return self
@@ -157,6 +160,16 @@ async def test_list_documents_with_folder_filters_by_folder_id(patch_supabase):
     await list_documents(category_id="cat1", folder_id="Reports")
     call = state["calls"][0]
     assert ("folder_id", "Reports") in call["filters"]
+
+
+async def test_list_documents_pages_past_postgrest_default(patch_supabase):
+    batches = [[{"id": f"d{i}"} for i in range(1000)], [{"id": "d1000"}]]
+    def page(op, filters, payload):
+        return batches.pop(0)
+    patch_supabase({"documents": page})
+    result = await list_documents(category_id="cat1", folder_id=None)
+    assert len(result) == 1001
+    assert result[-1]["id"] == "d1000"
 
 
 async def test_list_documents_raises_500_on_error(patch_supabase):

@@ -18,9 +18,14 @@ class _Resp:
 class _FakeTable:
     def __init__(self, response_data):
         self._response = response_data
+        self._range = (0, 999)
 
     def select(self, *a, **k): return self
-    def execute(self): return _Resp(self._response)
+    def order(self, *a, **k): return self
+    def range(self, start, end): self._range = (start, end); return self
+    def execute(self):
+        start, end = self._range
+        return _Resp(self._response[start:end + 1])
 
 
 class _FakeSupabase:
@@ -72,6 +77,13 @@ async def test_missing_impacts_field_is_zero(patch_supabase):
     stats = await get_pachedu_stats()
     assert stats["totalImpacts"] == 0
     assert stats["totalChecklist"] == 0
+
+
+async def test_stats_include_reports_past_postgrest_first_page(patch_supabase):
+    patch_supabase(reports=[{"status":"draft"} for _ in range(1001)])
+    stats = await get_pachedu_stats()
+    assert stats["total"] == 1001
+    assert stats["draftCount"] == 1001
 
 
 async def test_section_behaviour_department_and_status_tallies(patch_supabase):

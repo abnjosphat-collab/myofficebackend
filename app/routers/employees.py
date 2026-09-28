@@ -7,7 +7,7 @@ from datetime import date
 from app.supabase_client import supabase
 from app.auth import get_current_user, require_role
 from app.cache import cached, invalidate_namespace
-from app.db_helpers import get_or_404
+from app.db_helpers import fetch_all_pages, get_or_404
 
 router = APIRouter()
 
@@ -222,8 +222,10 @@ async def bulk_normalize_employees(body: BulkNormalizeRequest):
 async def get_employees():
     """Return all employees."""
     try:
-        rows = _data(await run_in_threadpool(
-            lambda: supabase.table("employees").select("*").execute()
+        rows = await run_in_threadpool(lambda: fetch_all_pages(
+            lambda start, end: supabase.table("employees").select("*")
+            .order("employee_id", desc=False).order("id", desc=False)
+            .range(start, end).execute()
         ))
         return [_dates_from_db(e) for e in rows] if rows else []
     except Exception as e:

@@ -7,8 +7,46 @@ from main import app
 client = TestClient(app)
 
 
+class PagedResult:
+    def __init__(self, data):
+        self.data = data
+
+
+class PagedQuery:
+    def __init__(self, data):
+        self.data = data
+        self.window = (0, 999)
+        self.orders = []
+
+    def select(self, *_args): return self
+    def order(self, column, desc=False): self.orders.append((column, desc)); return self
+    def range(self, start, end): self.window = (start, end); return self
+    def execute(self):
+        start, end = self.window
+        return PagedResult(self.data[start:end + 1])
+
+
+class PagedSupabase:
+    def __init__(self, data):
+        self.query = PagedQuery(data)
+
+    def table(self, _name): return self.query
+
+
 def setup_function():
     tools_workspace._reset_for_tests()
+
+
+def test_all_pages_large_registers_with_stable_ordering(monkeypatch):
+    fake = PagedSupabase([{"id":str(index),"register_number":f"T-{index:04d}"} for index in range(1001)])
+    monkeypatch.setattr(tools_workspace, "_test_mode", False)
+    monkeypatch.setattr(tools_workspace, "supabase", fake)
+
+    result = tools_workspace._all("tools")
+
+    assert len(result) == 1001
+    assert fake.query.orders == [("register_number", False), ("id", False)]
+    assert fake.query.window == (1000, 1999)
 
 
 def register(username: str, can_issue: bool = False):

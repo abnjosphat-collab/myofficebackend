@@ -1,4 +1,5 @@
 from fastapi import APIRouter, HTTPException, Depends
+from starlette.concurrency import run_in_threadpool
 from pydantic import BaseModel, Field
 from typing import Optional
 from datetime import datetime, date
@@ -6,7 +7,7 @@ from app.supabase_client import supabase, rows, one_row
 from app.auth import get_current_user, require_role
 from app.serialization import convert_dates_to_iso
 from app.aggregation import count_by
-from app.db_helpers import get_or_404
+from app.db_helpers import fetch_all_pages, get_or_404
 import logging
 import json
 
@@ -91,10 +92,10 @@ async def get_ppe_records(
         if employee_id and employee_id != 'all':
             query = query.eq("employee_id", employee_id)
             
-        response = query.order("created_at", desc=True).execute()
-
-        # Convert dates to ISO format for JSON serialization
-        records = rows(response)
+        query = query.order("created_at", desc=True).order("id", desc=True)
+        records = await run_in_threadpool(
+            lambda: fetch_all_pages(lambda start, end: query.range(start, end).execute(), extract_rows=rows)
+        )
         for record in records:
             convert_dates_to_iso(record)
 
@@ -195,10 +196,10 @@ async def delete_ppe_record(record_id: int, current_user: dict = Depends(require
 @router.get("/employee/{employee_id}", dependencies=[Depends(get_current_user)])
 async def get_employee_ppe_records(employee_id: str):
     try:
-        response = supabase.table("ppe_records").select("*").eq("employee_id", employee_id).order("issue_date", desc=True).execute()
-
-        # Convert dates to ISO format for JSON serialization
-        records = rows(response)
+        query = supabase.table("ppe_records").select("*").eq("employee_id", employee_id).order("issue_date", desc=True).order("id", desc=True)
+        records = await run_in_threadpool(
+            lambda: fetch_all_pages(lambda start, end: query.range(start, end).execute(), extract_rows=rows)
+        )
         for record in records:
             convert_dates_to_iso(record)
             
@@ -212,23 +213,26 @@ async def get_employee_ppe_records(employee_id: str):
 @router.get("/stats/summary", dependencies=[Depends(get_current_user)])
 async def get_ppe_stats():
     try:
-        # Get total records count
-        records_response = supabase.table("ppe_records").select("id", count="exact").execute()
-        total_records = len(rows(records_response))
-
-        # Get records by status + condition (one query — both come off the same rows)
-        status_condition_response = supabase.table("ppe_records").select("status, condition").execute()
-        status_condition_rows = rows(status_condition_response)
-        status_counts = count_by(status_condition_rows, 'status')
-        condition_counts = count_by(status_condition_rows, 'condition')
+        records_all = await run_in_threadpool(
+            lambda: fetch_all_pages(
+                lambda start, end: supabase.table("ppe_records")
+                    .select("id, employee_id, status, condition, expiry_date")
+                    .order("id")
+                    .range(start, end)
+                    .execute(),
+                extract_rows=rows,
+            )
+        )
+        total_records = len(records_all)
+        status_counts = count_by(records_all, 'status')
+        condition_counts = count_by(records_all, 'condition')
         
         # Count expiring soon (within 30 days) and expired
         today = date.today()
-        records_all = supabase.table("ppe_records").select("expiry_date, status").execute()
         expiring_soon = 0
         expired = 0
 
-        for record in rows(records_all):
+        for record in records_all:
             expiry_date_str = record.get('expiry_date')
             status = record.get('status', 'active')
 
@@ -245,9 +249,7 @@ async def get_ppe_stats():
                     # Handle invalid date formats
                     continue
 
-        # Get unique employees count
-        employees_response = supabase.table("ppe_records").select("employee_id").execute()
-        unique_employees = len(set(record['employee_id'] for record in rows(employees_response)))
+        unique_employees = len({record.get('employee_id') for record in records_all if record.get('employee_id')})
         
         return {
             "total_records": total_records,

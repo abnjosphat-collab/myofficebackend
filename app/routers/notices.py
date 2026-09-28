@@ -22,13 +22,14 @@ generic-base equivalent for the former; the latter is an aggregation) and stay
 hand-added alongside the base, same pattern as contractors.py.
 """
 from fastapi import HTTPException, Depends, UploadFile, File
+from starlette.concurrency import run_in_threadpool
 from pydantic import BaseModel
 from typing import Optional, List
 from datetime import datetime, date as DateType
-from app.supabase_client import supabase, rows
+from app.supabase_client import supabase
 from app.auth import get_current_user
 from app.aggregation import count_by
-from app.db_helpers import get_or_404
+from app.db_helpers import fetch_all_pages, get_or_404
 from app.crud_router import CrudRouter
 from app.uploads import read_and_validate_upload, NOTICE_ATTACHMENT_EXTS
 import logging, uuid as uuid_module
@@ -166,8 +167,10 @@ async def get_notice(notice_id: str):
 @router.get("/stats/summary", dependencies=[Depends(get_current_user)])
 async def get_stats():
     try:
-        response = supabase.table("notices").select("*").execute()
-        notices = rows(response)
+        notices = await run_in_threadpool(lambda: fetch_all_pages(
+            lambda start, end: supabase.table("notices").select("*")
+            .order("id", desc=False).range(start, end).execute()
+        ))
 
         stats = {
             "total_notices": len(notices),

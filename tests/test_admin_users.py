@@ -43,13 +43,21 @@ class _FakeTable:
     def order(self, *a, **k):
         return self
 
+    def range(self, start, end):
+        self._range = (start, end)
+        return self
+
     def execute(self):
         if self.state["mode"] == "select" and self.state.get("select_raises"):
             raise Exception(self.state["select_raises"])
         if self.state["mode"] == "update" and self.state.get("update_raises"):
             raise Exception(self.state["update_raises"])
         if self.state["mode"] == "select":
-            return _SelectResp(self.state["profiles"].get(self.name, []))
+            rows = self.state["profiles"].get(self.name, [])
+            if hasattr(self, "_range"):
+                start, end = self._range
+                rows = rows[start:end + 1]
+            return _SelectResp(rows)
         if self.state.get("update_returns_empty"):
             return _SelectResp([])
         row = dict((self.state["profiles"].get(self.name) or [{}])[0])
@@ -131,6 +139,13 @@ async def test_list_users_empty_returns_empty_list(monkeypatch):
     _patch(monkeypatch, profiles={})
     result = await admin.list_users(current_user={"role": "admin", "user_id": "u-9"})
     assert result == []
+
+
+async def test_list_users_pages_past_postgrest_default(monkeypatch):
+    profiles = [_profile(id=f"u-{i}") for i in range(1001)]
+    _patch(monkeypatch, profiles={"user_profiles": profiles})
+    result = await admin.list_users(current_user={"role": "admin", "user_id": "u-x"})
+    assert len(result) == 1001
 
 
 async def test_list_users_raises_500_on_error(monkeypatch):

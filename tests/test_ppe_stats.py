@@ -19,9 +19,18 @@ class _Resp:
 class _FakeTable:
     def __init__(self, response_data):
         self._response = response_data
+        self._range = None
 
     def select(self, *a, **k): return self
-    def execute(self): return _Resp(self._response)
+    def order(self, *a, **k): return self
+    def range(self, start, end):
+        self._range = (start, end)
+        return self
+    def execute(self):
+        if not self._range:
+            return _Resp(self._response)
+        start, end = self._range
+        return _Resp(self._response[start:end + 1])
 
 
 class _FakeSupabase:
@@ -111,3 +120,15 @@ async def test_status_and_condition_breakdowns_and_unique_employees(patch_supaba
     assert stats["unique_employees"] == 2
     assert stats["status_breakdown"] == {"active": 2, "replaced": 1}
     assert stats["condition_breakdown"] == {"good": 2, "worn": 1}
+
+
+async def test_stats_pages_past_supabase_default_limit(patch_supabase):
+    records = [
+        {"id": index, "employee_id": f"E{index}", "status": "active", "condition": "good", "expiry_date": None}
+        for index in range(1, 1002)
+    ]
+    patch_supabase(records)
+    stats = await get_ppe_stats()
+    assert stats["total_records"] == 1001
+    assert stats["unique_employees"] == 1001
+    assert stats["status_breakdown"] == {"active": 1001}

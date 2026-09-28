@@ -69,6 +69,8 @@ class _FakeQuery:
     def ilike(self, col, val): self._filters.append(("ilike", col, val)); return self
     def or_(self, expr): self._filters.append(("or_", expr)); return self
     def limit(self, n): return self
+    def order(self, *a, **k): return self
+    def range(self, start, end): self._range = (start, end); return self
 
     def insert(self, data):
         self._op = "insert"; self._payload = data; return self
@@ -161,6 +163,15 @@ async def test_get_employees_converts_dates_on_every_row(patch_supabase):
 async def test_get_employees_empty_rows_is_empty_list(patch_supabase):
     patch_supabase([[]])
     assert await get_employees() == []
+
+
+async def test_get_employees_pages_past_postgrest_default(patch_supabase):
+    first = [{"id": i, "employee_id": f"E{i}", "date_of_engagement": None} for i in range(1000)]
+    last = [{"id": 1000, "employee_id": "E1000", "date_of_engagement": None}]
+    patch_supabase([first, last])
+    result = await get_employees()
+    assert len(result) == 1001
+    assert result[-1]["id"] == 1000
 
 
 async def test_get_employees_db_failure_is_500(patch_supabase):
