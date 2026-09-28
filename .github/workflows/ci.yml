@@ -35,17 +35,10 @@ jobs:
           pip install -r requirements.txt -r requirements-dev.txt
 
       - name: Run tests
-        # --cov is report-only for now (term-missing shows exactly which lines aren't
-        # hit) — no --cov-fail-under yet. The point right now is making coverage
-        # visible, not gating on it; a threshold can follow once there's a real
-        # baseline to set it against instead of guessing one.
-        run: pytest -q --cov=app --cov-report=term-missing
+        run: pytest -q --cov=app --cov-report=term-missing --cov-fail-under=90
 
-      - name: Type-check (report-only)
-        # Baseline as of 2026-08-26: ~2084 errors — the codebase has never been
-        # type-checked before now. continue-on-error means this can never fail the
-        # build; it exists to make the error count visible in every run instead of
-        # guessed, same rationale as --cov above. Tighten to blocking once the count
-        # is small enough to be a realistic bar, not before.
-        run: pyright app
-        continue-on-error: true
+      - name: Type-check regression gate
+        run: python scripts/check_pyright_baseline.py
+
+      - name: Audit production dependencies
+        run: pip-audit -r requirements.txt --progress-spinner off

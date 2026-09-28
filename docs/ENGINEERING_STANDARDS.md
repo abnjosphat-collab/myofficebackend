@@ -91,10 +91,14 @@ Two mocked patterns:
 `asyncio_mode = auto` is set in `pytest.ini`, so `async def test_*` needs no
 decorator.
 
-## 4. Coverage is visible now — use it, don't chase a number
+## 4. Coverage and typing are regression-gated
 
-`pytest -q --cov=app --cov-report=term-missing` (also what CI runs) shows
-exactly which lines in which router aren't hit by anything. It's report-only,
-not a gate — there's no threshold to hit. When you're touching a router
-anyway, glance at its coverage line and add a test for the path you just
-changed if there's a cheap one; don't go chasing unrelated files' numbers.
+CI runs `pytest -q --cov=app --cov-report=term-missing --cov-fail-under=90`.
+The floor protects the established whole-application baseline; it is not a
+reason to add low-value tests or avoid testing a changed failure path.
+
+Pyright still has inherited debt, so `scripts/check_pyright_baseline.py` is a
+blocking ratchet rather than a false clean claim. It fails when the error count
+exceeds the recorded maximum and asks maintainers to lower that maximum when a
+change improves it. New type errors are therefore blocked while the existing
+debt is paid down incrementally.

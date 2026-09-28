@@ -16,7 +16,7 @@ import json
 import logging
 import time
 from functools import wraps
-from typing import Any, Optional
+from typing import Any, Awaitable, Optional, cast
 
 from app.redis_client import redis_client
 
@@ -86,7 +86,7 @@ async def cache_set(key: str, value: Any, ttl: int, namespace: str) -> None:
         return
     try:
         await redis_client.set(key, json.dumps(value, default=str), ex=ttl)
-        await redis_client.sadd(_namespace_keyset(namespace), key)
+        await cast(Awaitable[int], redis_client.sadd(_namespace_keyset(namespace), key))
     except Exception as e:
         _mark_redis_down(f"cache_set({key})", e)
 
@@ -102,7 +102,7 @@ async def invalidate_namespace(namespace: str) -> None:
     (now short) connect timeout here buys correctness cheaply."""
     keyset = _namespace_keyset(namespace)
     try:
-        keys = await redis_client.smembers(keyset)
+        keys = await cast(Awaitable[set[str]], redis_client.smembers(keyset))
         if keys:
             await redis_client.delete(*keys)
         await redis_client.delete(keyset)

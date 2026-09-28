@@ -107,7 +107,11 @@ def test_read_endpoints_stay_open(path):
     assert resp.status_code != 401, f"GET {path} unexpectedly required auth ({resp.status_code})"
 
 
-def test_invalid_token_is_rejected():
+def test_invalid_token_is_rejected(monkeypatch):
+    class InvalidTokenResponse:
+        user = None
+
+    monkeypatch.setattr("app.auth.supabase.auth.get_user", lambda _token: InvalidTokenResponse())
     resp = client.post("/api/employees", headers={"Authorization": "Bearer not-a-real-token"}, json={})
     assert resp.status_code == 401
 

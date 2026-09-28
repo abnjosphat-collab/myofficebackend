@@ -7,3 +7,4 @@ coverage==7.15.4
 iniconfig==2.3.0
 pluggy==1.6.0
 pyright==1.1.406
+pip-audit==2.10.1

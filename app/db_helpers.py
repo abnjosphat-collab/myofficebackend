@@ -26,6 +26,10 @@ POSTGREST_PAGE_SIZE = 1000
 # what actually runs.
 
 
+def _response_rows(response: Any) -> List[dict]:
+    return getattr(response, "data", response) or []
+
+
 def get_or_404(db, table: str, id_value: Any, *, id_col: str = "id", detail: str = "Not found") -> dict:
     """Fetch one row by id, or raise a 404. Replaces the
     `select().eq("id", x).execute(); if not r.data: raise HTTPException(404, ...)`
@@ -40,7 +44,7 @@ def fetch_all_pages(
     fetch_range: Callable[[int, int], T],
     *,
     page_size: int = POSTGREST_PAGE_SIZE,
-    extract_rows: Callable[[T], List[dict]] = lambda r: (r.data if hasattr(r, "data") else r) or [],
+    extract_rows: Callable[[T], List[dict]] = _response_rows,
 ) -> List[dict]:
     """Page through `.range(start, end)` until a short page — avoids silent payroll truncation."""
     out: List[dict] = []

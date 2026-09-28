@@ -53,6 +53,8 @@ async def get_current_user(authorization: Optional[str] = Header(None)) -> dict:
         # supabase-py is synchronous. Keep its network call off the event loop so
         # concurrent authenticated reads cannot queue behind a slow Auth request.
         resp = await run_in_threadpool(supabase.auth.get_user, token)
+        if resp is None:
+            raise HTTPException(status_code=401, detail='Invalid or expired session. Please sign in again.')
         user = resp.user
         if not user:
             raise HTTPException(status_code=401, detail='Invalid or expired session. Please sign in again.')
