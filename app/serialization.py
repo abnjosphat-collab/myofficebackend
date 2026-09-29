@@ -1,13 +1,18 @@
-# app/serialization.py — shared helpers for shaping Supabase records into
-# JSON-serializable dicts. Was copy-pasted byte-for-byte into maintenance.py,
-# ppe.py, and spares.py; consolidated here so a fix only has to be made once.
+"""Shared helpers for converting Supabase records to JSON-safe dictionaries."""
 
 import json
 from datetime import date, datetime
 
 
 def convert_dates_to_iso(record: dict) -> dict:
-    """Convert date/datetime values in a record to ISO format strings for JSON serialization."""
+    """Convert top-level date values to ISO strings in place.
+
+    Args:
+        record: Record whose top-level values may contain dates.
+
+    Returns:
+        The same dictionary after conversion.
+    """
     if isinstance(record, dict):
         for key, value in record.items():
             if isinstance(value, (date, datetime)):

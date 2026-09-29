@@ -78,3 +78,14 @@ version:
 ```
 
 Tests mock Supabase/Redis — no live database, no network, no server needed.
+
+## Documentation
+
+Start with [`docs/README.md`](docs/README.md). FastAPI owns the runtime HTTP
+contract at `/openapi.json`, `/docs`, and `/redoc`; Python public contracts use
+PEP 257 Google-style docstrings and Sphinx autodoc.
+
+```bash
+pip install -r requirements-docs.txt
+python -m sphinx -W --keep-going -b html docs docs/_build/html
+```

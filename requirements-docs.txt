@@ -1,0 +1,4 @@
+# Documentation-only dependencies. Not needed in production.
+Sphinx==8.2.3
+myst-parser==4.0.1
+

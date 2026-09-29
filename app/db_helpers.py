@@ -1,11 +1,9 @@
-# app/db_helpers.py — shared Supabase query helpers. Each of these was hand-
-# rolled independently (byte-identical or near-identical) across many routers;
-# consolidated here so a fix or behavior change only has to be made once.
-#
-# get_or_404 / apply_date_range / or_ilike / distinct_suggestions are higher-
-# order in spirit even though none literally takes a function: each replaces
-# a hand-written loop/query-building block with a call parameterized by the
-# table/column/value that varied per call site, the same idea as count_by.
+"""Shared Supabase query helpers used by MyOffice routers.
+
+The helpers centralize pagination, lookup, date-filter, and suggestion behavior
+that was previously repeated across routers. Callers pass their database client
+explicitly so route tests can continue to inject a fake Supabase client.
+"""
 
 from typing import Any, Callable, List, Optional, TypeVar
 
@@ -31,9 +29,21 @@ def _response_rows(response: Any) -> List[dict]:
 
 
 def get_or_404(db, table: str, id_value: Any, *, id_col: str = "id", detail: str = "Not found") -> dict:
-    """Fetch one row by id, or raise a 404. Replaces the
-    `select().eq("id", x).execute(); if not r.data: raise HTTPException(404, ...)`
-    shape that was repeated ~30 times across 17 routers."""
+    """Fetch one row by identifier.
+
+    Args:
+        db: Supabase-compatible client.
+        table: Table to query.
+        id_value: Identifier value to match.
+        id_col: Identifier column name.
+        detail: Client-facing message when no record exists.
+
+    Returns:
+        The matching database record.
+
+    Raises:
+        HTTPException: If no matching record exists.
+    """
     r = db.table(table).select("*").eq(id_col, id_value).execute()
     if not r.data:
         raise HTTPException(status_code=404, detail=detail)
@@ -46,7 +56,16 @@ def fetch_all_pages(
     page_size: int = POSTGREST_PAGE_SIZE,
     extract_rows: Callable[[T], List[dict]] = _response_rows,
 ) -> List[dict]:
-    """Page through `.range(start, end)` until a short page — avoids silent payroll truncation."""
+    """Fetch every PostgREST page until a short page is returned.
+
+    Args:
+        fetch_range: Callable receiving inclusive start and end offsets.
+        page_size: Number of rows requested per page.
+        extract_rows: Adapter that extracts rows from the client response.
+
+    Returns:
+        All rows in source order without the default 1,000-row truncation.
+    """
     out: List[dict] = []
     start = 0
     while True:
