@@ -297,6 +297,24 @@ async def test_create_overtime_department_provided_is_passed_through(patch_supab
     assert payload["department"] == "Processing"
 
 
+async def test_create_overtime_defaults_cost_centre_to_engineering(patch_supabase):
+    fake = patch_supabase({"insert_return": [{"id": 1, "spares_used": "[]"}]})
+
+    await create_overtime(_create_input(), current_user=CURRENT_USER)
+
+    payload = next(c for c in fake.state["calls"] if c["op"] == "insert")["payload"]
+    assert payload["cost_centre"] == "Engineering"
+
+
+async def test_create_overtime_preserves_cross_department_cost_centre(patch_supabase):
+    fake = patch_supabase({"insert_return": [{"id": 1, "spares_used": "[]"}]})
+
+    await create_overtime(_create_input(cost_centre="  Projects  "), current_user=CURRENT_USER)
+
+    payload = next(c for c in fake.state["calls"] if c["op"] == "insert")["payload"]
+    assert payload["cost_centre"] == "Projects"
+
+
 async def test_create_overtime_encodes_spares_used(patch_supabase):
     fake = patch_supabase({"insert_return": [{"id": 1, "spares_used": "[]"}]})
     spares = [{"name": "Grease", "unit_price": 12.5}]
@@ -359,6 +377,21 @@ async def test_update_overtime_exclude_unset_not_none_filter(patch_supabase):
     # `reason` was explicitly set to None in the OvertimeUpdate constructor call above,
     # so it counts as "set" for exclude_unset and must appear in the payload.
     assert "reason" in payload and payload["reason"] is None
+
+
+async def test_update_overtime_normalizes_blank_cost_centre_to_engineering(patch_supabase):
+    fake = patch_supabase({
+        "select_return": [{"id": 7}],
+        "update_return": [{"id": 7, "cost_centre": "Engineering", "spares_used": "[]"}],
+    })
+
+    await update_overtime(
+        7, OvertimeUpdate(cost_centre="  "),
+        authorization=None, current_user=CURRENT_USER,
+    )
+
+    payload = next(c for c in fake.state["calls"] if c["op"] == "update")["payload"]
+    assert payload["cost_centre"] == "Engineering"
 
 
 async def test_update_overtime_encodes_spares_used_only_when_sent(patch_supabase):

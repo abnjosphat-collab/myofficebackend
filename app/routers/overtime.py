@@ -21,6 +21,9 @@ class OvertimeCreate(BaseModel):
     # so every existing record ended up with no department at all ("Unassigned" in the
     # By Section breakdown regardless of who actually worked it).
     department: Optional[str] = None
+    # Accounting destination for this overtime. This is deliberately separate from
+    # department, which remains the employee's home department.
+    cost_centre: str = "Engineering"
     overtime_type: str
     # 'planned' / 'unplanned' / None (unclassified) — the frontend owns the enum,
     # same loose-typing convention as overtime_type/status in this router.
@@ -54,6 +57,10 @@ class OvertimeCreate(BaseModel):
             raise ValueError('Provide either start_time and end_time, or hours directly.')
         return v
 
+    @validator('cost_centre')
+    def normalize_cost_centre(cls, v):
+        return (v or '').strip() or 'Engineering'
+
 class BulkStatusUpdate(BaseModel):
     ids: List[int] = Field(..., min_items=1)
     status: str
@@ -85,6 +92,7 @@ class OvertimeUpdate(BaseModel):
     employee_id: Optional[str] = None
     position: Optional[str] = None
     department: Optional[str] = None
+    cost_centre: Optional[str] = None
     overtime_type: Optional[str] = None
     planning_status: Optional[str] = None
     payout_method: Optional[str] = None
@@ -102,6 +110,10 @@ class OvertimeUpdate(BaseModel):
     approval_signature: Optional[str] = None
     rejected_by: Optional[str] = None
     rejected_at: Optional[str] = None
+
+    @validator('cost_centre')
+    def normalize_cost_centre(cls, v):
+        return (v or '').strip() or 'Engineering'
 
 # GET all overtime
 @router.get("", dependencies=[Depends(get_current_user)])
@@ -158,6 +170,7 @@ async def create_overtime(overtime: OvertimeCreate, current_user: dict = Depends
             "employee_id": overtime.employee_id,
             "position": overtime.position,
             "department": overtime.department,
+            "cost_centre": overtime.cost_centre,
             "overtime_type": overtime.overtime_type,
             "planning_status": overtime.planning_status,
             "payout_method": overtime.payout_method,

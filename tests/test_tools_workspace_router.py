@@ -65,6 +65,18 @@ def admin_and_issuer(department: str = "Engineering"):
     return admin, viewer
 
 
+def assign_viewer_department(admin_token: str, username: str, department: str = "Engineering"):
+    admin_auth = {"Authorization": f"Bearer {admin_token}"}
+    accounts = client.get("/api/tools-workspace/accounts", headers=admin_auth).json()
+    account = next(item for item in accounts if item["username"] == username)
+    response = client.patch(
+        f"/api/tools-workspace/accounts/{account['id']}",
+        headers=admin_auth,
+        json={"role": "viewer", "department": department},
+    )
+    assert response.status_code == 200
+
+
 def make_eligible_and_current(auth, employee, tool):
     competency = client.post(
         "/api/tools-workspace/competencies",
@@ -132,6 +144,7 @@ def test_admin_assigns_departmental_issuer_but_cannot_issue():
 def test_repaired_equipment_can_be_marked_ready_with_an_audit_event():
     admin, issuer = admin_and_issuer("Engineering")
     viewer = register("viewer")
+    assign_viewer_department(admin, "viewer")
     admin_auth = {"Authorization": f"Bearer {admin}"}
     issuer_auth = {"Authorization": f"Bearer {issuer}"}
     viewer_auth = {"Authorization": f"Bearer {viewer}"}
@@ -168,6 +181,48 @@ def test_viewer_cannot_create_register_records():
     admin_auth = {"Authorization": f"Bearer {admin}"}
     assert client.get("/api/tools-workspace/employees", headers=admin_auth).json() == []
     assert client.get("/api/tools-workspace/tools", headers=admin_auth).json() == []
+
+
+def test_departmental_viewer_sees_only_assigned_department_registers():
+    admin = register("scope-admin")
+    engineering_viewer = register("engineering-viewer")
+    admin_auth = {"Authorization": f"Bearer {admin}"}
+    viewer_auth = {"Authorization": f"Bearer {engineering_viewer}"}
+    accounts = client.get("/api/tools-workspace/accounts", headers=admin_auth).json()
+    target = next(account for account in accounts if account["username"] == "engineering-viewer")
+
+    updated = client.patch(
+        f"/api/tools-workspace/accounts/{target['id']}",
+        headers=admin_auth,
+        json={"role": "viewer", "department": "Engineering"},
+    )
+    assert updated.status_code == 200
+    assert updated.json()["department"] == "Engineering"
+
+    client.post("/api/tools-workspace/employees", headers=admin_auth, json={"employee_number": "E-ENG", "name": "Eng Person", "department": "Engineering"})
+    client.post("/api/tools-workspace/employees", headers=admin_auth, json={"employee_number": "E-MIN", "name": "Mining Person", "department": "Mining"})
+    client.post("/api/tools-workspace/tools", headers=admin_auth, json={"register_number": "ENG-1", "name": "Engineering drill", "storage_location": "Workshop", "department": "Engineering"})
+    client.post("/api/tools-workspace/tools", headers=admin_auth, json={"register_number": "MIN-1", "name": "Mining lamp", "storage_location": "Lamp room", "department": "Mining"})
+
+    tools = client.get("/api/tools-workspace/tools", headers=viewer_auth).json()
+    employees = client.get("/api/tools-workspace/employees", headers=viewer_auth).json()
+
+    assert [tool["register_number"] for tool in tools] == ["ENG-1"]
+    assert [employee["employee_number"] for employee in employees] == ["E-ENG"]
+
+
+def test_unassigned_viewer_cannot_read_every_department():
+    admin = register("unassigned-admin")
+    viewer = register("unassigned-viewer")
+    admin_auth = {"Authorization": f"Bearer {admin}"}
+    viewer_auth = {"Authorization": f"Bearer {viewer}"}
+
+    client.post("/api/tools-workspace/employees", headers=admin_auth, json={"employee_number": "E-PRIVATE", "name": "Private Person", "department": "Engineering"})
+    client.post("/api/tools-workspace/tools", headers=admin_auth, json={"register_number": "PRIVATE-1", "name": "Private tool", "storage_location": "Workshop", "department": "Engineering"})
+
+    assert client.get("/api/tools-workspace/tools", headers=viewer_auth).json() == []
+    assert client.get("/api/tools-workspace/employees", headers=viewer_auth).json() == []
+    assert client.get("/api/tools-workspace/history", headers=viewer_auth).json() == []
 
 
 def test_equipment_specifications_are_editable_and_audited():
@@ -261,6 +316,7 @@ def test_employee_register_preserves_supervisor_and_employee_number():
 def test_notification_reads_are_scoped_to_each_account():
     admin, issuer = admin_and_issuer()
     viewer = register("viewer", False)
+    assign_viewer_department(admin, "viewer")
     admin_auth = {"Authorization": f"Bearer {admin}"}
     viewer_auth = {"Authorization": f"Bearer {viewer}"}
     employee = client.post("/api/tools-workspace/employees", headers=admin_auth, json={"employee_number": "E-7", "name": "Tariro", "department": "Engineering"}).json()
@@ -373,6 +429,47 @@ def test_issue_requires_current_competency_checks_and_pre_use_confirmation():
     assert no_pre_use.status_code == 409
     assert issued.status_code == 200
     assert any(item["inspection_type"] == "pre_use" for item in client.get("/api/tools-workspace/compliance", headers=admin_auth).json()["inspections"])
+
+
+def test_quick_competency_update_preserves_certificate_and_expiry_details():
+    token = register("competency-admin")
+    auth = {"Authorization": f"Bearer {token}"}
+    employee = client.post("/api/tools-workspace/employees", headers=auth, json={"employee_number": "E-SAFE", "name": "Safe User", "department": "Engineering"}).json()
+    tool = client.post("/api/tools-workspace/tools", headers=auth, json={"register_number": "T-SAFE", "name": "Test meter", "storage_location": "Store"}).json()
+    detailed = client.post(
+        "/api/tools-workspace/competencies",
+        headers=auth,
+        json={
+            "employee_id": employee["id"],
+            "tool_id": tool["id"],
+            "trained": True,
+            "qualified": True,
+            "authorized": True,
+            "training_certificate_ref": "CERT-42",
+            "training_expires_at": "2035-01-01T00:00:00Z",
+            "qualification_ref": "TRADE-7",
+            "notes": "Assessed in the workshop",
+        },
+    )
+
+    quick_update = client.post(
+        "/api/tools-workspace/competencies",
+        headers=auth,
+        json={
+            "employee_id": employee["id"],
+            "tool_id": tool["id"],
+            "trained": True,
+            "qualified": True,
+            "authorized": False,
+        },
+    )
+
+    assert detailed.status_code == quick_update.status_code == 201
+    assert quick_update.json()["training_certificate_ref"] == "CERT-42"
+    assert quick_update.json()["training_expires_at"] == "2035-01-01T00:00:00Z"
+    assert quick_update.json()["qualification_ref"] == "TRADE-7"
+    assert quick_update.json()["notes"] == "Assessed in the workshop"
+    assert quick_update.json()["authorized"] is False
 
 
 def test_failed_quarterly_inspection_quarantines_tool_and_uses_red_code():

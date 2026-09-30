@@ -84,6 +84,12 @@ def _operator(account=Depends(_session)):
 def _ensure_managed_department(account:dict[str,Any],department:Optional[str]):
     if _account_role(account)=="issuer" and department!=account.get("department"):
         raise HTTPException(403,f"This Issuer may manage only {account.get('department')} records.")
+def _department_scope(account:dict[str,Any]):
+    return None if _account_role(account)=="admin" else (account.get("department") or "__unassigned__")
+def _visible_records(kind:str,account:dict[str,Any],newest=False):
+    department=_department_scope(account)
+    records=_all(kind,newest)
+    return records if department is None else [row for row in records if row.get("department")==department]
 
 def _tool_state(tool: dict[str,Any], actor: str) -> dict[str,Any]:
     state=dict(tool)
@@ -298,9 +304,9 @@ def update_account_role(account_id:str,body:AccountRoleUpdate,admin=Depends(_adm
     account=_find("accounts","id",account_id)
     if not account: raise HTTPException(404,"Account was not found.")
     department=(body.department or "").strip() or None
-    if body.role=="issuer" and not department: raise HTTPException(422,"Choose the department this Issuer may manage.")
+    if body.role in {"issuer","viewer"} and not department: raise HTTPException(422,"Choose the department this account may view or manage.")
     if account_id==admin["id"] and body.role!="admin": raise HTTPException(409,"Assign another administrator before changing your own administrator role.")
-    updated=_update("accounts",account_id,{"role":body.role,"department":department if body.role=="issuer" else None,"can_issue":body.role=="issuer","approval_roles":list(dict.fromkeys(body.approval_roles))})
+    updated=_update("accounts",account_id,{"role":body.role,"department":department if body.role!="admin" else None,"can_issue":body.role=="issuer","approval_roles":list(dict.fromkeys(body.approval_roles))})
     return _public(updated)
 
 @router.put("/auth/signing-pin")
@@ -314,7 +320,8 @@ def set_signing_pin(body:SigningPinInput,account=Depends(_session)):
 def notifications(account=Depends(_session)):
     read_rows=[row for row in _memory["notification_reads"] if row.get("account_id")==account["id"]] if _test_mode else rows(supabase.table(TABLE["notification_reads"]).select("alert_key").eq("account_id",account["id"]).execute())
     read={row["alert_key"] for row in read_rows}
-    alerts=[{**alert,"read":alert["key"] in read} for alert in _active_notifications()]
+    department=_department_scope(account)
+    alerts=[{**alert,"read":alert["key"] in read} for alert in _active_notifications() if department is None or alert.get("department")==department]
     return {"alerts":alerts,"unread_count":sum(not alert["read"] for alert in alerts)}
 
 @router.post("/notifications/read",status_code=202)
@@ -330,7 +337,7 @@ def read_notifications(body:NotificationReadInput,account=Depends(_session)):
     return {"read":accepted}
 
 @router.get("/employees")
-def list_employees(_=Depends(_session)): return _all("employees")
+def list_employees(account=Depends(_session)): return _visible_records("employees",account)
 @router.post("/employees",status_code=201)
 def create_employee(body:EmployeeInput,account=Depends(_operator)):
     _ensure_managed_department(account,body.department)
@@ -338,12 +345,13 @@ def create_employee(body:EmployeeInput,account=Depends(_operator)):
     if any(row["employee_number"].lower()==number.lower() for row in _all("employees")): raise HTTPException(409,"That employee number already exists.")
     return _insert("employees",{"id":str(uuid.uuid4()),**body.model_dump(),"employee_number":number,"active":True,"created_at":_now(),"created_by":account["name"]})
 @router.get("/tools")
-def list_tools(_=Depends(_session)):
-    tools=_all("tools")
-    evidence=_all("evidence")
-    employees=[employee for employee in _all("employees") if employee.get("active",True)]
+def list_tools(account=Depends(_session)):
+    tools=_visible_records("tools",account)
+    tool_ids={tool["id"] for tool in tools}
+    evidence=[item for item in _all("evidence") if item.get("tool_id") in tool_ids]
+    employees=[employee for employee in _visible_records("employees",account) if employee.get("active",True)]
     competencies=_all("competencies")
-    inspections=_all("inspections")
+    inspections=[item for item in _all("inspections") if item.get("tool_id") in tool_ids]
     by_tool:dict[str,list[dict[str,Any]]]={}
     for item in evidence:
         if item.get("removed_at"): continue
@@ -400,8 +408,15 @@ def mark_tool_ready(tool_id:str,body:MarkReadyInput,account=Depends(_operator)):
     return _apply_change(tool,after,"released",account["name"],f"Marked ready for use: {note}")["tool"]
 
 @router.get("/compliance")
-def compliance(_=Depends(_session)):
-    return {"competencies":_all("competencies",True),"inspections":_all("inspections",True),"incidents":_all("incidents",True),"gate_passes":[_gate_pass_view(item) for item in _all("gate_passes",True)]}
+def compliance(account=Depends(_session)):
+    tool_ids={tool["id"] for tool in _visible_records("tools",account)}
+    employee_ids={employee["id"] for employee in _visible_records("employees",account)}
+    department=_department_scope(account)
+    competencies=[row for row in _all("competencies",True) if department is None or row.get("tool_id") in tool_ids or row.get("employee_id") in employee_ids]
+    inspections=[row for row in _all("inspections",True) if department is None or row.get("tool_id") in tool_ids]
+    incidents=[row for row in _all("incidents",True) if department is None or row.get("tool_id") in tool_ids]
+    gate_passes=[_gate_pass_view(item) for item in _all("gate_passes",True) if department is None or item.get("department")==department]
+    return {"competencies":competencies,"inspections":inspections,"incidents":incidents,"gate_passes":gate_passes}
 
 @router.post("/competencies",status_code=201)
 def save_competency(body:CompetencyInput,account=Depends(_operator)):
@@ -415,7 +430,7 @@ def save_competency(body:CompetencyInput,account=Depends(_operator)):
     category=(body.category or "").strip() or None
     if not tool and not category: raise HTTPException(422,"Choose a specific tool or equipment category.")
     existing=next((row for row in _all("competencies") if row.get("employee_id")==employee["id"] and row.get("tool_id")==body.tool_id and (row.get("category") or "").lower()==(category or "").lower()),None)
-    values={**body.model_dump(),"category":category,"authorized_by":account["name"] if body.authorized else None,"updated_at":_now()}
+    values={**body.model_dump(exclude_unset=True),"category":category,"authorized_by":account["name"] if body.authorized else None,"updated_at":_now()}
     if existing: return _update("competencies",existing["id"],values)
     return _insert("competencies",{"id":str(uuid.uuid4()),**values,"created_by":account["name"],"created_at":_now()})
 
@@ -527,7 +542,11 @@ def gate_pass_pdf(gate_pass_id:str,_=Depends(_session)):
     document.build(story)
     return Response(output.getvalue(),media_type="application/pdf",headers={"Content-Disposition":f'attachment; filename="{data["pass_number"]}.pdf"'})
 @router.get("/history")
-def history(_=Depends(_session)): return _all("history",True)
+def history(account=Depends(_session)):
+    department=_department_scope(account)
+    if department is None: return _all("history",True)
+    tool_ids={tool["id"] for tool in _visible_records("tools",account)}
+    return [row for row in _all("history",True) if row.get("tool_id") in tool_ids]
 
 @router.post("/analytics/usage",status_code=202)
 def capture_usage(body:UsageInput,account=Depends(_session)): return _insert("usage",{"id":str(uuid.uuid4()),"event":body.event,"detail":body.detail,"account_id":account["id"],"account_name":account["name"],"created_at":_now()})
@@ -623,8 +642,8 @@ async def upload_evidence(tool_id:str,files:list[UploadFile]=File(...),account=D
     return saved
 
 @router.get("/source-registers")
-def list_source_registers(_=Depends(_session)):
-    saved=_all("source_registers",True)
+def list_source_registers(account=Depends(_session)):
+    saved=_visible_records("source_registers",account,True)
     if not _test_mode:
         for item in saved:
             try:

@@ -18,6 +18,8 @@
 - Evidence and audio feedback stay in private buckets and are returned with temporary signed URLs.
 - Original source registers stay in the private `tools-workspace-source-registers` bucket with permanent metadata and temporary signed download URLs.
 - Employee records include an employee number and optional supervisor name.
+- Employees are presented by department in the register. A tool-specific or category competency may mark an employee as trained, qualified and authorised; all three flags and any recorded expiry dates must be current before that employee can receive the equipment.
+- Saving a quick tool-specific eligibility decision updates only the supplied fields and preserves existing certificate references, qualification references, expiry dates and notes.
 - Browser audio codec parameters are normalized before storage so recorded feedback remains playable across supported browsers.
 - Flexible equipment specifications are stored in `tools_workspace_equipment.specifications`; custody can retain multiple `assigned_equipment` names and a free-text work location.
 
