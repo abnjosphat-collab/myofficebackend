@@ -1,7 +1,7 @@
 # app/routers/services.py — Services Tracker (CRUD + OCR + Attachments)
 from fastapi import APIRouter, HTTPException, UploadFile, File, Depends
 from pydantic import BaseModel
-from typing import Optional
+from typing import Any, Optional, cast
 from datetime import datetime, date
 from app.supabase_client import supabase
 from app.auth import get_current_user, require_role
@@ -285,9 +285,10 @@ async def get_stage_signatures(service_id: str):
     except Exception as e:
         logger.error(f"get_stage_signatures error: {e}")
         raise HTTPException(500, str(e))
-    if not r.data:
+    rows = cast(list[dict[str, Any]], r.data)
+    if not rows:
         raise HTTPException(404, "Service record not found")
-    return r.data[0].get("stage_signatures") or {}
+    return rows[0].get("stage_signatures") or {}
 
 
 @router.put("/{service_id}/signatures/{stage}")
@@ -299,9 +300,10 @@ async def put_stage_signature(service_id: str, stage: str, body: StageSignatureI
         raise HTTPException(422, "The signature must be an image no larger than about 500 KB.")
     try:
         current = supabase.table("services").select("stage_signatures").eq("id", service_id).execute()
-        if not current.data:
+        rows = cast(list[dict[str, Any]], current.data)
+        if not rows:
             raise HTTPException(404, "Service record not found")
-        signatures = {**(current.data[0].get("stage_signatures") or {}), stage: body.image_data}
+        signatures = {**(rows[0].get("stage_signatures") or {}), stage: body.image_data}
         supabase.table("services").update({"stage_signatures": signatures, "updated_at": datetime.utcnow().isoformat()}).eq("id", service_id).execute()
         return {"ok": True}
     except HTTPException:
