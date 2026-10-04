@@ -9,7 +9,7 @@ import logging
 
 from app.supabase_client import supabase, rows, one_row
 from app.auth import get_current_user
-from app.db_helpers import get_or_404
+from app.db_helpers import fetch_all_pages, get_or_404
 from app.serialization import encode_json_fields, decode_json_fields
 
 logger = logging.getLogger(__name__)
@@ -18,6 +18,11 @@ router = APIRouter()
 
 TABLE = "artisan_timesheets"
 JSON_FIELDS = ["daily_rows"]
+# What a list needs to show and open a timesheet: no daily rows (so no per-day signatures, which are most of a record's size).
+SUMMARY_COLUMNS = (
+    "id,employee_id,employee_db_id,employee_name,id_number,year,month,shift_rate,hourly_rate,"
+    "compiled_by,approved_electrical_foreman,approved_mechanical_foreman,authorized_by,created_at,updated_at"
+)
 
 
 class DailyRow(BaseModel):
@@ -94,17 +99,22 @@ async def list_artisan_timesheets(
     employee_id: Optional[str] = Query(None),
     year: Optional[int] = Query(None),
     month: Optional[int] = Query(None),
+    summary: bool = Query(False, description="Return each timesheet without its daily rows and signatures; open one with GET /{id}."),
     current_user: dict = Depends(get_current_user),
 ):
     try:
-        query = supabase.table(TABLE).select("*")
+        query = supabase.table(TABLE).select(SUMMARY_COLUMNS if summary else "*")
         if employee_id:
             query = query.eq("employee_id", employee_id)
         if year is not None:
             query = query.eq("year", year)
         if month is not None:
             query = query.eq("month", month)
-        response = query.order("year", desc=True).order("month", desc=True).order("employee_name").execute()
+        query = query.order("year", desc=True).order("month", desc=True).order("employee_name").order("id")
+        if summary:
+            # Small rows, so read every page rather than stopping at PostgREST's first 1,000.
+            return fetch_all_pages(lambda start, end: query.range(start, end).execute(), extract_rows=rows)
+        response = query.execute()
         return [_decode(r) for r in rows(response)]
     except Exception as e:
         logger.error(f"Error listing artisan timesheets: {e}")

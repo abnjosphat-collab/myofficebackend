@@ -38,6 +38,10 @@ class _Query:
         self._orders.append((col, desc))
         return self
 
+    def range(self, start, end):
+        self._range = (start, end)
+        return self
+
     def insert(self, data):
         self._op = "insert"
         self._payload = data
@@ -54,7 +58,7 @@ class _Query:
 
     def execute(self):
         self.state.setdefault("calls", []).append(
-            {"op": self._op, "filters": list(self._filters), "payload": self._payload}
+            {"op": self._op, "filters": list(self._filters), "payload": self._payload, "range": getattr(self, "_range", None)}
         )
         if self.cfg.get("raise_op") == self._op:
             raise Exception(self.cfg.get("raise_msg", "boom"))
@@ -101,7 +105,7 @@ async def test_list_artisan_timesheets_returns_decoded_rows(patch_supabase):
             "daily_rows": json.dumps([{"date": "2024-01-01", "day": "Mon", "normal_hrs": 8}]),
         }],
     })
-    result = await list_artisan_timesheets(employee_id="C001", year=2024, month=1, current_user=CURRENT_USER)
+    result = await list_artisan_timesheets(employee_id="C001", year=2024, month=1, summary=False, current_user=CURRENT_USER)
     assert len(result) == 1
     assert isinstance(result[0]["daily_rows"], list)
 
@@ -169,3 +173,19 @@ async def test_delete_artisan_timesheet_happy_path(patch_supabase):
     result = await delete_artisan_timesheet(3, current_user=CURRENT_USER)
     assert result["success"] is True
     assert any(c["op"] == "delete" for c in fake.state["calls"])
+
+
+async def test_list_summary_asks_for_no_daily_rows_and_returns_them_as_they_are(patch_supabase):
+    fake = patch_supabase({"select_return": [{"id": 1, "employee_id": "C001", "employee_name": "Alice", "year": 2024, "month": 1, "updated_at": "2024-02-01"}]})
+    result = await list_artisan_timesheets(employee_id=None, year=None, month=None, summary=True, current_user=CURRENT_USER)
+    assert result == [{"id": 1, "employee_id": "C001", "employee_name": "Alice", "year": 2024, "month": 1, "updated_at": "2024-02-01"}]
+    assert "daily_rows" not in mod.SUMMARY_COLUMNS
+    assert "signature" not in mod.SUMMARY_COLUMNS
+    assert fake.state["calls"][0]["range"] == (0, 999)  # read through the paged helper, not a single capped query
+
+
+async def test_list_summary_failure_is_a_500_not_an_empty_list(patch_supabase):
+    patch_supabase({"raise_op": "select", "raise_msg": "db down"})
+    with pytest.raises(HTTPException) as exc:
+        await list_artisan_timesheets(employee_id=None, year=None, month=None, summary=True, current_user=CURRENT_USER)
+    assert exc.value.status_code == 500

@@ -187,3 +187,23 @@ async def test_upsert_with_no_existing_codes_only_creates(patch_supabase):
     result = await _call(payload)
     assert result["created"] == 2
     assert result["updated"] == 0
+
+
+async def test_upsert_updates_only_the_fields_the_client_sent(patch_supabase):
+    # An import meant to fix prices must not reset the stock on hand, limits, priority or supplier of an existing part
+    # to the model defaults.
+    state = patch_supabase(existing_codes={"SC-2"})
+    item = SpareCreate(stock_code="SC-2", description="Part SC-2", unit_price=12.5)
+    result = await _call(BulkSpareCreate(items=[item], upsert=True))
+    assert result["updated"] == 1
+    payload = [c for c in state["calls"] if c["op"] == "update"][0]["payload"]
+    assert set(payload) == {"description", "unit_price"}
+
+
+async def test_upsert_with_nothing_to_update_is_skipped_not_counted_as_updated(patch_supabase):
+    state = patch_supabase(existing_codes={"SC-2"})
+    item = SpareCreate.model_construct(stock_code="SC-2", description="x")  # only the key and description set
+    item.__pydantic_fields_set__.discard("description")
+    result = await _call(BulkSpareCreate.model_construct(items=[item], skip_existing=False, upsert=True))
+    assert result["updated"] == 0 and result["skipped"] == 1
+    assert not [c for c in state["calls"] if c["op"] == "update"]

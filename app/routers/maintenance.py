@@ -8,7 +8,7 @@ from app.auth import get_current_user, require_role
 from app.cache import cached, cache_get, cache_set, build_key, invalidate_namespace
 from app.serialization import convert_dates_to_iso
 from app.aggregation import count_by
-from app.db_helpers import get_or_404
+from app.db_helpers import fetch_all_pages, get_or_404
 import logging
 import json
 import re
@@ -281,12 +281,13 @@ async def get_work_orders(
         if to_department and to_department != 'all':
             query = query.eq("to_department", to_department)
 
-        query = query.order("created_at", desc=True)
+        query = query.order("created_at", desc=True).order("id", desc=True)
         if limit:
-            query = query.limit(limit)
-        response = query.execute()
-
-        records = rows(response)
+            records = rows(query.limit(limit).execute())
+        else:
+            # PostgREST cuts a plain select at 1,000 rows, which would silently drop the oldest
+            # work orders from the register once the table grows past that; page through it.
+            records = fetch_all_pages(lambda start, end: query.range(start, end).execute(), extract_rows=rows)
         processed_records = []
         for record in records:
             processed_record = prepare_data_for_response(record)

@@ -4,7 +4,7 @@ from pydantic import BaseModel, Field, validator
 from typing import Optional, List, Dict, Any
 from datetime import date, datetime
 from app.supabase_client import supabase, rows, one_row
-from app.auth import get_current_user, require_role_if_status_in
+from app.auth import get_current_user, require_role, require_role_if_status_in
 from app.db_helpers import fetch_all_pages, get_or_404
 from app.leave_days import calculate_total_days
 import logging
@@ -229,6 +229,11 @@ async def update_leave(leave_id: int, updated: LeaveUpdate, authorization: Optio
     # Any edit requires a signed-in user (current_user); approve/reject additionally
     # requires manager+ (checked below against the same Authorization header).
     await require_role_if_status_in(updated.status, {'approved', 'rejected'}, 'manager', authorization, context="Leave approval")
+    # Once a request has been decided, changing it in any way (editing it, or reopening it to pending) is a manager's call;
+    # a pending request can still be amended by whoever is signed in. Checked before the try block so the refusal stays a 403.
+    decided = one_row(supabase.table("leaves").select("status").eq("id", leave_id).execute())
+    if decided and decided.get("status") in {"approved", "rejected"}:
+        await require_role('manager')(authorization)
     try:
         existing = get_or_404(supabase, "leaves", leave_id, detail=f"Leave with ID {leave_id} not found")
 
@@ -274,7 +279,7 @@ async def update_leave(leave_id: int, updated: LeaveUpdate, authorization: Optio
 
 # ---------- DELETE leave ----------
 @router.delete("/{leave_id}")
-async def delete_leave(leave_id: int, current_user: dict = Depends(get_current_user)):
+async def delete_leave(leave_id: int, current_user: dict = Depends(require_role('manager'))):
     try:
         existing_resp = supabase.table("leaves").select("id").eq("id", leave_id).execute()
         if one_row(existing_resp) is None:

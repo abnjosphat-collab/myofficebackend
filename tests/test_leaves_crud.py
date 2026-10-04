@@ -315,6 +315,40 @@ async def test_update_leave_approving_without_manager_role_is_rejected(patch_sup
     assert [c for c in state["calls"] if c["op"] == "update"] == []
 
 
+async def test_editing_a_decided_leave_needs_a_manager(patch_supabase, monkeypatch):
+    for decided in ("approved", "rejected"):
+        existing = {"id": 1, "start_date": "2024-06-10", "end_date": "2024-06-12", "status": decided}
+        state = patch_supabase({"leaves": {"select_return": [existing]}})
+
+        def _refuse(min_role):
+            async def _check(authorization=None):
+                raise HTTPException(status_code=403, detail=f"Permission denied. Requires {min_role}+ role.")
+            return _check
+        monkeypatch.setattr(leaves_mod, "require_role", _refuse)
+        for change in (LeaveUpdate(notes="changed"), LeaveUpdate(status="pending")):
+            with pytest.raises(HTTPException) as exc_info:
+                await update_leave(1, change, authorization=None, current_user={"user_id": "u1"})
+            assert exc_info.value.status_code == 403  # a 403, not wrapped into a 500
+        assert [c for c in state["calls"] if c["op"] == "update"] == []
+
+
+async def test_editing_a_pending_leave_needs_no_special_role(patch_supabase, monkeypatch):
+    existing = {"id": 1, "start_date": "2024-06-10", "end_date": "2024-06-12", "status": "pending", "notes": ""}
+    patch_supabase({"leaves": {"select_return": [existing], "update_return": [{**existing, "notes": "x"}]}})
+
+    def _must_not_be_asked(min_role):
+        raise AssertionError("a pending leave edit must not need a manager")
+    monkeypatch.setattr(leaves_mod, "require_role", _must_not_be_asked)
+    result = await update_leave(1, LeaveUpdate(notes="x"), authorization=None, current_user={"user_id": "u1"})
+    assert result["notes"] == "x"
+
+
+def test_deleting_a_leave_requires_a_manager():
+    import inspect
+    default = inspect.signature(leaves_mod.delete_leave).parameters["current_user"].default
+    assert default.dependency.__name__ == "_check"  # the require_role('manager') dependency, not plain sign-in
+
+
 # ─── bulk_update_leave_status ────────────────────────────────────────────────────
 
 def _leave_row(**overrides):

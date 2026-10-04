@@ -558,8 +558,15 @@ async def bulk_create_spares(request: Request, payload: BulkSpareCreate, current
             # Step 3: update existing rows one at a time (update by stock_code needs no UNIQUE index)
             for item in upd_items:
                 try:
-                    upd_data = {k: v for k, v in filter_for_db(item.dict()).items()
+                    # Only the fields the client actually sent. item.dict() would also carry every model default
+                    # (quantity 0, min 1, max 5, priority medium, no supplier or location...) and an import meant
+                    # to fix prices or categories would overwrite the stock on hand and the supplier of every
+                    # existing part.
+                    upd_data = {k: v for k, v in filter_for_db(item.dict(exclude_unset=True)).items()
                                 if k != 'stock_code'}
+                    if not upd_data:
+                        skipped += 1
+                        continue
                     supabase.table("spares").update(upd_data).eq("stock_code", item.stock_code).execute()
                     updated += 1
                 except Exception as upd_err:

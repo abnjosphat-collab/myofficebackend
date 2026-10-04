@@ -6,6 +6,8 @@ from datetime import datetime, date
 from app.supabase_client import supabase
 from app.auth import get_current_user, require_role
 from app.uploads import read_and_validate_upload, DOCUMENT_EXTS
+from app.db_helpers import fetch_all_pages
+from starlette.concurrency import run_in_threadpool
 
 # Alias prevents the Pydantic field named 'date' from shadowing datetime.date in type
 # resolution — a class-body annotated assignment (`date: Optional[_Date] = None`) binds
@@ -79,6 +81,18 @@ class ServiceIn(BaseModel):
     payment_comments: str = ''
 
 
+# Every column except the signature images: the list is read in full, and six images per record would make it heavy. The images are
+# read for one record at a time (GET /{service_id}/signatures).
+LIST_COLUMNS = ",".join(["id", "created_at", "updated_at", *ServiceIn.model_fields])
+
+STAGE_KEYS = ("planning", "engineering_manager", "finance", "gm", "stores", "payment")
+MAX_SIGNATURE_CHARS = 700_000  # a drawn signature is a few KB; this allows a large scanned one
+
+
+class StageSignatureIn(BaseModel):
+    image_data: str
+
+
 def _serialize(data: dict) -> dict:
     """Convert date objects to ISO strings for Supabase."""
     return {
@@ -93,8 +107,11 @@ def _serialize(data: dict) -> dict:
 @router.get("/", dependencies=[Depends(get_current_user)])
 async def list_services():
     try:
-        r = supabase.table("services").select("*").order("created_at", desc=True).execute()
-        return r.data or []
+        # Paged: PostgREST cuts a plain select at 1,000 rows, which would silently drop the oldest records.
+        return await run_in_threadpool(lambda: fetch_all_pages(
+            lambda start, end: supabase.table("services").select(LIST_COLUMNS)
+            .order("created_at", desc=True).order("id", desc=True).range(start, end).execute()
+        ))
     except Exception as e:
         logger.error(f"list_services error: {e}")
         raise HTTPException(500, str(e))
@@ -257,6 +274,40 @@ async def update_service(service_id: str, body: ServiceIn, current_user: dict = 
         raise
     except Exception as e:
         logger.error(f"update_service error: {e}")
+        raise HTTPException(500, str(e))
+
+
+@router.get("/{service_id}/signatures", dependencies=[Depends(get_current_user)])
+async def get_stage_signatures(service_id: str):
+    """The signature images of one record, as {stage: data URL}."""
+    try:
+        r = supabase.table("services").select("stage_signatures").eq("id", service_id).execute()
+    except Exception as e:
+        logger.error(f"get_stage_signatures error: {e}")
+        raise HTTPException(500, str(e))
+    if not r.data:
+        raise HTTPException(404, "Service record not found")
+    return r.data[0].get("stage_signatures") or {}
+
+
+@router.put("/{service_id}/signatures/{stage}")
+async def put_stage_signature(service_id: str, stage: str, body: StageSignatureIn, current_user: dict = Depends(get_current_user)):
+    """Keep the signature image of one stage; the other stages' images are untouched."""
+    if stage not in STAGE_KEYS:
+        raise HTTPException(422, f"Unknown stage '{stage}'.")
+    if not body.image_data.startswith("data:image/") or len(body.image_data) > MAX_SIGNATURE_CHARS:
+        raise HTTPException(422, "The signature must be an image no larger than about 500 KB.")
+    try:
+        current = supabase.table("services").select("stage_signatures").eq("id", service_id).execute()
+        if not current.data:
+            raise HTTPException(404, "Service record not found")
+        signatures = {**(current.data[0].get("stage_signatures") or {}), stage: body.image_data}
+        supabase.table("services").update({"stage_signatures": signatures, "updated_at": datetime.utcnow().isoformat()}).eq("id", service_id).execute()
+        return {"ok": True}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"put_stage_signature error: {e}")
         raise HTTPException(500, str(e))
 
 

@@ -50,6 +50,7 @@ class _FakeQuery:
         self._filters = []
         self._order = None
         self._limit = None
+        self._range = None
         self._mode = "select"
         self._payload = None
 
@@ -67,6 +68,10 @@ class _FakeQuery:
 
     def limit(self, n):
         self._limit = n
+        return self
+
+    def range(self, start, end):
+        self._range = (start, end)
         return self
 
     def insert(self, data):
@@ -104,6 +109,8 @@ class _FakeQuery:
                 matches = sorted(matches, key=lambda r: r.get(col) or "", reverse=desc)
             if self._limit:
                 matches = matches[: self._limit]
+            if self._range:
+                matches = matches[self._range[0]: self._range[1] + 1]
             return _Resp(matches)
         if self._mode == "update":
             for r in matches:
@@ -455,3 +462,10 @@ async def test_get_work_orders_by_allocated_filters_and_sorts(patch_supabase):
     ])
     result = await get_work_orders_by_allocated("T. Banda")
     assert [r["id"] for r in result] == [3, 1]
+
+
+async def test_get_work_orders_pages_past_the_1000_row_database_cap(patch_supabase):
+    """Without paging the register silently lost every work order after the first 1,000."""
+    patch_supabase([{"id": i, "status": "pending", "priority": "low", "created_at": f"2026-01-01T00:{i // 60:02d}:{i % 60:02d}"} for i in range(1, 1201)])
+    result = await get_work_orders(status=None, priority=None, department=None, allocated_to=None, to_department=None, limit=None)
+    assert len(result) == 1200

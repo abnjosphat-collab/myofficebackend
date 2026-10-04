@@ -13,7 +13,7 @@ import pytest
 from fastapi import HTTPException
 
 from app.routers import services as services_mod
-from app.routers.services import ServiceIn, list_services, create_service, update_service, delete_service
+from app.routers.services import ServiceIn, StageSignatureIn, LIST_COLUMNS, list_services, create_service, update_service, delete_service, get_stage_signatures, put_stage_signature
 
 
 class _Resp:
@@ -38,6 +38,9 @@ class _Query:
         return self
 
     def order(self, *a, **k):
+        return self
+
+    def range(self, *a, **k):
         return self
 
     def insert(self, data):
@@ -207,3 +210,57 @@ async def test_delete_service_db_error_is_500(patch_supabase):
         await delete_service("s1", current_user=MANAGER_USER)
     assert exc.value.status_code == 500
     assert "delete failed" in exc.value.detail
+
+
+# ─── stage signatures ────────────────────────────────────────────────────────────────
+
+PNG = "data:image/png;base64,AAAA"
+
+
+def test_list_leaves_the_signature_images_out():
+    assert "stage_signatures" not in LIST_COLUMNS.split(",")
+    assert {"id", "planning_signed_by", "payment_reference"} <= set(LIST_COLUMNS.split(","))
+
+
+async def test_get_stage_signatures_returns_the_map(patch_supabase):
+    patch_supabase({"select_return": [{"stage_signatures": {"finance": PNG}}]})
+    assert await get_stage_signatures("s1") == {"finance": PNG}
+
+
+async def test_get_stage_signatures_unsigned_record_is_empty(patch_supabase):
+    patch_supabase({"select_return": [{"stage_signatures": None}]})
+    assert await get_stage_signatures("s1") == {}
+
+
+async def test_get_stage_signatures_unknown_record_is_404(patch_supabase):
+    patch_supabase({"select_return": []})
+    with pytest.raises(HTTPException) as exc:
+        await get_stage_signatures("nope")
+    assert exc.value.status_code == 404
+
+
+async def test_put_stage_signature_keeps_the_other_stages(patch_supabase):
+    fake = patch_supabase({"select_return": [{"stage_signatures": {"planning": "data:image/png;base64,OLD"}}], "update_return": [{"id": "s1"}]})
+    assert await put_stage_signature("s1", "finance", StageSignatureIn(image_data=PNG), current_user=CURRENT_USER) == {"ok": True}
+    payload = next(c for c in fake.state["calls"] if c["op"] == "update")["payload"]
+    assert payload["stage_signatures"] == {"planning": "data:image/png;base64,OLD", "finance": PNG}
+
+
+@pytest.mark.parametrize("stage,image", [
+    pytest.param("nonsense", PNG, id="unknown-stage"),
+    pytest.param("finance", "not an image", id="not-an-image"),
+    pytest.param("finance", "data:image/png;base64," + "A" * 800_000, id="too-large"),
+])
+async def test_put_stage_signature_refuses_bad_input(patch_supabase, stage, image):
+    fake = patch_supabase({"select_return": [{"stage_signatures": {}}]})
+    with pytest.raises(HTTPException) as exc:
+        await put_stage_signature("s1", stage, StageSignatureIn(image_data=image), current_user=CURRENT_USER)
+    assert exc.value.status_code == 422
+    assert not any(c["op"] == "update" for c in fake.state["calls"])
+
+
+async def test_put_stage_signature_unknown_record_is_404(patch_supabase):
+    patch_supabase({"select_return": []})
+    with pytest.raises(HTTPException) as exc:
+        await put_stage_signature("nope", "finance", StageSignatureIn(image_data=PNG), current_user=CURRENT_USER)
+    assert exc.value.status_code == 404
