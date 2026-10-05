@@ -1,4 +1,4 @@
-from typing import Optional
+from typing import Any, Optional, cast
 from pydantic import BaseModel
 from app.crud_router import CrudRouter
 from app.supabase_client import supabase
@@ -58,7 +58,7 @@ async def production_summary():
     """Last 30 days summary stats."""
     try:
         r = supabase.table("production_data").select("*").order("prod_date", desc=True).limit(30).execute()
-        rows = r.data or []
+        rows = cast("list[dict[str, Any]]", r.data or [])
         if not rows:
             return {"total_tonnes": 0, "avg_grade": 0, "avg_recovery": 0, "total_gold_oz": 0}
         total_t = sum(x.get("tonnes_milled") or 0 for x in rows)
