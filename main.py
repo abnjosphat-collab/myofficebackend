@@ -250,6 +250,8 @@ for _name, _prefix, _tags, _key in [
     ("tools_workspace", "/api/tools-workspace", ["Tools Workspace Prototype"], None),
     ("drivers", "/api/drivers", ["Drivers"], None),
     ("lookup_lists", "/api/lookup-lists", ["Lookup Lists"], None),
+    ("ppe_order_list", "/api/ppe-order-list", ["PPE Order List"], None),
+    ("saved_quotations", "/api/quotations", ["Saved Quotations"], None),
 ]:
     register_router(_name, _prefix, _tags, _key)
 

@@ -63,7 +63,13 @@ class _FakeTable:
         self._response = response_data
 
     def select(self, *a, **k): return self
-    def execute(self): return _Resp(self._response)
+    def order(self, *a, **k): return self
+    def range(self, start, end):
+        self._range = (start, end)
+        return self
+    def execute(self):
+        window = getattr(self, "_range", None)
+        return _Resp(self._response[window[0]:window[1] + 1] if window else self._response)
 
 
 class _FakeSupabase:
@@ -108,3 +114,9 @@ async def test_stats_deduplicates_recipients(patch_supabase):
     ])
     stats = await get_stats()
     assert stats["unique_recipients"] == 1
+
+
+async def test_stats_read_every_page_not_just_the_first_thousand(patch_supabase):
+    patch_supabase([{"issued_at": "2020-01-01T00:00:00", "recipient_name": f"P{i % 7}"} for i in range(2500)])
+    result = await get_stats()
+    assert result["total"] == 2500 and result["unique_recipients"] == 7
