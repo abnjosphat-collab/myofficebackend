@@ -11,7 +11,7 @@
 import os
 from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel, Field
-from typing import Optional
+from typing import Any, Optional, cast
 from supabase import create_client
 from app.supabase_client import supabase
 from app.auth import get_current_user
@@ -69,7 +69,7 @@ async def get_my_signature(user: dict = Depends(get_current_user)):
             .eq("user_id", user["user_id"])
             .execute()
         )
-        row = res.data[0] if res.data else None
+        row = cast("dict[str, Any] | None", res.data[0] if res.data else None)
         if not row:
             return {"has_signature": False}
         return {"has_signature": True, "source": row["source"], "updated_at": row["updated_at"]}
@@ -126,7 +126,7 @@ async def unlock_my_signature(payload: UnlockRequest, user: dict = Depends(get_c
             .eq("user_id", user["user_id"])
             .execute()
         )
-        row = res.data[0] if res.data else None
+        row = cast("dict[str, Any] | None", res.data[0] if res.data else None)
     except Exception as e:
         logger.error(f"unlock_my_signature lookup failed for {user['user_id']}: {e}")
         raise HTTPException(status_code=500, detail="Could not load signature.")
