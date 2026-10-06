@@ -2,7 +2,7 @@
 from fastapi import APIRouter, HTTPException, UploadFile, File, Form, Depends
 from starlette.concurrency import run_in_threadpool
 from pydantic import BaseModel
-from typing import Optional
+from typing import Any, Optional, cast
 from datetime import datetime
 from app.supabase_client import supabase
 from app.auth import get_current_user, require_role
@@ -99,7 +99,7 @@ async def create_folder(body: FolderCreate, current_user: dict = Depends(get_cur
                     .eq("name", name)
                     .maybe_single()
                     .execute())
-        if existing.data:
+        if existing is not None and existing.data:
             raise HTTPException(409, "A folder with this name already exists")
         r = supabase.table("document_folders").insert({
             "category_id":   body.category_id,
@@ -129,10 +129,11 @@ async def rename_folder(folder_id: str, body: FolderUpdate, current_user: dict =
                     .eq("id", folder_id)
                     .maybe_single()
                     .execute())
-        if not existing.data:
+        existing_row = cast("dict[str, Any] | None", existing.data if existing else None)
+        if not existing_row:
             raise HTTPException(404, "Folder not found")
-        old_name = existing.data["name"]
-        category_id = existing.data["category_id"]
+        old_name = existing_row["name"]
+        category_id = existing_row["category_id"]
 
         r = (supabase.table("document_folders")
              .update({"name": name})
@@ -266,9 +267,10 @@ async def delete_document(doc_id: str, current_user: dict = Depends(require_role
                .eq("id", doc_id)
                .maybe_single()
                .execute())
-        if row.data and row.data.get("storage_path"):
+        doc_row = cast("dict[str, Any] | None", row.data if row else None)
+        if doc_row and doc_row.get("storage_path"):
             try:
-                supabase.storage.from_(BUCKET).remove([row.data["storage_path"]])
+                supabase.storage.from_(BUCKET).remove([doc_row["storage_path"]])
             except Exception as e:
                 logger.warning("Storage delete failed (continuing): %s", e)
         supabase.table("documents").delete().eq("id", doc_id).execute()
