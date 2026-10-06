@@ -141,18 +141,38 @@ async def test_get_availabilities_merges_latest_history_when_present(patch_supab
     assert eq["last_maintenance"] == "2024-01-10"
 
 
-async def test_get_availabilities_falls_back_to_defaults_when_no_history(patch_supabase):
+async def test_get_availabilities_reports_no_figures_when_no_history(patch_supabase):
     equipment = [{"id": 2, "name": "Eq2", "operational_hours": 50, "breakdown_hours": 5,
                   "last_maintenance_date": "2023-12-01"}]
     patch_supabase({"equipment": {"select_return": equipment}, "availabilities": {"select_return": []}})
     result = await get_availabilities()
     eq = result[0]
-    assert eq["availability"] == 100.0
+    # Unmeasured, not a default that looks measured (was 100.0 / 100 / 4).
+    assert eq["availability"] is None
+    assert eq["mtbf"] is None
+    assert eq["mttr"] is None
     assert eq["status"] == "operational"  # default when equipment has no status either
-    assert eq["uptime"] == 45  # 50 - 5, from the equipment row itself
-    assert eq["mtbf"] == 100
-    assert eq["mttr"] == 4
+    assert eq["uptime"] == 45  # 50 - 5, from the equipment row itself (real figures stay)
+    assert eq["downtime"] == 5
     assert eq["last_maintenance"] == "2023-12-01"
+
+
+async def test_get_availabilities_mixes_measured_and_unmeasured_equipment(patch_supabase):
+    equipment = [{"id": 1, "name": "Measured"}, {"id": 2, "name": "Never recorded"}]
+
+    def avail_resolver(op, filters, payload):
+        if ("equipment_id", 1) in filters:
+            return [{"availability_percentage": 0, "operational_hours": 10, "breakdown_hours": 10,
+                     "date": "2024-02-01", "mtbf": None, "mttr": None}]
+        return []
+
+    patch_supabase({"equipment": {"select_return": equipment}, "availabilities": avail_resolver})
+    measured, unmeasured = await get_availabilities()
+    # A real 0 % is a measurement and must not be turned into "no data".
+    assert measured["availability"] == 0
+    # A record whose MTBF/MTTR columns are null stays null (never filled with defaults).
+    assert measured["mtbf"] is None and measured["mttr"] is None
+    assert unmeasured["availability"] is None
 
 
 async def test_get_availabilities_raises_500_on_error(patch_supabase_raising):

@@ -23,7 +23,11 @@ class AvailRecordIn(BaseModel):
 
 @router.get("/availabilities")
 async def get_availabilities():
-    """Get equipment list with their latest availability data merged in."""
+    """Get equipment list with their latest availability data merged in.
+
+    Equipment with no availability record gets ``availability``, ``mtbf`` and
+    ``mttr`` set to ``None`` (unmeasured), not default figures.
+    """
     try:
         logger.info("Fetching equipment with availability data...")
         equipment = rows(supabase.table("equipment").select("*").execute())
@@ -47,14 +51,16 @@ async def get_availabilities():
                 eq["mttr"]                 = latest.get("mttr", 4)
                 eq["last_maintenance"]     = latest.get("date")
             else:
-                eq["availability"]      = 100.0
+                # No availability record: nothing has been measured, so report null
+                # rather than defaults (100 %, MTBF 100 h, MTTR 4 h) that look measured.
+                eq["availability"]      = None
                 eq["operational_hours"] = eq.get("operational_hours", 0)
                 eq["breakdown_hours"]   = eq.get("breakdown_hours", 0)
                 eq["status"]           = eq.get("status", "operational")
                 eq["uptime"]           = eq.get("operational_hours", 0) - eq.get("breakdown_hours", 0)
                 eq["downtime"]         = eq.get("breakdown_hours", 0)
-                eq["mtbf"]             = 100
-                eq["mttr"]             = 4
+                eq["mtbf"]             = None
+                eq["mttr"]             = None
                 eq["last_maintenance"] = eq.get("last_maintenance_date")
 
         return equipment
