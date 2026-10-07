@@ -122,6 +122,46 @@ def test_viewer_cannot_issue_but_issuer_creates_complete_history():
     assert all(event["event_at"] for event in trail[:2])
 
 
+def _eligible_tool_with_checks_due():
+    admin, issuer = admin_and_issuer()
+    auth = {"Authorization": f"Bearer {issuer}"}
+    admin_auth = {"Authorization": f"Bearer {admin}"}
+    employee = client.post("/api/tools-workspace/employees", headers=admin_auth, json={"employee_number": "E-7", "name": "Alex", "department": "Engineering"}).json()
+    tool = client.post("/api/tools-workspace/tools", headers=admin_auth, json={"register_number": "T-7", "name": "Angle grinder", "storage_location": "Workshop"}).json()
+    competency = client.post("/api/tools-workspace/competencies", headers=admin_auth, json={"employee_id": employee["id"], "tool_id": tool["id"], "trained": True, "qualified": True, "authorized": True})
+    assert competency.status_code == 201  # no inspection recorded, so the monthly and quarterly checks are due
+    return auth, employee, tool
+
+
+def test_overdue_checks_block_issue_unless_overridden_with_a_reason():
+    auth, employee, tool = _eligible_tool_with_checks_due()
+    url = f"/api/tools-workspace/tools/{tool['id']}/issue"
+    payload = {"employee_id": employee["id"], "location": "Plant 4", "job_reference": "WO-9"}
+    blocked = client.post(url, headers=auth, json=payload)
+    assert blocked.status_code == 409 and "overdue" in blocked.json()["detail"] and "override" in blocked.json()["detail"]
+    no_reason = client.post(url, headers=auth, json={**payload, "override_due_checks": True, "override_reason": "ok"})
+    assert no_reason.status_code == 422
+    allowed = client.post(url, headers=auth, json={**payload, "override_due_checks": True, "override_reason": "Breakdown repair, inspection booked for tomorrow"})
+    assert allowed.status_code == 200
+    issue_event = client.get("/api/tools-workspace/history", headers=auth).json()[0]
+    assert issue_event["action"] == "issue" and "overridden: Breakdown repair" in issue_event["detail"]
+
+
+def test_a_named_authoriser_is_recorded_instead_of_the_signed_in_account():
+    auth, employee, tool = _eligible_tool_with_checks_due()
+    named = client.post("/api/tools-workspace/competencies", headers=auth, json={"employee_id": employee["id"], "tool_id": tool["id"], "trained": True, "qualified": True, "authorized": True, "authorized_by": " Edson Mavhondo "})
+    assert named.status_code in (200, 201) and named.json()["authorized_by"] == "Edson Mavhondo"
+    default = client.post("/api/tools-workspace/competencies", headers=auth, json={"employee_id": employee["id"], "tool_id": tool["id"], "trained": True, "qualified": True, "authorized": True})
+    assert default.json()["authorized_by"] != "Edson Mavhondo"
+
+
+def test_a_viewer_cannot_override_overdue_checks():
+    auth, employee, tool = _eligible_tool_with_checks_due()
+    viewer = register("viewer-override")
+    denied = client.post(f"/api/tools-workspace/tools/{tool['id']}/issue", headers={"Authorization": f"Bearer {viewer}"}, json={"employee_id": employee["id"], "location": "Plant 4", "job_reference": "WO-9", "override_due_checks": True, "override_reason": "Urgent job"})
+    assert denied.status_code == 403
+
+
 def test_admin_assigns_departmental_issuer_but_cannot_issue():
     admin, issuer = admin_and_issuer("Engineering")
     admin_auth = {"Authorization": f"Bearer {admin}"}

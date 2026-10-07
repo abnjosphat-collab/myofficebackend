@@ -134,11 +134,11 @@ class ToolInput(BaseModel):
 class ToolUpdate(BaseModel):
     register_number:Optional[str]=Field(default=None,min_length=1,max_length=80); name:Optional[str]=Field(default=None,min_length=2,max_length=160); make_model:Optional[str]=Field(default=None,max_length=200); serial_number:Optional[str]=Field(default=None,max_length=120); category:Optional[str]=Field(default=None,max_length=100); equipment_kind:Optional[str]=Field(default=None,max_length=80); storage_location:Optional[str]=Field(default=None,min_length=1,max_length=240); department:Optional[str]=Field(default=None,max_length=100); section:Optional[str]=Field(default=None,max_length=100); condition:Optional[str]=Field(default=None,max_length=60); notes:Optional[str]=Field(default=None,max_length=2000); approval_ref:Optional[str]=Field(default=None,max_length=160); calibration:Optional[str]=Field(default=None,max_length=160); specifications:Optional[dict[str,str]]=None; home_storage_location:Optional[str]=Field(default=None,max_length=240); storage_conditions:Optional[str]=Field(default=None,max_length=1000); maintenance_requirements:Optional[str]=Field(default=None,max_length=2000); pre_use_check_required:Optional[bool]=None; weekly_inspection_required:Optional[bool]=None; monthly_inspection_required:Optional[bool]=None; quarterly_inspection_required:Optional[bool]=None; calibration_required:Optional[bool]=None; calibration_frequency_days:Optional[int]=Field(default=None,ge=1,le=3650); replacement_value:Optional[float]=Field(default=None,ge=0); criticality:Optional[Literal["standard","high","safety_critical"]]=None; cctv_required:Optional[bool]=None; gps_required:Optional[bool]=None; required_ppe:Optional[list[str]]=Field(default=None,max_length=20); ownership_type:Optional[Literal["company","contractor"]]=None; contractor_name:Optional[str]=Field(default=None,max_length=200); oem_manual_ref:Optional[str]=Field(default=None,max_length=240)
 class IssueInput(BaseModel):
-    employee_id:str; location:str=Field(min_length=1,max_length=240); expected_return_at:Optional[str]=None; job_reference:Optional[str]=Field(default=None,max_length=160); assigned_equipment:list[str]=Field(default_factory=list,max_length=30); notes:Optional[str]=Field(default=None,max_length=1000)
+    employee_id:str; location:str=Field(min_length=1,max_length=240); expected_return_at:Optional[str]=None; job_reference:Optional[str]=Field(default=None,max_length=160); assigned_equipment:list[str]=Field(default_factory=list,max_length=30); notes:Optional[str]=Field(default=None,max_length=1000); override_due_checks:bool=False; override_reason:Optional[str]=Field(default=None,max_length=500)
 class ReturnInput(BaseModel):
     location:str=Field(min_length=1,max_length=240); condition:Literal["Good","Damaged","Missing parts"]="Good"; notes:Optional[str]=Field(default=None,max_length=1000)
 class MovementInput(BaseModel):
-    kind:Literal["issue","return","transfer","extend"]; employee_id:Optional[str]=None; employee_name:Optional[str]=None; department:Optional[str]=None; location:Optional[str]=Field(default=None,max_length=240); expected_return_at:Optional[str]=None; job_reference:Optional[str]=Field(default=None,max_length=160); assigned_equipment:list[str]=Field(default_factory=list,max_length=30); condition:Optional[str]=Field(default="Good",max_length=60); notes:Optional[str]=Field(default=None,max_length=2000); approval_ref:Optional[str]=Field(default=None,max_length=160); calibration:Optional[str]=Field(default=None,max_length=160); pre_use_check_completed:bool=False; idempotency_key:Optional[str]=None
+    kind:Literal["issue","return","transfer","extend"]; employee_id:Optional[str]=None; employee_name:Optional[str]=None; department:Optional[str]=None; location:Optional[str]=Field(default=None,max_length=240); expected_return_at:Optional[str]=None; job_reference:Optional[str]=Field(default=None,max_length=160); assigned_equipment:list[str]=Field(default_factory=list,max_length=30); condition:Optional[str]=Field(default="Good",max_length=60); notes:Optional[str]=Field(default=None,max_length=2000); approval_ref:Optional[str]=Field(default=None,max_length=160); calibration:Optional[str]=Field(default=None,max_length=160); pre_use_check_completed:bool=False; idempotency_key:Optional[str]=None; override_due_checks:bool=False; override_reason:Optional[str]=Field(default=None,max_length=500)
 class ImportCommit(BaseModel):
     target:Literal["equipment","employees"]; rows:list[dict[str,Any]]=Field(max_length=500)
 class UsageInput(BaseModel): event:str=Field(min_length=1,max_length=100); detail:Optional[str]=Field(default=None,max_length=500)
@@ -147,7 +147,7 @@ class NotificationReadInput(BaseModel): keys:list[str]=Field(max_length=500)
 class MarkReadyInput(BaseModel):
     resolution_note:str=Field(min_length=2,max_length=1000)
 class CompetencyInput(BaseModel):
-    employee_id:str; tool_id:Optional[str]=None; category:Optional[str]=Field(default=None,max_length=100); trained:bool; qualified:bool; authorized:bool; training_certificate_ref:Optional[str]=Field(default=None,max_length=200); training_expires_at:Optional[str]=None; qualification_ref:Optional[str]=Field(default=None,max_length=200); qualification_expires_at:Optional[str]=None; authorization_expires_at:Optional[str]=None; notes:Optional[str]=Field(default=None,max_length=1000)
+    employee_id:str; tool_id:Optional[str]=None; category:Optional[str]=Field(default=None,max_length=100); trained:bool; qualified:bool; authorized:bool; training_certificate_ref:Optional[str]=Field(default=None,max_length=200); training_expires_at:Optional[str]=None; qualification_ref:Optional[str]=Field(default=None,max_length=200); qualification_expires_at:Optional[str]=None; authorization_expires_at:Optional[str]=None; notes:Optional[str]=Field(default=None,max_length=1000); authorized_by:Optional[str]=Field(default=None,max_length=120)
 class InspectionInput(BaseModel):
     inspection_type:Literal["pre_use","weekly","monthly","quarterly","calibration","maintenance","storage_audit","repair"]; outcome:Literal["passed","conditional","failed"]; inspected_at:Optional[str]=None; next_due_at:Optional[str]=None; condition:Optional[str]=Field(default=None,max_length=100); defects:Optional[str]=Field(default=None,max_length=1500); notes:Optional[str]=Field(default=None,max_length=1500); repair_quote:Optional[float]=Field(default=None,ge=0); new_equipment_price:Optional[float]=Field(default=None,gt=0)
 class IncidentInput(BaseModel):
@@ -430,7 +430,7 @@ def save_competency(body:CompetencyInput,account=Depends(_operator)):
     category=(body.category or "").strip() or None
     if not tool and not category: raise HTTPException(422,"Choose a specific tool or equipment category.")
     existing=next((row for row in _all("competencies") if row.get("employee_id")==employee["id"] and row.get("tool_id")==body.tool_id and (row.get("category") or "").lower()==(category or "").lower()),None)
-    values={**body.model_dump(exclude_unset=True),"category":category,"authorized_by":account["name"] if body.authorized else None,"updated_at":_now()}
+    values={**body.model_dump(exclude_unset=True),"category":category,"authorized_by":((body.authorized_by or "").strip() or account["name"]) if body.authorized else None,"updated_at":_now()}
     if existing: return _update("competencies",existing["id"],values)
     return _insert("competencies",{"id":str(uuid.uuid4()),**values,"created_by":account["name"],"created_at":_now()})
 
@@ -585,7 +585,7 @@ def _move(tool_id:str,body:MovementInput,account:dict[str,Any]):
     open_loan=bool(tool.get("custody"))
     if body.kind=="issue" and (tool.get("archived") or tool.get("status")!="available"): raise HTTPException(409,"This tool is not available to issue.")
     if body.kind!="issue" and not open_loan: raise HTTPException(409,"This tool has no open loan.")
-    employee=None
+    employee=None; override_note=None
     if body.kind in {"issue","transfer"}:
         if body.employee_id: employee=_find("employees","id",body.employee_id) or _find("employees","employee_number",body.employee_id)
         if not employee and body.employee_name: employee=next((row for row in _all("employees") if row["name"].lower()==body.employee_name.lower()),None)
@@ -593,7 +593,12 @@ def _move(tool_id:str,body:MovementInput,account:dict[str,Any]):
         if employee.get("department")!=assigned_department: raise HTTPException(403,f"Choose an employee from {assigned_department}.")
         if not _is_eligible(employee,tool): raise HTTPException(409,"This employee is not currently trained, qualified and authorized for this equipment.")
         due_checks=_inspection_due(tool)
-        if due_checks: raise HTTPException(409,f"Complete the overdue {', '.join(item.replace('_',' ') for item in due_checks)} check before issuing or transferring this equipment.")
+        if due_checks:
+            names=", ".join(item.replace("_"," ") for item in due_checks)
+            if not body.override_due_checks: raise HTTPException(409,f"The {names} check is overdue. Complete it, or issue anyway with a written reason (an Administrator or Issuer may override).")
+            reason=(body.override_reason or "").strip()
+            if len(reason)<5: raise HTTPException(422,"Give a reason of at least 5 characters to issue equipment with an overdue check.")
+            override_note=f"overdue {names} check overridden: {reason}"
         if body.kind=="issue" and tool.get("pre_use_check_required",True) and not body.pre_use_check_completed: raise HTTPException(409,"Confirm the employee completed the pre-use inspection before issue.")
     now=_now(); after=dict(tool); location=(body.location or tool.get("storage_location") or "Unspecified").strip()
     if body.kind=="return":
@@ -604,6 +609,7 @@ def _move(tool_id:str,body:MovementInput,account:dict[str,Any]):
         old=tool.get("custody") or {}; custody={**old,"employee_id":employee["id"],"employee_number":employee["employee_number"],"employee_name":employee["name"],"department":employee["department"],"location":location,"job_reference":body.job_reference or old.get("job_reference"),"assigned_equipment":body.assigned_equipment or old.get("assigned_equipment",[]),"expected_return_at":body.expected_return_at or old.get("expected_return_at"),"issued_at":old.get("issued_at") or now,"original_due_at":old.get("original_due_at") or body.expected_return_at,"issued_by":account["name"],"notes":body.notes,"approval_ref":body.approval_ref}; after.update(status="issued",storage_location=location,custody=custody,notes=body.notes,approval_ref=body.approval_ref or tool.get("approval_ref"))
     targets=", ".join(body.assigned_equipment)
     detail={"issue":f"Issued to {employee['name']}"+(f" for {targets}" if targets else "") if employee else "Issued","return":f"Returned to {location}","transfer":f"Transferred to {employee['name']}" if employee else "Transferred","extend":f"Return date changed to {body.expected_return_at}"}[body.kind]
+    if override_note: detail+=f" ({override_note})"
     result=_apply_change(tool,after,body.kind,account["name"],detail,employee,body.idempotency_key)
     if body.kind=="issue" and tool.get("pre_use_check_required",True):
         inspected=datetime.now(timezone.utc)
@@ -614,7 +620,7 @@ def _move(tool_id:str,body:MovementInput,account:dict[str,Any]):
 def move_tool(tool_id:str,body:MovementInput,account=Depends(_issuer)): return _move(tool_id,body,account)
 @router.post("/tools/{tool_id}/issue")
 def issue_tool(tool_id:str,body:IssueInput,account=Depends(_issuer)):
-    return _move(tool_id,MovementInput(kind="issue",employee_id=body.employee_id,location=body.location,expected_return_at=body.expected_return_at,job_reference=body.job_reference,assigned_equipment=body.assigned_equipment,notes=body.notes,pre_use_check_completed=True),account)
+    return _move(tool_id,MovementInput(kind="issue",employee_id=body.employee_id,location=body.location,expected_return_at=body.expected_return_at,job_reference=body.job_reference,assigned_equipment=body.assigned_equipment,notes=body.notes,pre_use_check_completed=True,override_due_checks=body.override_due_checks,override_reason=body.override_reason),account)
 @router.post("/tools/{tool_id}/return")
 def return_tool(tool_id:str,body:ReturnInput,account=Depends(_issuer)):
     return _move(tool_id,MovementInput(kind="return",location=body.location,condition=body.condition,notes=body.notes),account)
