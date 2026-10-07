@@ -350,6 +350,21 @@ async def test_update_rejects_work_on_leave(patch_supabase):
     assert "2024-03-04" in exc.value.detail
 
 
+async def test_update_with_corrupt_existing_row_is_a_500(patch_supabase):
+    patch_supabase({
+        "select_return": [{"id": 2}],
+        "leaves_return": [],
+        "update_return": [{"id": 2}],
+    })
+    with pytest.raises(HTTPException) as exc:
+        await update_artisan_timesheet(
+            2,
+            ArtisanTimesheetUpdate(daily_rows=[{"date": "2024-03-01", "day": "Fri"}]),
+            current_user=CURRENT_USER,
+        )
+    assert exc.value.status_code == 500
+
+
 async def test_update_without_daily_rows_skips_the_leave_check(patch_supabase):
     fake = patch_supabase({
         "select_return": [{"id": 2, "employee_id": "C001", "employee_name": "Alice", "year": 2024, "month": 3, "daily_rows": "[]"}],

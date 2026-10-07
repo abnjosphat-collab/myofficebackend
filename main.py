@@ -252,6 +252,8 @@ for _name, _prefix, _tags, _key in [
     ("lookup_lists", "/api/lookup-lists", ["Lookup Lists"], None),
     ("ppe_order_list", "/api/ppe-order-list", ["PPE Order List"], None),
     ("saved_quotations", "/api/quotations", ["Saved Quotations"], None),
+    ("duty_roster", "/api/duty-roster", ["Duty Roster"], None),
+    ("standby_rotations", "/api/standby-rotations", ["Standby Rotations"], None),
 ]:
     register_router(_name, _prefix, _tags, _key)
 

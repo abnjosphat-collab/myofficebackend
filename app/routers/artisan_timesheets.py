@@ -266,10 +266,13 @@ async def update_artisan_timesheet(
             return _decode(existing)
 
         if body.daily_rows is not None:
+            raw_employee = data.get("employee_id", existing.get("employee_id"))
+            raw_year = data.get("year", existing.get("year"))
+            raw_month = data.get("month", existing.get("month"))
+            if not isinstance(raw_employee, str) or not isinstance(raw_year, int) or not isinstance(raw_month, int):
+                raise HTTPException(status_code=500, detail="Timesheet is missing employee or period")
             leave_dates = _approved_leave_dates(
-                data.get("employee_id", existing.get("employee_id")),
-                data.get("year", existing.get("year")),
-                data.get("month", existing.get("month")),
+                raw_employee, raw_year, raw_month
             )
             _reject_work_on_leave(body.daily_rows, leave_dates)
 
