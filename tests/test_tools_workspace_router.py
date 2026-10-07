@@ -155,6 +155,27 @@ def test_a_named_authoriser_is_recorded_instead_of_the_signed_in_account():
     assert default.json()["authorized_by"] != "Edson Mavhondo"
 
 
+def test_an_employee_can_be_deactivated_and_reactivated_without_losing_their_approvals():
+    auth, employee, tool = _eligible_tool_with_checks_due()
+    off = client.patch(f"/api/tools-workspace/employees/{employee['id']}", headers=auth, json={"active": False})
+    assert off.status_code == 200 and off.json()["active"] is False
+    listed = client.get("/api/tools-workspace/employees", headers=auth).json()
+    assert next(item for item in listed if item["id"] == employee["id"])["active"] is False
+    on = client.patch(f"/api/tools-workspace/employees/{employee['id']}", headers=auth, json={"active": True})
+    assert on.json()["active"] is True
+    assert any(person["id"] == employee["id"] for person in next(item for item in client.get("/api/tools-workspace/tools", headers=auth).json() if item["id"] == tool["id"])["eligible_employees"])
+
+
+def test_an_employee_holding_equipment_cannot_be_deactivated_and_a_viewer_cannot_try():
+    auth, employee, tool = _eligible_tool_with_checks_due()
+    issued = client.post(f"/api/tools-workspace/tools/{tool['id']}/issue", headers=auth, json={"employee_id": employee["id"], "location": "Plant 4", "job_reference": "WO-9", "override_due_checks": True, "override_reason": "Urgent breakdown"})
+    assert issued.status_code == 200
+    blocked = client.patch(f"/api/tools-workspace/employees/{employee['id']}", headers=auth, json={"active": False})
+    assert blocked.status_code == 409 and "holds equipment" in blocked.json()["detail"]
+    viewer = register("viewer-deactivate")
+    assert client.patch(f"/api/tools-workspace/employees/{employee['id']}", headers={"Authorization": f"Bearer {viewer}"}, json={"active": False}).status_code == 403
+
+
 def test_a_viewer_cannot_override_overdue_checks():
     auth, employee, tool = _eligible_tool_with_checks_due()
     viewer = register("viewer-override")

@@ -338,6 +338,16 @@ def read_notifications(body:NotificationReadInput,account=Depends(_session)):
 
 @router.get("/employees")
 def list_employees(account=Depends(_session)): return _visible_records("employees",account)
+class EmployeeActiveInput(BaseModel): active:bool
+@router.patch("/employees/{employee_id}")
+def set_employee_active(employee_id:str,body:EmployeeActiveInput,account=Depends(_operator)):
+    """Deactivate or reactivate an employee. Nothing is deleted: approvals and history stay, and the person simply stops being offered for issue and drops out of the default list."""
+    employee=_find("employees","id",employee_id)
+    if not employee: raise HTTPException(404,"Employee was not found.")
+    _ensure_managed_department(account,employee.get("department"))
+    if not body.active and any((tool.get("custody") or {}).get("employee_id")==employee["id"] for tool in _all("tools")):
+        raise HTTPException(409,"This employee still holds equipment. Receive it back before deactivating them.")
+    return _update("employees",employee["id"],{"active":body.active})
 @router.post("/employees",status_code=201)
 def create_employee(body:EmployeeInput,account=Depends(_operator)):
     _ensure_managed_department(account,body.department)
