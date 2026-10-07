@@ -24,6 +24,19 @@ Overdue calculation treats rows with `due_date` and `status != 'completed'`. Any
 | Modals / forms | frontend `components/maintenance/CreateWorkOrderModal.tsx`, `WorkOrderDetailModal.tsx`, `formFields.tsx`, `analytics.tsx` |
 | Related ops | Breakdowns, requisitions, spares, equipment pages may link or reference maintenance context — grep before assuming isolation |
 
+## Audit trail, row version and comments (slice 1 of the Maintenance rebuild)
+
+Needs `supabase_migration_maintenance_audit.sql` (applied by the owner, not by code). Rehearse it with `scripts/test_maintenance_audit_sql.sh`.
+
+| Endpoint | Behaviour |
+|---|---|
+| `PATCH /work-orders/{id}` | Optional body field `version`. If it is sent and is not the current row version the write is refused with **409** and `detail = {code: "version_conflict", message, current: <row>}`; nothing is written. Without `version` the call behaves as before. The database bumps `version` on every update. |
+| `GET /work-orders/{id}/events` | The audit trail, newest first. A failed read is an error, never an empty list. |
+| `GET /work-orders/{id}/comments` | Comments, oldest first. |
+| `POST /work-orders/{id}/comments` | `user` role or above. Body `{body}`, 1 to 4000 characters, not blank. |
+
+Create, update, delete and comment each append one `maintenance_events` row (`app/maintenance_events.py`). The row is written after the change; if the append fails the change stands and the failure is logged at ERROR. Signature images are not copied into the change list.
+
 ## Journey checklist (when touching WOs)
 
 - [ ] Create / edit / assign / schedule fields persist correctly (`exclude_unset` on PATCH — no null-clear regressions).

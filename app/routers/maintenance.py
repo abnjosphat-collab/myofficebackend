@@ -1,6 +1,6 @@
 # backend/app/routes/maintenance.py
 from fastapi import APIRouter, HTTPException, Depends
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from typing import Optional, List, Dict, Any
 from datetime import datetime, date
 from app.supabase_client import supabase, rows, one_row
@@ -9,6 +9,7 @@ from app.cache import cached, cache_get, cache_set, build_key, invalidate_namesp
 from app.serialization import convert_dates_to_iso
 from app.aggregation import count_by
 from app.db_helpers import fetch_all_pages, get_or_404
+from app.maintenance_events import append_event, diff_changes
 import logging
 import json
 import re
@@ -161,6 +162,22 @@ class WorkOrderUpdate(BaseModel):
     discipline: Optional[str] = None
     trade: Optional[str] = None
     spares_used: Optional[List[Dict[str, Any]]] = None
+    # The row version the editor loaded. When sent, the write is refused with 409 if someone saved first.
+    # Optional so callers that predate the audit trail keep working (R38); it is never stored as a column
+    # value (the database bumps it).
+    version: Optional[int] = None
+
+
+class WorkOrderCommentCreate(BaseModel):
+    body: str = Field(..., min_length=1, max_length=4000)
+
+    @field_validator("body")
+    @classmethod
+    def _not_blank(cls, v: str) -> str:
+        v = v.strip()
+        if not v:
+            raise ValueError("A comment cannot be empty")
+        return v
 
 # ==================== PPE MODELS (if not already separate) ====================
 class PPEIssueCreate(BaseModel):
@@ -369,6 +386,11 @@ async def create_work_order(work_order: WorkOrderCreate, current_user: dict = De
             created = one_row(response)
             if created is not None:
                 result = prepare_data_for_response(created)
+                append_event(
+                    supabase, entity="work_order", entity_id=created["id"], action="created",
+                    user=current_user, entity_number=created.get("work_order_number"),
+                    to_status=created.get("status"),
+                )
                 await invalidate_namespace("work_orders")
                 return result
             raise HTTPException(status_code=500, detail="Failed to create work order")
@@ -397,7 +419,7 @@ async def get_work_order(work_order_id: int):
 @router.patch("/work-orders/{work_order_id}")
 async def update_work_order(work_order_id: int, updated: WorkOrderUpdate, current_user: dict = Depends(get_current_user)):
     try:
-        get_or_404(supabase, "work_orders", work_order_id, detail="Work order not found")
+        before = dict(get_or_404(supabase, "work_orders", work_order_id, detail="Work order not found"))
 
         # exclude_unset, not "drop every None": fields the client didn't send are
         # omitted either way (identical behaviour for normal partial updates), but
@@ -405,31 +427,74 @@ async def update_work_order(work_order_id: int, updated: WorkOrderUpdate, curren
         # being silently ignored. Without this there is no way to clear a due date —
         # the save would report success and change nothing.
         data_to_update = updated.model_dump(exclude_unset=True)
+        # The version is a precondition, not a value to store.
+        expected_version = data_to_update.pop("version", None)
         data_to_update = prepare_data_for_db(data_to_update)
         data_to_update["updated_at"] = datetime.utcnow().isoformat()
-        
-        response = supabase.table("work_orders").update(data_to_update).eq("id", work_order_id).execute()
 
-        updated = one_row(response)
-        if updated is not None:
-            result = prepare_data_for_response(updated)
-            await invalidate_namespace("work_orders")
-            return result
-        else:
+        # Optimistic concurrency. Only enforced when the editor sent the version it loaded AND the
+        # database has the column (supabase_migration_maintenance_audit.sql); callers that send no
+        # version behave exactly as before.
+        guard_version = expected_version is not None and before.get("version") is not None
+        if guard_version and before["version"] != expected_version:
+            raise _version_conflict(before)
+
+        query = supabase.table("work_orders").update(data_to_update).eq("id", work_order_id)
+        if guard_version:
+            query = query.eq("version", expected_version)
+        response = query.execute()
+
+        saved = one_row(response)
+        if saved is None:
+            if guard_version:
+                # Passed the check above but someone saved between the read and the write.
+                current = supabase.table("work_orders").select("*").eq("id", work_order_id).execute()
+                raise _version_conflict(one_row(current) or before)
             raise HTTPException(status_code=500, detail="Update failed")
-            
+
+        changes = diff_changes(before, saved, fields=data_to_update.keys())
+        if changes:
+            append_event(
+                supabase, entity="work_order", entity_id=work_order_id, action="updated",
+                user=current_user, entity_number=saved.get("work_order_number") or before.get("work_order_number"),
+                from_status=before.get("status") if "status" in changes else None,
+                to_status=saved.get("status") if "status" in changes else None,
+                changes=changes,
+            )
+        result = prepare_data_for_response(saved)
+        await invalidate_namespace("work_orders")
+        return result
+
     except HTTPException:
         raise
     except Exception as e:
         logger.error(f"Error updating work order: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Error updating work order: {str(e)}")
 
+
+def _version_conflict(current: dict) -> HTTPException:
+    """409 carrying the row as it is now, so the editor can show what changed and keep its own typing."""
+    return HTTPException(
+        status_code=409,
+        detail={
+            "code": "version_conflict",
+            "message": "This work order was changed by someone else since you opened it.",
+            "current": prepare_data_for_response(current),
+        },
+    )
+
+
 @router.delete("/work-orders/{work_order_id}")
 async def delete_work_order(work_order_id: int, current_user: dict = Depends(require_role('manager'))):
     try:
-        get_or_404(supabase, "work_orders", work_order_id, detail="Work order not found")
+        existing = get_or_404(supabase, "work_orders", work_order_id, detail="Work order not found")
 
         supabase.table("work_orders").delete().eq("id", work_order_id).execute()
+        append_event(
+            supabase, entity="work_order", entity_id=work_order_id, action="deleted",
+            user=current_user, entity_number=existing.get("work_order_number"),
+            from_status=existing.get("status"),
+        )
         await invalidate_namespace("work_orders")
         return {"success": True, "message": "Work order deleted successfully"}
         
@@ -438,6 +503,72 @@ async def delete_work_order(work_order_id: int, current_user: dict = Depends(req
     except Exception as e:
         logger.error(f"Error deleting work order: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Error deleting work order: {str(e)}")
+
+@router.get("/work-orders/{work_order_id}/events", dependencies=[Depends(get_current_user)])
+async def get_work_order_events(work_order_id: int):
+    """The audit trail of one work order, newest first.
+
+    A work order created before the trail began simply has no rows; the screen says so. A failed read is a
+    real error (500 or the upstream status), never an empty list.
+    """
+    try:
+        resp = (
+            supabase.table("maintenance_events").select("*")
+            .eq("entity", "work_order").eq("entity_id", work_order_id)
+            .order("created_at", desc=True).order("id", desc=True)
+            .execute()
+        )
+        return rows(resp)
+    except Exception as e:
+        logger.error(f"Error fetching work order events: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error fetching work order events: {str(e)}")
+
+
+@router.get("/work-orders/{work_order_id}/comments", dependencies=[Depends(get_current_user)])
+async def get_work_order_comments(work_order_id: int):
+    """Comments on a work order, oldest first (a conversation reads downwards)."""
+    try:
+        resp = (
+            supabase.table("work_order_comments").select("*")
+            .eq("work_order_id", work_order_id)
+            .order("created_at").order("id")
+            .execute()
+        )
+        return rows(resp)
+    except Exception as e:
+        logger.error(f"Error fetching work order comments: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error fetching work order comments: {str(e)}")
+
+
+@router.post("/work-orders/{work_order_id}/comments", status_code=201)
+async def add_work_order_comment(
+    work_order_id: int,
+    comment: WorkOrderCommentCreate,
+    current_user: dict = Depends(require_role("user")),
+):
+    """Add a comment to a work order. Any signed-in user above viewer may comment."""
+    try:
+        wo = get_or_404(supabase, "work_orders", work_order_id, detail="Work order not found")
+        resp = supabase.table("work_order_comments").insert({
+            "work_order_id": work_order_id,
+            "body": comment.body,
+            "author_user_id": current_user.get("user_id"),
+            "author_name": current_user.get("email") or "",
+        }).execute()
+        created = one_row(resp)
+        if created is None:
+            raise HTTPException(status_code=500, detail="Failed to save comment")
+        append_event(
+            supabase, entity="work_order", entity_id=work_order_id, action="commented",
+            user=current_user, entity_number=wo.get("work_order_number"), note=comment.body[:500],
+        )
+        return created
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error adding work order comment: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error adding work order comment: {str(e)}")
+
 
 @router.get("/work-orders/allocated/{allocated_to}", dependencies=[Depends(get_current_user)])
 async def get_work_orders_by_allocated(allocated_to: str):
