@@ -3,8 +3,9 @@
 
 from fastapi import APIRouter, HTTPException, Query, Depends
 from pydantic import BaseModel, Field
-from typing import Optional, List, Dict, Any
-from datetime import datetime
+from typing import Optional, List, Dict, Any, Set
+from datetime import date, datetime, timedelta
+from calendar import monthrange
 import logging
 
 from app.supabase_client import supabase, rows, one_row
@@ -23,6 +24,14 @@ SUMMARY_COLUMNS = (
     "id,employee_id,employee_db_id,employee_name,id_number,year,month,shift_rate,hourly_rate,"
     "compiled_by,approved_electrical_foreman,approved_mechanical_foreman,authorized_by,created_at,updated_at"
 )
+
+# Day statuses owned by the Leaves module — mirrors the frontend's
+# LEAVE_DAY_STATUSES in app/artisan-timesheets/dayStatus.ts. Nobody works on
+# leave: a day with one of these statuses (or covered by approved leave, even
+# unmarked) credits 8 normal hours and nothing else — no overtime, no standby,
+# no sign-in/out.
+LEAVE_DAY_STATUSES = frozenset({"leave", "sick", "special_leave", "maternity", "study", "lieu"})
+LEAVE_NORMAL_HRS = 8
 
 
 class DailyRow(BaseModel):
@@ -94,6 +103,78 @@ def _now() -> str:
     return datetime.utcnow().isoformat()
 
 
+def _approved_leave_dates(employee_id: str, year: int, month: int) -> Set[str]:
+    """Dates in (year, month) covered by approved leave for this employee.
+
+    Matched loosely (trimmed, case-insensitive) like the frontend's sameEmployee,
+    and tolerant of datetime-suffixed dates like dayPart — a leave typed with a
+    stray space still blocks work on those dates."""
+    last_day = monthrange(year, month)[1]
+    month_start = f"{year:04d}-{month:02d}-01"
+    month_end = f"{year:04d}-{month:02d}-{last_day:02d}"
+    response = (
+        supabase.table("leaves")
+        .select("employee_id,start_date,end_date")
+        .eq("status", "approved")
+        .gte("end_date", month_start)
+        .lte("start_date", month_end)
+        .execute()
+    )
+    want = (employee_id or "").strip().upper()
+    dates: Set[str] = set()
+    for leave in rows(response):
+        if (leave.get("employee_id") or "").strip().upper() != want:
+            continue
+        start = str(leave.get("start_date") or "")[:10]
+        end = str(leave.get("end_date") or "")[:10]
+        if not start or not end or end < start:
+            continue
+        day = max(start, month_start)
+        stop = min(end, month_end)
+        while day <= stop:
+            dates.add(day)
+            day = (date.fromisoformat(day) + timedelta(days=1)).isoformat()
+    return dates
+
+
+def _leave_violations(daily_rows: List[DailyRow], leave_dates: Set[str]) -> List[str]:
+    """One message per work trace found on a leave day — by day status, or by
+    approved leave covering the date even when the row was never marked."""
+    found: List[str] = []
+    for row in daily_rows or []:
+        day = (row.date or "")[:10]
+        status_leave = (row.day_status or "") in LEAVE_DAY_STATUSES
+        if not status_leave and day not in leave_dates:
+            continue
+        label = row.day_status if status_leave else "approved leave"
+        worked = []
+        if row.ot_15:
+            worked.append(f"{row.ot_15:g}h overtime at 1.5x")
+        if row.ot_20:
+            worked.append(f"{row.ot_20:g}h overtime at 2.0x")
+        if row.sb_15:
+            worked.append(f"{row.sb_15:g}h standby at 1.5x")
+        if row.sb_20:
+            worked.append(f"{row.sb_20:g}h standby at 2.0x")
+        if row.night_shift:
+            worked.append(f"{row.night_shift:g}h night shift")
+        if worked:
+            found.append(f"{day} is {label} but has {', '.join(worked)} recorded — nobody works on a leave day.")
+        if row.normal_hrs != LEAVE_NORMAL_HRS:
+            found.append(f"{day} is {label} but credits {row.normal_hrs:g} normal hours instead of 8.")
+        if row.on_standby:
+            found.append(f"{day} is {label} but is marked on standby — nobody works on a leave day.")
+        if row.sign_in_time or row.sign_out_time or row.sign_in_signature or row.sign_out_signature:
+            found.append(f"{day} is {label} but has a sign-in/out record — nobody works on a leave day.")
+    return found
+
+
+def _reject_work_on_leave(daily_rows: List[DailyRow], leave_dates: Set[str]) -> None:
+    problems = _leave_violations(daily_rows, leave_dates)
+    if problems:
+        raise HTTPException(status_code=422, detail="; ".join(problems))
+
+
 @router.get("")
 async def list_artisan_timesheets(
     employee_id: Optional[str] = Query(None),
@@ -150,6 +231,11 @@ async def create_artisan_timesheet(body: ArtisanTimesheetCreate, current_user: d
                 detail="A timesheet for this employee, month, and year already exists. Open and update it instead.",
             )
 
+        _reject_work_on_leave(
+            body.daily_rows,
+            _approved_leave_dates(body.employee_id, body.year, body.month),
+        )
+
         payload = encode_json_fields(body.dict(), JSON_FIELDS)
         now = _now()
         payload["created_at"] = now
@@ -174,11 +260,18 @@ async def update_artisan_timesheet(
     current_user: dict = Depends(get_current_user),
 ):
     try:
-        get_or_404(supabase, TABLE, timesheet_id, detail="Artisan timesheet not found")
+        existing = get_or_404(supabase, TABLE, timesheet_id, detail="Artisan timesheet not found")
         data = body.dict(exclude_unset=True)
         if not data:
-            row = get_or_404(supabase, TABLE, timesheet_id, detail="Artisan timesheet not found")
-            return _decode(row)
+            return _decode(existing)
+
+        if body.daily_rows is not None:
+            leave_dates = _approved_leave_dates(
+                data.get("employee_id", existing.get("employee_id")),
+                data.get("year", existing.get("year")),
+                data.get("month", existing.get("month")),
+            )
+            _reject_work_on_leave(body.daily_rows, leave_dates)
 
         payload = encode_json_fields(data, JSON_FIELDS)
         payload["updated_at"] = _now()
