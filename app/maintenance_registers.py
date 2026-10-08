@@ -25,9 +25,10 @@ from app.supabase_client import rows
 
 logger = logging.getLogger(__name__)
 
-# The work order columns that put a person on the job. The requester is not one of them: asking for
-# work while on leave is allowed, doing it is not.
-ASSIGNMENT_FIELDS = ("allocated_to", "responsible_foreman", "authorising_foreman", "artisan_name", "foreman_name")
+# The work order columns that put a person on the job from now on. Not the requester (asking for work
+# while on leave is allowed, doing it is not), and not ``artisan_name`` or ``foreman_name``: those record
+# who did the work and signed it off, which can be true of someone who went on leave since.
+ASSIGNMENT_FIELDS = ("allocated_to", "responsible_foreman", "authorising_foreman")
 
 LEAVES_TABLE = "leaves"
 TOOLS_TABLE = "tools_workspace_equipment"

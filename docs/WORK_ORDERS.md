@@ -48,7 +48,7 @@ Code: `app/maintenance_registers.py`. Migration: `supabase_migration_maintenance
 | `GET /work-orders/{id}/tools` | Tools the job needs. |
 | `PUT /work-orders/{id}/tools` | `user` role or above. Replaces the list (max 50); a repeated register number is kept once; a null register number is a free-text tool. Audited. A failed save restores the previous list. |
 
-**The leave rule.** Creating a work order, or changing `allocated_to`, `responsible_foreman`, `authorising_foreman`, `artisan_name` or `foreman_name`, is refused with 409 `{code: "person_on_leave", message, people}` when the name matches someone on approved leave today (case and spacing ignored). Only names being set or changed are checked, so an old record can still be saved. The requester is not checked. If the leave register cannot be read the answer is 503, never "nobody is on leave". Same for the tools feed: a failed read is a 503, never an empty list.
+**The leave rule.** Creating a work order, or changing `allocated_to`, `responsible_foreman` or `authorising_foreman`, is refused with 409 `{code: "person_on_leave", message, people}` when the name matches someone on approved leave today (case and spacing ignored). Only names being set or changed are checked, so an old record can still be saved. The requester is not checked, and neither are `artisan_name` and `foreman_name`: they record who did the work and signed it off, which can be true of someone who has since gone on leave. If the leave register cannot be read the answer is 503, never "nobody is on leave". Same for the tools feed: a failed read is a 503, never an empty list.
 
 ## Journey checklist (when touching WOs)
 

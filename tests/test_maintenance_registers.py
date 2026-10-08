@@ -69,24 +69,24 @@ def test_refuse_names_the_person_and_the_return_date():
 def test_refuse_matches_a_typed_name_ignoring_case_and_spacing():
     db = _db(leaves=[_leave("T. Banda")])
     with pytest.raises(HTTPException):
-        reg.refuse_people_on_leave(db, {"artisan_name": "  t.   BANDA "}, on=TODAY)
+        reg.refuse_people_on_leave(db, {"responsible_foreman": "  t.   BANDA "}, on=TODAY)
 
 
 def test_refuse_allows_people_not_on_leave_and_blank_fields():
     db = _db(leaves=[_leave("Someone Else")])
-    reg.refuse_people_on_leave(db, {"allocated_to": "T. Banda", "artisan_name": ""}, on=TODAY)
+    reg.refuse_people_on_leave(db, {"allocated_to": "T. Banda", "responsible_foreman": ""}, on=TODAY)
 
 
 def test_refuse_does_not_read_leave_when_no_person_is_named():
     class Boom:
         def table(self, name): raise AssertionError("must not read")
 
-    reg.refuse_people_on_leave(Boom(), {"allocated_to": "", "artisan_name": None}, on=TODAY)
+    reg.refuse_people_on_leave(Boom(), {"allocated_to": "", "responsible_foreman": None}, on=TODAY)
 
 
-def test_refuse_ignores_the_requester():
+def test_refuse_ignores_the_requester_and_the_sign_off_names():
     db = _db(leaves=[_leave("J. Moyo")])
-    reg.refuse_people_on_leave(db, {"requested_by": "J. Moyo"}, on=TODAY)
+    reg.refuse_people_on_leave(db, {"requested_by": "J. Moyo", "artisan_name": "J. Moyo", "foreman_name": "J. Moyo"}, on=TODAY)
 
 
 # ─── the rule on create and update ──────────────────────────────────────────────────
