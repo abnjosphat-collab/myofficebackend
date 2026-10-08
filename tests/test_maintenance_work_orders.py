@@ -338,8 +338,9 @@ class _RetryTable:
     """work_orders table whose insert() raises a unique-violation `fail_times` times
     before succeeding — exercises create_work_order's actual retry loop (not just the
     pure helpers in test_work_order_number.py)."""
-    def __init__(self, state):
+    def __init__(self, state, name="work_orders"):
         self.state = state
+        self.name = name
         self._mode = None
         self._payload = None
 
@@ -356,6 +357,8 @@ class _RetryTable:
         return self
 
     def execute(self):
+        if self.name != "work_orders":
+            return _Resp([dict(self._payload or {}, id=1)])  # the audit row is not a creation attempt
         if self._mode == "select":
             return _Resp(self.state["existing"])
         self.state["attempts"] += 1
@@ -370,7 +373,7 @@ class _RetrySupabase:
         self.state = state
 
     def table(self, name):
-        return _RetryTable(self.state)
+        return _RetryTable(self.state, name)
 
 
 async def test_create_work_order_retries_past_a_number_collision_then_succeeds(monkeypatch):
