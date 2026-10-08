@@ -122,6 +122,32 @@ def test_viewer_cannot_issue_but_issuer_creates_complete_history():
     assert all(event["event_at"] for event in trail[:2])
 
 
+def test_register_fields_are_kept_and_faulty_equipment_is_held_for_attention():
+    admin, _ = admin_and_issuer()
+    admin_auth = {"Authorization": f"Bearer {admin}"}
+    fields = {"purchase_date": "2024-03-15", "procurement_cost": 1250.5, "insured": True, "last_verified": "Q2-2026", "working_status": "working"}
+    good = client.post("/api/tools-workspace/tools", headers=admin_auth, json={"register_number": "F-1", "name": "Bench grinder", "storage_location": "Workshop", **fields}).json()
+    assert {key: good[key] for key in fields} == fields and good["status"] == "available"
+    broken = client.post("/api/tools-workspace/tools", headers=admin_auth, json={"register_number": "F-2", "name": "Pedestal drill", "storage_location": "Workshop", "working_status": "not_working", "condition": "Defective"}).json()
+    assert broken["status"] == "attention" and broken["working_status"] == "not_working"
+    missing = client.post("/api/tools-workspace/tools", headers=admin_auth, json={"register_number": "F-3", "name": "Grinder", "storage_location": "Workshop", "condition": "Missing"}).json()
+    assert missing["status"] == "attention"
+    edited = client.patch(f"/api/tools-workspace/tools/{good['id']}", headers=admin_auth, json={"working_status": "not_working"}).json()
+    assert edited["status"] == "attention" and edited["procurement_cost"] == 1250.5
+    # Editing the details does not quietly clear the fault: that is Mark ready, which records who resolved it.
+    again = client.patch(f"/api/tools-workspace/tools/{good['id']}", headers=admin_auth, json={"working_status": "working", "condition": "Good"}).json()
+    assert again["status"] == "attention"
+
+
+def test_register_fields_reject_a_malformed_date_and_a_negative_cost():
+    admin, _ = admin_and_issuer()
+    admin_auth = {"Authorization": f"Bearer {admin}"}
+    base = {"register_number": "F-9", "name": "Clamp", "storage_location": "Workshop"}
+    assert client.post("/api/tools-workspace/tools", headers=admin_auth, json={**base, "purchase_date": "15/03/2024"}).status_code == 422
+    assert client.post("/api/tools-workspace/tools", headers=admin_auth, json={**base, "procurement_cost": -5}).status_code == 422
+    assert client.post("/api/tools-workspace/tools", headers=admin_auth, json={**base, "working_status": "broken"}).status_code == 422
+
+
 def _eligible_tool_with_checks_due():
     admin, issuer = admin_and_issuer()
     auth = {"Authorization": f"Bearer {issuer}"}
