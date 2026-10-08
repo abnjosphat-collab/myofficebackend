@@ -10,6 +10,7 @@ from app.serialization import convert_dates_to_iso
 from app.aggregation import count_by
 from app.db_helpers import fetch_all_pages, get_or_404
 from app.maintenance_events import append_event, diff_changes
+from app.maintenance_registers import ASSIGNMENT_FIELDS, people_on_leave, refuse_people_on_leave, tools_feed
 import logging
 import json
 import re
@@ -358,6 +359,9 @@ async def create_work_order(work_order: WorkOrderCreate, current_user: dict = De
         if data_to_insert.get('manpower') is None:
             data_to_insert['manpower'] = []
 
+        # Someone on approved leave cannot be put on the job, even when the name is typed in by hand.
+        refuse_people_on_leave(supabase, data_to_insert)
+
         # Prepare data for database
         data_to_insert = prepare_data_for_db(data_to_insert)
         data_to_insert["created_at"] = datetime.utcnow().isoformat()
@@ -429,6 +433,11 @@ async def update_work_order(work_order_id: int, updated: WorkOrderUpdate, curren
         data_to_update = updated.model_dump(exclude_unset=True)
         # The version is a precondition, not a value to store.
         expected_version = data_to_update.pop("version", None)
+        # Only a name that is being set or changed is checked, so an old record can still be saved.
+        refuse_people_on_leave(supabase, {
+            f: data_to_update[f] for f in ASSIGNMENT_FIELDS
+            if f in data_to_update and data_to_update[f] != before.get(f)
+        })
         data_to_update = prepare_data_for_db(data_to_update)
         data_to_update["updated_at"] = datetime.utcnow().isoformat()
 
@@ -568,6 +577,122 @@ async def add_work_order_comment(
     except Exception as e:
         logger.error(f"Error adding work order comment: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Error adding work order comment: {str(e)}")
+
+
+# ==================== REGISTERS AND TOOLS ====================
+class WorkOrderToolIn(BaseModel):
+    """One tool needed for a job. A null register number is a free-text tool that is not in the register."""
+    tool_register_number: Optional[str] = Field(default=None, max_length=80)
+    tool_name: str = Field(..., min_length=1, max_length=200)
+    note: Optional[str] = Field(default=None, max_length=500)
+
+    @field_validator("tool_name")
+    @classmethod
+    def _name_not_blank(cls, v: str) -> str:
+        if not v.strip():
+            raise ValueError("tool_name must not be blank")
+        return v.strip()
+
+
+class WorkOrderToolsReplace(BaseModel):
+    tools: List[WorkOrderToolIn] = Field(default_factory=list, max_length=50)
+
+
+@router.get("/registers/tools", dependencies=[Depends(get_current_user)])
+async def get_tools_register():
+    """Read-only feed of the Tools & Equipment register for the tool picker.
+
+    The Tools workspace has its own sign-in, so a maintenance page cannot call it. This reads the same
+    tables with the backend's own client, behind the normal MyOffice sign-in, and changes nothing.
+    """
+    return tools_feed(supabase)
+
+
+@router.get("/registers/leave", dependencies=[Depends(get_current_user)])
+async def get_people_on_leave(on: Optional[date] = None):
+    """People on approved leave on a day (today when ``on`` is omitted), for greying them out in pickers."""
+    return people_on_leave(supabase, on)
+
+
+@router.get("/work-orders/{work_order_id}/tools", dependencies=[Depends(get_current_user)])
+async def get_work_order_tools(work_order_id: int):
+    """The tools a work order needs, in the order they were added."""
+    try:
+        get_or_404(supabase, "work_orders", work_order_id, detail="Work order not found")
+        resp = (
+            supabase.table("work_order_tools").select("*")
+            .eq("work_order_id", work_order_id).order("id", desc=False).execute()
+        )
+        return rows(resp)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error loading work order tools: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error loading work order tools: {str(e)}")
+
+
+@router.put("/work-orders/{work_order_id}/tools")
+async def replace_work_order_tools(
+    work_order_id: int,
+    body: WorkOrderToolsReplace,
+    current_user: dict = Depends(require_role("user")),
+):
+    """Replace the tools list of a work order. Maintenance only records the need; custody stays in /tools."""
+    try:
+        wo = get_or_404(supabase, "work_orders", work_order_id, detail="Work order not found")
+
+        seen = set()
+        wanted = []
+        for tool in body.tools:
+            number = (tool.tool_register_number or "").strip() or None
+            if number:
+                if number in seen:
+                    continue
+                seen.add(number)
+            wanted.append({
+                "work_order_id": work_order_id,
+                "tool_register_number": number,
+                "tool_name": tool.tool_name,
+                "note": (tool.note or "").strip() or None,
+                "added_by": current_user.get("user_id"),
+            })
+
+        before = rows(
+            supabase.table("work_order_tools").select("*")
+            .eq("work_order_id", work_order_id).order("id", desc=False).execute()
+        )
+        supabase.table("work_order_tools").delete().eq("work_order_id", work_order_id).execute()
+        saved = []
+        try:
+            for row in wanted:
+                created = one_row(supabase.table("work_order_tools").insert(row).execute())
+                if created is None:
+                    raise RuntimeError("insert returned no row")
+                saved.append(created)
+        except Exception as write_err:
+            # Put the previous list back so a failed save never leaves the job with no tools.
+            logger.error(f"Saving tools for work order {work_order_id} failed, restoring: {write_err}")
+            supabase.table("work_order_tools").delete().eq("work_order_id", work_order_id).execute()
+            for old in before:
+                supabase.table("work_order_tools").insert({k: v for k, v in old.items() if k not in ("id", "created_at")}).execute()
+            raise HTTPException(status_code=500, detail="The tools could not be saved; the previous list was kept.")
+
+        def label(tool: dict) -> str:
+            return tool.get("tool_register_number") or tool.get("tool_name") or ""
+
+        old_names, new_names = [label(t) for t in before], [label(t) for t in saved]
+        if old_names != new_names:
+            append_event(
+                supabase, entity="work_order", entity_id=work_order_id, action="updated",
+                user=current_user, entity_number=wo.get("work_order_number"),
+                changes={"tools": [old_names, new_names]},
+            )
+        return saved
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error saving work order tools: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error saving work order tools: {str(e)}")
 
 
 @router.get("/work-orders/allocated/{allocated_to}", dependencies=[Depends(get_current_user)])
