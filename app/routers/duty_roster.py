@@ -1,4 +1,6 @@
-# duty_roster.py — Duty Official roster: who answers for the mine on each date range.
+# duty_roster.py — Duty Official overrides: explicitly named officials for chosen
+# date ranges. The repeating plan lives in duty_rotations; where an entry's
+# dates overlap a rotation, the named person wins for those dates.
 # Supabase table: duty_roster (see supabase_migration_duty_roster.sql)
 #
 # Scope rule: two entries clash only within the same scope — mine-wide entries
