@@ -117,3 +117,41 @@ def test_a_database_failure_is_reported_not_shown_as_an_empty_register(db):
     with pytest.raises(HTTPException) as err:
         run(get_inventory_items())
     assert err.value.status_code == 502
+
+
+# --- Failure paths ---
+
+def test_a_failed_read_of_one_item_is_a_502(db):
+    db.fail_ops.add("select")
+    with pytest.raises(HTTPException) as err:
+        run(get_inventory_item("id-1"))
+    assert err.value.status_code == 502
+
+
+def test_a_failed_save_is_reported_with_its_reason(db):
+    db.fail_ops.add("insert")
+    with pytest.raises(HTTPException) as err:
+        add()
+    assert err.value.status_code == 500 and "not saved" in err.value.detail
+
+
+def test_an_update_to_an_item_deleted_meanwhile_is_a_404(db, monkeypatch):
+    monkeypatch.setattr(inv_mod, "_row", lambda _id: {"id": "gone", "current_stock": 1})
+    with pytest.raises(HTTPException) as err:
+        run(update_inventory_item("gone", InventoryItemUpdate(location="B"), current_user=USER))
+    assert err.value.status_code == 404
+
+
+def test_filters_by_status_and_supplier(db):
+    add(name="Gloves", stock=0, supplier="Acme")
+    add(name="Boots", stock=10, supplier="SafeCo")
+    assert [i.name for i in run(get_inventory_items(status="out-of-stock"))] == ["Gloves"]
+    assert [i.name for i in run(get_inventory_items(supplier="SafeCo"))] == ["Boots"]
+
+
+def test_a_failed_delete_keeps_the_item(db):
+    item = add()
+    db.fail_ops.add("delete")
+    with pytest.raises(HTTPException) as err:
+        run(delete_inventory_item(item.id, current_user=MANAGER))
+    assert err.value.status_code == 500 and len(db.tables["inventory_items"]) == 1

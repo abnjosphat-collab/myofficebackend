@@ -19,6 +19,7 @@ from pydantic import BaseModel
 
 from app.aggregation import count_by
 from app.auth import get_current_user, require_role
+from app.db_helpers import response_rows
 from app.supabase_client import supabase
 from app.uploads import read_and_validate_upload
 
@@ -73,7 +74,7 @@ def _record(row: dict[str, Any]) -> CertificateRecord:
 
 def _all_records() -> List[CertificateRecord]:
     try:
-        rows = supabase.table(TABLE).select("*").order("expiry_date").execute().data or []
+        rows = response_rows(supabase.table(TABLE).select("*").order("expiry_date").execute())
     except Exception as e:
         logger.error("training list failed: %s", e)
         raise HTTPException(status_code=502, detail="Training records could not be read from the database.")
@@ -82,7 +83,7 @@ def _all_records() -> List[CertificateRecord]:
 
 def _one_row(record_id: str) -> dict[str, Any]:
     try:
-        rows = supabase.table(TABLE).select("*").eq("id", record_id).limit(1).execute().data or []
+        rows = response_rows(supabase.table(TABLE).select("*").eq("id", record_id).limit(1).execute())
     except Exception as e:
         logger.error("training read failed: %s", e)
         raise HTTPException(status_code=502, detail="Training record could not be read from the database.")
@@ -146,7 +147,7 @@ async def create_new_certification(
         "created_by": current_user.get("email"),
     }
     try:
-        saved = supabase.table(TABLE).insert(row).execute().data or []
+        saved = response_rows(supabase.table(TABLE).insert(row).execute())
     except Exception as e:
         _remove_file(path)
         raise HTTPException(status_code=500, detail=f"The certification was not saved: {e}")
@@ -189,13 +190,16 @@ async def update_certification(
         patch["certificate_path"], patch["certificate_url"] = new_path, url
     patch["updated_at"] = datetime.now(timezone.utc).isoformat()
     try:
-        saved = supabase.table(TABLE).update(patch).eq("id", record_id).execute().data or []
+        saved = response_rows(supabase.table(TABLE).update(patch).eq("id", record_id).execute())
     except Exception as e:
         _remove_file(new_path)
         raise HTTPException(status_code=500, detail=f"The certification was not updated: {e}")
+    if not saved:  # deleted by someone else since it was read: say so instead of reporting a save that did not happen
+        _remove_file(new_path)
+        raise HTTPException(status_code=404, detail="Certification record not found; it may have just been deleted.")
     if new_path:
         _remove_file(existing.get("certificate_path"))
-    return _record(saved[0] if saved else {**existing, **patch})
+    return _record(saved[0])
 
 
 @router.delete("/{record_id}")

@@ -9,16 +9,20 @@
 # router re-writing the loop around its own field name.
 
 from collections import Counter, defaultdict
-from typing import Any, Callable, Iterable, Union
+from typing import Any, Callable, Iterable, TypeVar, Union
 
-KeyFn = Union[str, Callable[[dict], Any]]
-
-
-def _resolve_key(key: KeyFn, default: Any) -> Callable[[dict], Any]:
-    return key if callable(key) else (lambda r: r.get(key, default))
+R = TypeVar('R')
+# A field name (for dict rows) or a function of the record (for dicts or objects such as Pydantic models).
+KeyFn = Union[str, Callable[[R], Any]]
 
 
-def count_by(records: Iterable[dict], key: KeyFn, default: Any = 'unknown') -> dict:
+def _resolve_key(key: "KeyFn[R]", default: Any) -> Callable[[R], Any]:
+    if callable(key):
+        return key
+    return lambda r: r.get(key, default)  # type: ignore[attr-defined]  # a string key is only used with dict rows
+
+
+def count_by(records: Iterable[R], key: "KeyFn[R]", default: Any = 'unknown') -> dict:
     """Count records grouped by a field name (`count_by(rows, 'status')`) or a
     key function (`count_by(rows, lambda r: r['a'] or r['b'])`). Returns a
     plain dict, not Counter, so it JSON-serializes directly in a response."""
@@ -26,7 +30,7 @@ def count_by(records: Iterable[dict], key: KeyFn, default: Any = 'unknown') -> d
     return dict(Counter(key_fn(r) for r in records))
 
 
-def sum_by(records: Iterable[dict], key: KeyFn, value: KeyFn, default: Any = 'unknown') -> dict:
+def sum_by(records: Iterable[R], key: "KeyFn[R]", value: "KeyFn[R]", default: Any = 'unknown') -> dict:
     """Like count_by, but sums a numeric field per group instead of counting
     rows — e.g. `sum_by(rows, 'department', 'downtime_minutes')`."""
     key_fn = _resolve_key(key, default)

@@ -1,7 +1,9 @@
 # tests/_table_fake.py — an in-memory stand-in for the Supabase client, for routers that read and write one
 # table (and optionally a storage bucket). It honours eq() filters, order(), limit(), insert(), update() and
 # delete(), so a test can assert what was really stored. `fail = True` makes every query raise, to check that
-# a database failure is reported rather than shown as an empty register.
+# a database failure is reported rather than shown as an empty register; `fail_ops` fails only the named
+# operations ('select', 'insert', 'update', 'delete'), and `fail_storage` the named bucket calls ('upload',
+# 'get_public_url', 'remove'), to exercise clean-up after a partial failure.
 
 import copy
 
@@ -43,7 +45,7 @@ class _Query:
         return self
 
     def execute(self):
-        if self.db.fail:
+        if self.db.fail or self.op in self.db.fail_ops:
             raise RuntimeError("database unavailable")
         rows = self.db.tables.setdefault(self.table, [])
         match = [r for r in rows if all(str(r.get(c)) == str(v) for c, v in self.filters)]
@@ -68,12 +70,18 @@ class _Bucket:
         self.db = db
 
     def upload(self, path, content, opts):
+        if 'upload' in self.db.fail_storage:
+            raise RuntimeError("storage unavailable")
         self.db.files[path] = content
 
     def get_public_url(self, path):
+        if 'get_public_url' in self.db.fail_storage:
+            raise RuntimeError("storage unavailable")
         return f"https://storage.example/{path}"
 
     def remove(self, paths):
+        if 'remove' in self.db.fail_storage:
+            raise RuntimeError("storage unavailable")
         for p in paths:
             self.db.files.pop(p, None)
 
@@ -81,6 +89,8 @@ class _Bucket:
 class TableFake:
     def __init__(self):
         self.tables, self.files, self.fail = {}, {}, False
+        self.fail_ops: set = set()
+        self.fail_storage: set = set()
         self.storage = type("Storage", (), {"from_": lambda _s, _bucket: _Bucket(self)})()
 
     def table(self, name):

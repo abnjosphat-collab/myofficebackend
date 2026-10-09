@@ -24,8 +24,12 @@ POSTGREST_PAGE_SIZE = 1000
 # what actually runs.
 
 
-def _response_rows(response: Any) -> List[dict]:
+def response_rows(response: Any) -> List[dict]:
+    """The rows of a Supabase response as typed dicts (the client types `.data` as generic JSON)."""
     return getattr(response, "data", response) or []
+
+
+_response_rows = response_rows  # earlier private name, kept for existing callers
 
 
 def get_or_404(db, table: str, id_value: Any, *, id_col: str = "id", detail: str = "Not found") -> dict:

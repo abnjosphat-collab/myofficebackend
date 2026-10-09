@@ -7,7 +7,7 @@ import subprocess
 import sys
 
 
-MAX_ERRORS = 215
+MAX_ERRORS = 198
 
 
 def main() -> int:

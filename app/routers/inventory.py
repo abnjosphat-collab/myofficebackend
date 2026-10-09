@@ -12,6 +12,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
 from app.auth import get_current_user, require_role
+from app.db_helpers import response_rows
 from app.supabase_client import supabase
 
 logger = logging.getLogger(__name__)
@@ -103,7 +104,7 @@ def _item(row: dict[str, Any]) -> InventoryItem:
 
 def _all() -> List[InventoryItem]:
     try:
-        rows = supabase.table(TABLE).select("*").order("name").execute().data or []
+        rows = response_rows(supabase.table(TABLE).select("*").order("name").execute())
     except Exception as e:
         logger.error("inventory list failed: %s", e)
         raise HTTPException(status_code=502, detail="Inventory could not be read from the database.")
@@ -112,7 +113,7 @@ def _all() -> List[InventoryItem]:
 
 def _row(item_id: str) -> dict[str, Any]:
     try:
-        rows = supabase.table(TABLE).select("*").eq("id", item_id).limit(1).execute().data or []
+        rows = response_rows(supabase.table(TABLE).select("*").eq("id", item_id).limit(1).execute())
     except Exception as e:
         logger.error("inventory read failed: %s", e)
         raise HTTPException(status_code=502, detail="The inventory item could not be read from the database.")
@@ -124,10 +125,12 @@ def _row(item_id: str) -> dict[str, Any]:
 def _write(op: str, data: dict[str, Any], item_id: Optional[str] = None) -> InventoryItem:
     try:
         q = supabase.table(TABLE)
-        result = (q.insert(data) if op == "insert" else q.update(data).eq("id", item_id)).execute().data or []
+        result = response_rows((q.insert(data) if op == "insert" else q.update(data).eq("id", item_id)).execute())
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"The inventory item was not saved: {e}")
     if not result:
+        if op == "update":  # deleted by someone else since it was read
+            raise HTTPException(status_code=404, detail="Inventory item not found; it may have just been deleted.")
         raise HTTPException(status_code=500, detail="The inventory item was not saved.")
     return _item(result[0])
 
