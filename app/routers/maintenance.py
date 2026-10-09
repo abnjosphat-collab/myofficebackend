@@ -10,6 +10,10 @@ from app.serialization import convert_dates_to_iso
 from app.aggregation import count_by
 from app.db_helpers import fetch_all_pages, get_or_404
 from app.maintenance_events import append_event, diff_changes
+from app.maintenance_rules import (
+    COMPLETED, IN_PROGRESS, allowed_moves, describe, find_move, is_signature, missing_permit_references, normalise_permits,
+)
+from app.auth import role_at_least
 from app.maintenance_registers import ASSIGNMENT_FIELDS, people_on_leave, refuse_people_on_leave, tools_feed
 import logging
 import json
@@ -29,6 +33,14 @@ class ManpowerRow(BaseModel):
     required_number: Optional[str] = None  # Made optional
     required_unit_time: Optional[str] = None  # Made optional
     total_man_hours: Optional[str] = None  # Made optional
+
+def _clean_permits(v):
+    """Shared validator: the permits object is checked and cleaned (unknown permit keys are refused)."""
+    try:
+        return normalise_permits(v)
+    except ValueError as err:
+        raise ValueError(str(err))
+
 
 class WorkOrderCreate(BaseModel):
     # Header Information
@@ -85,6 +97,13 @@ class WorkOrderCreate(BaseModel):
     title: Optional[str] = None
     description: Optional[str] = None
     status: str = "pending"
+    permits: Optional[Dict[str, Any]] = None
+
+    @field_validator("permits")
+    @classmethod
+    def _permits_shape(cls, v):
+        return None if v is None else _clean_permits(v)
+
     priority: str = "medium"
     department: Optional[str] = None
     equipment: Optional[str] = None
@@ -151,6 +170,13 @@ class WorkOrderUpdate(BaseModel):
     title: Optional[str] = None
     description: Optional[str] = None
     status: Optional[str] = None
+    permits: Optional[Dict[str, Any]] = None
+
+    @field_validator("permits")
+    @classmethod
+    def _permits_shape(cls, v):
+        return None if v is None else _clean_permits(v)
+
     priority: Optional[str] = None
     department: Optional[str] = None
     equipment: Optional[str] = None
@@ -441,6 +467,15 @@ async def update_work_order(work_order_id: int, updated: WorkOrderUpdate, curren
         data_to_update = prepare_data_for_db(data_to_update)
         data_to_update["updated_at"] = datetime.utcnow().isoformat()
 
+        # Shadow mode for the lifecycle rules: a status edit the new rules would refuse is still performed
+        # (existing callers keep working) and is logged, so the rules can be enforced once the screens use /transition.
+        new_status = data_to_update.get("status")
+        if new_status and new_status != before.get("status"):
+            move = find_move(before.get("status"), new_status)
+            if move is None or not role_at_least(current_user.get("role", "viewer"), move.min_role):
+                logger.warning("shadow_refusal: work order %s status %s -> %s by %s not allowed by the lifecycle rules",
+                               work_order_id, before.get("status"), new_status, current_user.get("email"))
+
         # Optimistic concurrency. Only enforced when the editor sent the version it loaded AND the
         # database has the column (supabase_migration_maintenance_audit.sql); callers that send no
         # version behave exactly as before.
@@ -577,6 +612,159 @@ async def add_work_order_comment(
     except Exception as e:
         logger.error(f"Error adding work order comment: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Error adding work order comment: {str(e)}")
+
+
+# ==================== LIFECYCLE ====================
+class WorkOrderTransition(BaseModel):
+    """Move a work order to another status."""
+    to: str
+    version: Optional[int] = None
+    reason: Optional[str] = Field(default=None, max_length=1000)
+    artisan_sign: Optional[str] = None
+
+
+class WorkOrderSignoff(BaseModel):
+    """The foreman's signature on a completed work order."""
+    foreman_sign: str
+    version: Optional[int] = None
+    note: Optional[str] = Field(default=None, max_length=1000)
+
+
+def _lifecycle_columns(before: dict, **values: Any) -> dict:
+    """Only the lifecycle columns the table has, so the moves still work before supabase_migration_maintenance_lifecycle.sql is applied."""
+    return {k: v for k, v in values.items() if k in before}
+
+
+def _guarded_update(work_order_id: int, before: dict, values: dict, version: Optional[int]) -> dict:
+    """Update one work order only if nobody changed it since it was read. Raises 409 version_conflict otherwise."""
+    expected = version if version is not None else None
+    guard = expected is not None and before.get("version") is not None
+    if guard and before["version"] != expected:
+        raise _version_conflict(before)
+    query = supabase.table("work_orders").update(values).eq("id", work_order_id)
+    if guard:
+        query = query.eq("version", expected)
+    saved = one_row(query.execute())
+    if saved is None:
+        if guard:
+            current = supabase.table("work_orders").select("*").eq("id", work_order_id).execute()
+            raise _version_conflict(one_row(current) or before)
+        raise HTTPException(status_code=500, detail="Update failed")
+    return saved
+
+
+@router.get("/work-orders/{work_order_id}/transitions", dependencies=[Depends(get_current_user)])
+async def get_work_order_transitions(work_order_id: int, current_user: dict = Depends(get_current_user)):
+    """The status moves open to the signed-in user for this work order, and what each one needs."""
+    try:
+        wo = get_or_404(supabase, "work_orders", work_order_id, detail="Work order not found")
+        return [describe(m) for m in allowed_moves(wo.get("status"), current_user.get("role", "viewer"))]
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error loading work order transitions: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error loading work order transitions: {str(e)}")
+
+
+@router.post("/work-orders/{work_order_id}/transition")
+async def transition_work_order(
+    work_order_id: int,
+    body: WorkOrderTransition,
+    current_user: dict = Depends(require_role("user")),
+):
+    """Move a work order along its lifecycle (see ``app/maintenance_rules.py``).
+
+    The reason, the artisan's signature and the permit references are required where the rule says so.
+    A move to the status it already has is a no-op that returns the work order unchanged.
+    """
+    try:
+        before = dict(get_or_404(supabase, "work_orders", work_order_id, detail="Work order not found"))
+        if before.get("status") == body.to:
+            return prepare_data_for_response(before)
+
+        move = find_move(before.get("status"), body.to)
+        allowed = allowed_moves(before.get("status"), current_user.get("role", "viewer"))
+        if move is None:
+            raise HTTPException(status_code=409, detail={
+                "code": "transition_not_allowed",
+                "message": f"A work order that is {before.get('status') or 'new'} cannot be moved to {body.to}.",
+                "allowed": [describe(m) for m in allowed],
+            })
+        if move not in allowed:
+            raise HTTPException(status_code=403, detail={
+                "code": "forbidden_role",
+                "message": f"Moving a work order to {body.to} needs the {move.min_role} role.",
+            })
+        reason = (body.reason or "").strip()
+        if move.needs_reason and not reason:
+            raise HTTPException(status_code=422, detail={"code": "reason_required", "message": f"Give a reason for moving this work order to {body.to}."})
+        if move.needs_signature and not is_signature(body.artisan_sign):
+            raise HTTPException(status_code=422, detail={"code": "signature_required", "message": "The artisan's signature is needed to complete a work order."})
+        if move.checks_permits:
+            missing = missing_permit_references(before.get("permits"))
+            if missing:
+                raise HTTPException(status_code=422, detail={
+                    "code": "permit_reference_missing",
+                    "message": f"Add the reference for {', '.join(missing)} before starting this job.",
+                    "permits": missing,
+                })
+
+        now = datetime.utcnow().isoformat()
+        values: Dict[str, Any] = {"status": move.to, "updated_at": now}
+        if move.to == IN_PROGRESS and not before.get("started_at"):
+            values.update(_lifecycle_columns(before, started_at=now))
+        if move.to == COMPLETED:
+            values.update(artisan_sign=body.artisan_sign, progress=100)
+            values.update(_lifecycle_columns(before, completed_at=now, artisan_signed_by=current_user.get("email"), artisan_signed_at=now))
+        if move.clears_signoff:
+            values.update(foreman_sign="")
+            values.update(_lifecycle_columns(before, foreman_signed_by=None, foreman_signed_at=None, completed_at=None))
+
+        saved = _guarded_update(work_order_id, before, values, body.version)
+        append_event(
+            supabase, entity="work_order", entity_id=work_order_id, action="transition", user=current_user,
+            entity_number=saved.get("work_order_number") or before.get("work_order_number"),
+            from_status=before.get("status"), to_status=move.to, note=reason or None,
+            signature=body.artisan_sign if move.needs_signature else None,
+        )
+        await invalidate_namespace("work_orders")
+        return prepare_data_for_response(saved)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error moving work order: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error moving work order: {str(e)}")
+
+
+@router.post("/work-orders/{work_order_id}/signoff")
+async def sign_off_work_order(
+    work_order_id: int,
+    body: WorkOrderSignoff,
+    current_user: dict = Depends(require_role("manager")),
+):
+    """The foreman signs off a completed work order. This is a fact beside ``completed``, not a new status."""
+    try:
+        before = dict(get_or_404(supabase, "work_orders", work_order_id, detail="Work order not found"))
+        if before.get("status") != COMPLETED:
+            raise HTTPException(status_code=409, detail={"code": "transition_not_allowed", "message": "Only a completed work order can be signed off."})
+        if not is_signature(body.foreman_sign):
+            raise HTTPException(status_code=422, detail={"code": "signature_required", "message": "The foreman's signature is needed."})
+        now = datetime.utcnow().isoformat()
+        values = {"foreman_sign": body.foreman_sign, "foreman_date": now[:10], "updated_at": now}
+        values.update(_lifecycle_columns(before, foreman_signed_by=current_user.get("email"), foreman_signed_at=now))
+        saved = _guarded_update(work_order_id, before, values, body.version)
+        append_event(
+            supabase, entity="work_order", entity_id=work_order_id, action="signed_off", user=current_user,
+            entity_number=saved.get("work_order_number") or before.get("work_order_number"),
+            note=(body.note or "").strip() or None, signature=body.foreman_sign,
+        )
+        await invalidate_namespace("work_orders")
+        return prepare_data_for_response(saved)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error signing off work order: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error signing off work order: {str(e)}")
 
 
 # ==================== REGISTERS AND TOOLS ====================

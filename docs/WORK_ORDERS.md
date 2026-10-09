@@ -50,6 +50,30 @@ Code: `app/maintenance_registers.py`. Migration: `supabase_migration_maintenance
 
 **The leave rule.** Creating a work order, or changing `allocated_to`, `responsible_foreman` or `authorising_foreman`, is refused with 409 `{code: "person_on_leave", message, people}` when the name matches someone on approved leave today (case and spacing ignored). Only names being set or changed are checked, so an old record can still be saved. The requester is not checked, and neither are `artisan_name` and `foreman_name`: they record who did the work and signed it off, which can be true of someone who has since gone on leave. If the leave register cannot be read the answer is 503, never "nobody is on leave". Same for the tools feed: a failed read is a 503, never an empty list.
 
+## Lifecycle, sign-off and permits (slice 4 of the Maintenance rebuild)
+
+Code: `app/maintenance_rules.py` (the table, once) and the endpoints below in `app/routers/maintenance.py`. Migration: `supabase_migration_maintenance_lifecycle.sql` (apply after the audit migration; rehearse with `scripts/test_maintenance_lifecycle_sql.sh`). The moves work before it is applied but then do not record the extra facts, and saving permits fails.
+
+Only the four existing statuses are used. Adding postponed, not-done or cancelled needs product approval and wiring through stats and filters, so it is not done here.
+
+| Move | Who | Needs |
+|---|---|---|
+| pending to in-progress | `user`+ | every flagged permit has a reference (422 `permit_reference_missing`, naming it; no manager bypass) |
+| pending to on-hold | `manager` | a reason |
+| in-progress to completed | `user`+ | the artisan's signature (an image data URL); sets completed time, 100% progress, who signed and when |
+| in-progress to on-hold | `user`+ | a reason |
+| on-hold to in-progress | `user`+ | permits checked again |
+| completed to in-progress (reopen) | `manager` | a reason; clears the foreman sign-off (the old signature stays in the earlier audit event) |
+
+The token does not say which employee the user is, so "the person doing the job" cannot be told apart from another `user`; moves open to the assignee are open to every role from `user` up.
+
+| Endpoint | Notes |
+|---|---|
+| `GET /work-orders/{id}/transitions` | The moves open to the caller and what each needs, so the screen keeps no copy of the rules. |
+| `POST /work-orders/{id}/transition` | `{to, version?, reason?, artisan_sign?}`. 409 `transition_not_allowed` (lists what is allowed), 403 `forbidden_role`, 422 `reason_required` / `signature_required` / `permit_reference_missing`, 409 `version_conflict`. A move to the status it already has is a no-op. Writes one `transition` audit event. |
+| `POST /work-orders/{id}/signoff` | `manager`. `{foreman_sign, version?, note?}` on a completed job. Sign-off is a fact beside `completed`, not a status. Writes a `signed_off` event with the signature. |
+| `PATCH /work-orders/{id}` | Now also accepts `permits` (`{permit_key: {required, reference, label?}}`, keys fixed, unknown keys refused). A status edit the rules would refuse is still performed (shadow mode, existing callers keep working) and logged as `shadow_refusal`. |
+
 ## Journey checklist (when touching WOs)
 
 - [ ] Create / edit / assign / schedule fields persist correctly (`exclude_unset` on PATCH — no null-clear regressions).
