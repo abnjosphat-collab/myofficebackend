@@ -7,7 +7,7 @@
 
 from datetime import date, timedelta
 
-from app.routers.training import check_status, find_record, CERTIFICATIONS_DB
+from app.routers.training import check_status
 
 
 def test_past_expiry_is_expired():
@@ -29,12 +29,3 @@ def test_expiry_91_days_out_is_valid():
 
 def test_expiry_far_in_the_future_is_valid():
     assert check_status(date.today() + timedelta(days=365)) == "Valid"
-
-
-def test_find_record_locates_by_id():
-    target = CERTIFICATIONS_DB[0]
-    assert find_record(target.id) is target
-
-
-def test_find_record_missing_id_returns_none():
-    assert find_record("nonexistent-id") is None

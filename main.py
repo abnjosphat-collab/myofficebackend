@@ -274,7 +274,7 @@ register_router("tasks_events", "/api/tasks-events", ["Tasks & Events"],
 # the doubled, unreachable-by-the-frontend /api/documents/api/documents/*.
 for _name in [
     "signatures", "usage",
-    "reports", "inventory", "overtime", "ppe",
+    "inventory", "overtime", "ppe",
     "training", "leaves", "compressors",
     # Engineering modules
     "job_cards", "handover", "compliance", "lubrication",
@@ -283,7 +283,7 @@ for _name in [
 ]:
     # These routers already declare their full /api/<name> prefix internally.
     # Adding it again here made their public endpoints /api/name/api/name/*.
-    _prefix = None if _name in {"reports", "inventory", "training"} else f"/api/{_name.replace('_', '-')}"
+    _prefix = None if _name in {"inventory", "training"} else f"/api/{_name.replace('_', '-')}"
     register_router(_name, _prefix, [_name.title().replace('_', ' ')])
 
 # ===== VERCEL HANDLER =====
