@@ -1,13 +1,26 @@
-# backend/app/routers/inventory.py
-from fastapi import APIRouter, HTTPException, Depends
-from app.auth import get_current_user, require_role
+# backend/app/routers/inventory.py — the Inventory register, stored in the `inventory_items` table
+# (supabase_migration_inventory_items.sql). Until 2026-10-09 this router held a module-level dict seeded
+# with sample items and the page kept its items in each browser's localStorage, so nothing was shared or
+# survived a cleared browser. The JSON shape (camelCase) is unchanged for the page; the table is snake_case.
+# Stock status (in-stock / low-stock / out-of-stock) is computed on every read, never stored.
+
+import logging
+from datetime import datetime, timezone
+from typing import Any, List, Optional
+
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
-from typing import List, Optional
-from datetime import datetime, timedelta
+
+from app.auth import get_current_user, require_role
+from app.supabase_client import supabase
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/inventory", tags=["inventory"])
 
-# Pydantic models
+TABLE = "inventory_items"
+
+
 class InventoryItem(BaseModel):
     id: str
     name: str
@@ -26,18 +39,22 @@ class InventoryItem(BaseModel):
     createdAt: str
     updatedAt: str
 
+
 class InventoryItemCreate(BaseModel):
     name: str
-    sku: str
-    category: str
-    description: str
-    currentStock: int
-    minStock: int
-    maxStock: int
-    unit: str
-    cost: float
-    supplier: str
-    location: str
+    sku: str = ""
+    category: str = ""
+    description: str = ""
+    currentStock: int = 0
+    minStock: int = 0
+    maxStock: int = 0
+    unit: str = ""
+    cost: float = 0
+    supplier: str = ""
+    location: str = ""
+    # Kept when a browser's old local list is moved up, so the restock date is not lost.
+    lastRestocked: Optional[str] = None
+
 
 class InventoryItemUpdate(BaseModel):
     name: Optional[str] = None
@@ -52,294 +69,159 @@ class InventoryItemUpdate(BaseModel):
     supplier: Optional[str] = None
     location: Optional[str] = None
 
-# Mock database
-inventory_db = {}
+
+# camelCase (API) <-> snake_case (table)
+FIELDS = {
+    "name": "name", "sku": "sku", "category": "category", "description": "description",
+    "currentStock": "current_stock", "minStock": "min_stock", "maxStock": "max_stock", "unit": "unit",
+    "cost": "cost", "supplier": "supplier", "location": "location", "lastRestocked": "last_restocked",
+}
+
 
 def calculate_status(current_stock: int, min_stock: int) -> str:
-    if current_stock == 0:
+    if current_stock <= 0:
         return "out-of-stock"
-    elif current_stock <= min_stock:
+    if current_stock <= min_stock:
         return "low-stock"
-    else:
-        return "in-stock"
+    return "in-stock"
 
-# Initialize with sample data
-def init_sample_data():
-    sample_items = [
-        {
-            "id": "inv-001",
-            "name": "Industrial Circuit Boards",
-            "sku": "CB-IND-005",
-            "category": "Electronics",
-            "description": "High-temperature circuit boards for manufacturing equipment",
-            "currentStock": 45,
-            "minStock": 20,
-            "maxStock": 100,
-            "unit": "pcs",
-            "cost": 125.50,
-            "supplier": "TechSupply Inc",
-            "location": "Shelf A-12",
-            "status": "in-stock",
-            "lastRestocked": (datetime.now() - timedelta(days=7)).isoformat(),
-            "createdAt": (datetime.now() - timedelta(days=30)).isoformat(),
-            "updatedAt": (datetime.now() - timedelta(days=7)).isoformat()
-        },
-        {
-            "id": "inv-002",
-            "name": "Safety Gloves - Large",
-            "sku": "SG-L-100",
-            "category": "Safety",
-            "description": "Cut-resistant safety gloves, large size",
-            "currentStock": 8,
-            "minStock": 25,
-            "maxStock": 200,
-            "unit": "pairs",
-            "cost": 12.75,
-            "supplier": "SafetyFirst Ltd",
-            "location": "Bin C-08",
-            "status": "low-stock",
-            "lastRestocked": (datetime.now() - timedelta(days=14)).isoformat(),
-            "createdAt": (datetime.now() - timedelta(days=45)).isoformat(),
-            "updatedAt": (datetime.now() - timedelta(days=14)).isoformat()
-        },
-        {
-            "id": "inv-003",
-            "name": "Hydraulic Fluid",
-            "sku": "HYD-40W",
-            "category": "Consumables",
-            "description": "Industrial grade hydraulic fluid, 40W",
-            "currentStock": 120,
-            "minStock": 50,
-            "maxStock": 300,
-            "unit": "liters",
-            "cost": 8.20,
-            "supplier": "Industrial Parts Co",
-            "location": "Drum Storage",
-            "status": "in-stock",
-            "lastRestocked": (datetime.now() - timedelta(days=3)).isoformat(),
-            "createdAt": (datetime.now() - timedelta(days=60)).isoformat(),
-            "updatedAt": (datetime.now() - timedelta(days=3)).isoformat()
-        },
-        {
-            "id": "inv-004",
-            "name": "CNC Cutting Tools",
-            "sku": "CNC-CT-3MM",
-            "category": "Tools",
-            "description": "3mm carbide cutting tools for CNC machines",
-            "currentStock": 0,
-            "minStock": 15,
-            "maxStock": 80,
-            "unit": "pcs",
-            "cost": 45.00,
-            "supplier": "Global Tools",
-            "location": "Tool Crib B",
-            "status": "out-of-stock",
-            "lastRestocked": (datetime.now() - timedelta(days=30)).isoformat(),
-            "createdAt": (datetime.now() - timedelta(days=90)).isoformat(),
-            "updatedAt": (datetime.now() - timedelta(days=30)).isoformat()
-        },
-        {
-            "id": "inv-005",
-            "name": "Laser Printer Toner",
-            "sku": "TONER-XL500",
-            "category": "Office Supplies",
-            "description": "High-yield toner for XL500 series printers",
-            "currentStock": 3,
-            "minStock": 5,
-            "maxStock": 20,
-            "unit": "cartridges",
-            "cost": 89.99,
-            "supplier": "Office Depot",
-            "location": "Supply Closet",
-            "status": "low-stock",
-            "lastRestocked": (datetime.now() - timedelta(days=21)).isoformat(),
-            "createdAt": (datetime.now() - timedelta(days=120)).isoformat(),
-            "updatedAt": (datetime.now() - timedelta(days=21)).isoformat()
-        }
-    ]
-    
-    for item in sample_items:
-        inventory_db[item["id"]] = item
 
-# Initialize sample data
-init_sample_data()
+def _now() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _item(row: dict[str, Any]) -> InventoryItem:
+    current, minimum = int(row.get("current_stock") or 0), int(row.get("min_stock") or 0)
+    return InventoryItem(
+        id=str(row["id"]), name=row.get("name") or "", sku=row.get("sku") or "", category=row.get("category") or "",
+        description=row.get("description") or "", currentStock=current, minStock=minimum, maxStock=int(row.get("max_stock") or 0),
+        unit=row.get("unit") or "", cost=float(row.get("cost") or 0), supplier=row.get("supplier") or "", location=row.get("location") or "",
+        status=calculate_status(current, minimum), lastRestocked=str(row.get("last_restocked") or ""),
+        createdAt=str(row.get("created_at") or ""), updatedAt=str(row.get("updated_at") or ""),
+    )
+
+
+def _all() -> List[InventoryItem]:
+    try:
+        rows = supabase.table(TABLE).select("*").order("name").execute().data or []
+    except Exception as e:
+        logger.error("inventory list failed: %s", e)
+        raise HTTPException(status_code=502, detail="Inventory could not be read from the database.")
+    return [_item(r) for r in rows]
+
+
+def _row(item_id: str) -> dict[str, Any]:
+    try:
+        rows = supabase.table(TABLE).select("*").eq("id", item_id).limit(1).execute().data or []
+    except Exception as e:
+        logger.error("inventory read failed: %s", e)
+        raise HTTPException(status_code=502, detail="The inventory item could not be read from the database.")
+    if not rows:
+        raise HTTPException(status_code=404, detail="Inventory item not found")
+    return rows[0]
+
+
+def _write(op: str, data: dict[str, Any], item_id: Optional[str] = None) -> InventoryItem:
+    try:
+        q = supabase.table(TABLE)
+        result = (q.insert(data) if op == "insert" else q.update(data).eq("id", item_id)).execute().data or []
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"The inventory item was not saved: {e}")
+    if not result:
+        raise HTTPException(status_code=500, detail="The inventory item was not saved.")
+    return _item(result[0])
+
 
 @router.get("/items", response_model=List[InventoryItem], dependencies=[Depends(get_current_user)])
-async def get_inventory_items(
-    category: Optional[str] = None,
-    status: Optional[str] = None,
-    supplier: Optional[str] = None,
-    search: Optional[str] = None
-):
-    """Get all inventory items with optional filtering"""
-    items = list(inventory_db.values())
-    
-    # Apply filters
+async def get_inventory_items(category: Optional[str] = None, status: Optional[str] = None, supplier: Optional[str] = None, search: Optional[str] = None):
+    """All inventory items, optionally filtered."""
+    items = _all()
     if category:
-        items = [item for item in items if item["category"] == category]
+        items = [i for i in items if i.category == category]
     if status:
-        items = [item for item in items if item["status"] == status]
+        items = [i for i in items if i.status == status]
     if supplier:
-        items = [item for item in items if item["supplier"] == supplier]
+        items = [i for i in items if i.supplier == supplier]
     if search:
-        search_lower = search.lower()
-        items = [
-            item for item in items 
-            if search_lower in item["name"].lower() 
-            or search_lower in item["sku"].lower()
-            or search_lower in item["description"].lower()
-        ]
-    
+        s = search.lower()
+        items = [i for i in items if s in i.name.lower() or s in i.sku.lower() or s in i.description.lower()]
     return items
+
 
 @router.get("/items/{item_id}", response_model=InventoryItem, dependencies=[Depends(get_current_user)])
 async def get_inventory_item(item_id: str):
-    """Get a specific inventory item by ID"""
-    if item_id not in inventory_db:
-        raise HTTPException(status_code=404, detail="Inventory item not found")
-    return inventory_db[item_id]
+    return _item(_row(item_id))
+
 
 @router.post("/items", response_model=InventoryItem)
 async def create_inventory_item(item: InventoryItemCreate, current_user: dict = Depends(get_current_user)):
-    """Create a new inventory item"""
-    item_id = f"inv-{len(inventory_db) + 1:03d}"
-    now = datetime.now().isoformat()
-    
-    status = calculate_status(item.currentStock, item.minStock)
-    
-    new_item = InventoryItem(
-        id=item_id,
-        name=item.name,
-        sku=item.sku,
-        category=item.category,
-        description=item.description,
-        currentStock=item.currentStock,
-        minStock=item.minStock,
-        maxStock=item.maxStock,
-        unit=item.unit,
-        cost=item.cost,
-        supplier=item.supplier,
-        location=item.location,
-        status=status,
-        lastRestocked=now if item.currentStock > 0 else (datetime.now() - timedelta(days=30)).isoformat(),
-        createdAt=now,
-        updatedAt=now
-    )
-    
-    inventory_db[item_id] = new_item.dict()
-    return new_item
+    """Adds an item. Stock received now counts as restocked now, unless an earlier restock date is given."""
+    if not item.name.strip():
+        raise HTTPException(status_code=422, detail="An inventory item needs a name.")
+    data = {FIELDS[k]: (v.strip() if isinstance(v, str) else v) for k, v in item.model_dump().items() if k in FIELDS and v is not None}
+    if not item.lastRestocked:
+        data["last_restocked"] = _now() if item.currentStock > 0 else None
+    data["created_by"] = current_user.get("email")
+    return _write("insert", data)
+
 
 @router.put("/items/{item_id}", response_model=InventoryItem)
 async def update_inventory_item(item_id: str, item_update: InventoryItemUpdate, current_user: dict = Depends(get_current_user)):
-    """Update an existing inventory item"""
-    if item_id not in inventory_db:
-        raise HTTPException(status_code=404, detail="Inventory item not found")
-    
-    existing_item = inventory_db[item_id]
-    # Captured before the update loop overwrites currentStock below — this is the only
-    # way to know whether stock actually went up. (Bug fix: this used to read
-    # existing_item.get('previous_stock', existing_item['currentStock']) *after* the
-    # loop had already written the new value into existing_item['currentStock'], so the
-    # comparison was always `new > new` — lastRestocked could never bump via this
-    # endpoint, no matter how much stock increased. 'previous_stock' was never a real
-    # key on the item; the .get() default was silently doing all the "work".)
-    previous_stock = existing_item.get('currentStock')
-    update_data = item_update.dict(exclude_unset=True)
+    """Changes the fields sent. Raising the stock records a restock."""
+    existing = _row(item_id)
+    sent = item_update.model_dump(exclude_unset=True)
+    data = {FIELDS[k]: (v.strip() if isinstance(v, str) else v) for k, v in sent.items() if k in FIELDS}
+    if "currentStock" in sent and sent["currentStock"] is not None and sent["currentStock"] > int(existing.get("current_stock") or 0):
+        data["last_restocked"] = _now()
+    data["updated_at"] = _now()
+    return _write("update", data, item_id)
 
-    # Update fields. exclude_unset already limited this to explicitly-sent fields —
-    # re-filtering `is not None` here would silently drop an explicit null-clear.
-    for field, value in update_data.items():
-        existing_item[field] = value
-
-    # Recalculate status if stock changed
-    if 'currentStock' in update_data:
-        existing_item['status'] = calculate_status(
-            existing_item['currentStock'],
-            existing_item['minStock']
-        )
-        if update_data['currentStock'] > previous_stock:
-            existing_item['lastRestocked'] = datetime.now().isoformat()
-    
-    existing_item['updatedAt'] = datetime.now().isoformat()
-    inventory_db[item_id] = existing_item
-    
-    return existing_item
 
 @router.delete("/items/{item_id}")
-async def delete_inventory_item(item_id: str, current_user: dict = Depends(require_role('manager'))):
-    """Delete an inventory item"""
-    if item_id not in inventory_db:
-        raise HTTPException(status_code=404, detail="Inventory item not found")
-    
-    del inventory_db[item_id]
+async def delete_inventory_item(item_id: str, current_user: dict = Depends(require_role("manager"))):
+    _row(item_id)
+    try:
+        supabase.table(TABLE).delete().eq("id", item_id).execute()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"The inventory item was not deleted: {e}")
     return {"message": "Inventory item deleted successfully"}
+
 
 @router.post("/items/{item_id}/restock")
 async def restock_item(item_id: str, quantity: int, current_user: dict = Depends(get_current_user)):
-    """Restock an inventory item"""
-    if item_id not in inventory_db:
-        raise HTTPException(status_code=404, detail="Inventory item not found")
-    
     if quantity <= 0:
         raise HTTPException(status_code=400, detail="Quantity must be positive")
-    
-    item = inventory_db[item_id]
-    item['currentStock'] += quantity
-    item['status'] = calculate_status(item['currentStock'], item['minStock'])
-    item['lastRestocked'] = datetime.now().isoformat()
-    item['updatedAt'] = datetime.now().isoformat()
-    
-    inventory_db[item_id] = item
-    return {
-        "message": f"Restocked {quantity} units",
-        "newStock": item['currentStock'],
-        "item": item
-    }
+    existing = _row(item_id)
+    item = _write("update", {"current_stock": int(existing.get("current_stock") or 0) + quantity, "last_restocked": _now(), "updated_at": _now()}, item_id)
+    return {"message": f"Restocked {quantity} units", "newStock": item.currentStock, "item": item}
+
 
 @router.get("/stats", dependencies=[Depends(get_current_user)])
 async def get_inventory_stats():
-    """Get inventory statistics for dashboard"""
-    items = list(inventory_db.values())
-    
-    total_items = len(items)
-    low_stock = len([item for item in items if item['status'] == 'low-stock'])
-    out_of_stock = len([item for item in items if item['status'] == 'out-of-stock'])
-    total_value = sum(item['currentStock'] * item['cost'] for item in items)
-    
-    # Calculate category distribution
-    categories = {}
-    for item in items:
-        category = item['category']
-        if category not in categories:
-            categories[category] = 0
-        categories[category] += 1
-    
+    items = _all()
+    categories: dict[str, int] = {}
+    for i in items:
+        categories[i.category] = categories.get(i.category, 0) + 1
     return {
-        "totalItems": total_items,
-        "lowStock": low_stock,
-        "outOfStock": out_of_stock,
-        "totalValue": round(total_value, 2),
-        "categoryDistribution": categories
+        "totalItems": len(items),
+        "lowStock": sum(1 for i in items if i.status == "low-stock"),
+        "outOfStock": sum(1 for i in items if i.status == "out-of-stock"),
+        "totalValue": round(sum(i.currentStock * i.cost for i in items), 2),
+        "categoryDistribution": categories,
     }
+
 
 @router.get("/categories", dependencies=[Depends(get_current_user)])
 async def get_categories():
-    """Get all inventory categories"""
-    categories = set(item['category'] for item in inventory_db.values())
-    return {"categories": sorted(list(categories))}
+    return {"categories": sorted({i.category for i in _all() if i.category})}
+
 
 @router.get("/suppliers", dependencies=[Depends(get_current_user)])
 async def get_suppliers():
-    """Get all suppliers"""
-    suppliers = set(item['supplier'] for item in inventory_db.values())
-    return {"suppliers": sorted(list(suppliers))}
+    return {"suppliers": sorted({i.supplier for i in _all() if i.supplier})}
+
 
 @router.get("/low-stock", dependencies=[Depends(get_current_user)])
 async def get_low_stock_items():
-    """Get all low stock and out-of-stock items"""
-    items = list(inventory_db.values())
-    low_stock_items = [item for item in items if item['status'] in ['low-stock', 'out-of-stock']]
-    return {
-        "count": len(low_stock_items),
-        "items": low_stock_items
-    }
+    low = [i for i in _all() if i.status in ("low-stock", "out-of-stock")]
+    return {"count": len(low), "items": low}

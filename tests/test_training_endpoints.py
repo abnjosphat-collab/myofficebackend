@@ -5,13 +5,13 @@
 # and a failure is reported instead of being shown as an empty register.
 
 import asyncio
-import copy
 from datetime import date, timedelta
 
 import pytest
 from fastapi import HTTPException
 
 from app.routers import training as training_mod
+from tests._table_fake import TableFake
 from app.routers.training import (
     create_new_certification, delete_certification, get_all_certifications, get_certification,
     get_compliance_rate, get_due_refreshers, get_employee_certifications, get_expiring_certifications,
@@ -21,76 +21,6 @@ from app.routers.training import (
 TODAY = date.today()
 USER = {"user_id": "u1", "email": "u1@x.com", "role": "user"}
 MANAGER = {"user_id": "m1", "email": "m1@x.com", "role": "manager"}
-
-
-class _Query:
-    def __init__(self, db, table):
-        self.db, self.table, self.filters, self.op, self.payload, self.limit_n, self.order_col = db, table, [], "select", None, None, None
-
-    def select(self, *_):
-        return self
-
-    def eq(self, col, val):
-        self.filters.append((col, val)); return self
-
-    def order(self, col, desc=False):
-        self.order_col = col; return self
-
-    def limit(self, n):
-        self.limit_n = n; return self
-
-    def insert(self, row):
-        self.op, self.payload = "insert", row; return self
-
-    def update(self, patch):
-        self.op, self.payload = "update", patch; return self
-
-    def delete(self):
-        self.op = "delete"; return self
-
-    def execute(self):
-        if self.db.fail:
-            raise RuntimeError("database unavailable")
-        rows = self.db.tables.setdefault(self.table, [])
-        match = [r for r in rows if all(str(r.get(c)) == str(v) for c, v in self.filters)]
-        if self.op == "insert":
-            row = {"id": f"id-{len(rows) + 1}", **self.payload}
-            rows.append(row)
-            return type("R", (), {"data": [copy.deepcopy(row)]})
-        if self.op == "update":
-            for r in match:
-                r.update(self.payload)
-            return type("R", (), {"data": copy.deepcopy(match)})
-        if self.op == "delete":
-            self.db.tables[self.table] = [r for r in rows if r not in match]
-            return type("R", (), {"data": copy.deepcopy(match)})
-        if self.order_col:
-            match = sorted(match, key=lambda r: str(r.get(self.order_col)))
-        return type("R", (), {"data": copy.deepcopy(match[: self.limit_n] if self.limit_n else match)})
-
-
-class _Bucket:
-    def __init__(self, db):
-        self.db = db
-
-    def upload(self, path, content, opts):
-        self.db.files[path] = content
-
-    def get_public_url(self, path):
-        return f"https://storage.example/{path}"
-
-    def remove(self, paths):
-        for p in paths:
-            self.db.files.pop(p, None)
-
-
-class _FakeSupabase:
-    def __init__(self):
-        self.tables, self.files, self.fail = {}, {}, False
-        self.storage = type("S", (), {"from_": lambda _s, _b: _Bucket(self)})()
-
-    def table(self, name):
-        return _Query(self, name)
 
 
 class _Upload:
@@ -103,7 +33,7 @@ class _Upload:
 
 @pytest.fixture
 def db(monkeypatch):
-    fake = _FakeSupabase()
+    fake = TableFake()
     monkeypatch.setattr(training_mod, "supabase", fake)
     return fake
 
