@@ -129,6 +129,7 @@ async def root():
         "version": "1.0.0",
         "endpoints": {
             "health": "/api/health",
+            "version": "/api/version",
             "docs": "/docs",
             "daily_reports": "/api/daily-reports",
             "breakdowns": "/api/breakdowns",
@@ -169,6 +170,24 @@ async def health_check():
         "timestamp": datetime.utcnow().isoformat(),
         "standby_schedules": standby_count,
         "redis": "connected" if redis_ok else "unavailable"
+    }
+
+# When this process started, so a restart (a new deploy, or Render waking the service) is visible from outside.
+STARTED_AT = datetime.utcnow().isoformat()
+
+@app.get("/api/version")
+async def deployed_version():
+    """The code this server runs, as Render recorded it at deploy time, so a deploy can be confirmed with one request.
+
+    Render sets RENDER_GIT_COMMIT and RENDER_GIT_BRANCH on every deploy. Run anywhere else (locally, in tests) they are
+    absent and the fields are null: unknown, never a guessed value.
+    """
+    commit = os.environ.get("RENDER_GIT_COMMIT") or None
+    return {
+        "commit": commit,
+        "short_commit": commit[:7] if commit else None,
+        "branch": os.environ.get("RENDER_GIT_BRANCH") or None,
+        "started_at": STARTED_AT,
     }
 
 # ===== ROUTER REGISTRATION =====
