@@ -351,6 +351,9 @@ class _RetryTable:
     def eq(self, *a, **k):
         return self
 
+    def range(self, *a, **k):
+        return self
+
     def insert(self, data):
         self._mode = "insert"
         self._payload = data
@@ -358,6 +361,8 @@ class _RetryTable:
 
     def execute(self):
         if self.name != "work_orders":
+            if self._mode == "select":
+                return _Resp([])  # the leave register: nobody is on leave
             return _Resp([dict(self._payload or {}, id=1)])  # the audit row is not a creation attempt
         if self._mode == "select":
             return _Resp(self.state["existing"])
