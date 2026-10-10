@@ -124,6 +124,16 @@ def test_build_patch_existing_identical_record_is_unchanged_and_never_zeroes_ove
     assert reason == "upsert" and "overtime_hours" not in patch and patch["regular_hours"] == 7.0
 
 
+def test_build_patch_keeps_hours_a_stored_total_already_counts():
+    """A stored total may include module overtime; the import moves it only by the regular/night change it makes."""
+    existing = {"status": "work", "regular_hours": 10, "nightshift_hours": 0, "overtime_hours": 2,
+                "holiday_overtime_hours": 10, "total_hours": 22, "standby_allowance": True}
+    same = pb.build_patch(_row(status="work", normal_hours_expected=10, standby_marked=True), existing, "C0001", [])
+    assert same == (None, "skip_unchanged")
+    patch, reason = pb.build_patch(_row(status="work", normal_hours_expected=8), existing, "C0001", [])
+    assert reason == "upsert" and patch["total_hours"] == 20.0
+
+
 def test_build_patch_total_includes_existing_night_hours():
     existing = {"status": "work", "regular_hours": 8, "nightshift_hours": 1.5, "nightshift_allowance": True}
     patch, _ = pb.build_patch(_row(status="work", normal_hours_expected=6), existing, "C0001", [])

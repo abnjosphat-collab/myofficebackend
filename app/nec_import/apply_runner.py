@@ -33,8 +33,9 @@ def fetch_timesheets_map(start: str, end: str) -> Dict[str, dict]:
 
 
 def load_employees() -> List[dict]:
+    """The Employees register. It records departures with ``archived``; there is no ``is_active`` column."""
     return supabase.table("employees").select(
-        "id,employee_id,first_name,last_name,employment_type,is_active"
+        "id,employee_id,first_name,last_name,employment_type,archived"
     ).execute().data or []
 
 

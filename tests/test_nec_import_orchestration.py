@@ -16,7 +16,7 @@ def _employee(db_id: int, human: str, *, nec: bool = True):
         "first_name": "Test",
         "last_name": "User",
         "employment_type": "NEC" if nec else "Permanent",
-        "is_active": True,
+        "archived": False,
     }
 
 
@@ -129,3 +129,37 @@ def test_run_import_aborts_apply_when_duplicate_sheets(monkeypatch, tmp_path: Pa
     assert report.get("aborted") is True
     assert report["abort_reason"] == "duplicate_sheet_groups"
     assert report["stats"]["created"] == 0
+
+
+def test_load_employees_selects_only_real_register_columns(monkeypatch):
+    """The register records departures with `archived`; asking for a missing `is_active` column made every preview fail."""
+    seen = {}
+
+    class _Query:
+        def select(self, columns):
+            seen["columns"] = columns
+            return self
+
+        def execute(self):
+            return type("R", (), {"data": [_employee(1, "C0001")]})()
+
+    monkeypatch.setattr(apply_runner.supabase, "table", lambda name: seen.setdefault("table", name) and _Query())
+    rows = apply_runner.load_employees()
+    assert seen["table"] == "employees"
+    assert "archived" in seen["columns"].split(",") and "is_active" not in seen["columns"]
+    assert rows[0]["employee_id"] == "C0001"
+
+
+def test_build_preview_does_not_report_archived_nec_staff_as_missing(monkeypatch):
+    with_sheet = _employee(1, "C0001")
+    archived = {**_employee(2, "C0002"), "last_name": "Gone", "archived": True}
+    present_without_sheet = {**_employee(3, "C0003"), "last_name": "Absent"}
+    monkeypatch.setattr(preview_mod, "load_employees", lambda: [with_sheet, archived, present_without_sheet])
+    monkeypatch.setattr(preview_mod, "fetch_timesheets_map", lambda _s, _e: {})
+    monkeypatch.setattr(preview_mod, "fetch_leaves", lambda: [])
+    review = _review_with_sheet()
+    review["sheets"][0]["employee"]["mine_no_raw"] = "C0001"
+
+    result = build_preview(review, "2026-08-13", "2026-09-12")
+
+    assert [m["human_code"] for m in result["missing_sheets"]] == ["C0003"]

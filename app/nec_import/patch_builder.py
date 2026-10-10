@@ -31,6 +31,20 @@ def map_work_status(interp_status: Optional[str]) -> Optional[str]:
     return None
 
 
+def _total_hours(existing: Optional[dict], reg: float, night: float) -> float:
+    """The day total after the import changes only regular and night hours.
+
+    A stored row may already count other hours in its total (module overtime, holiday overtime, callouts), so the total
+    moves by exactly the change in the two fields the import owns. A new row, or one without a stored total, is
+    regular + night.
+    """
+    if not existing or existing.get("total_hours") is None:
+        return reg + night
+    old_reg = float(existing.get("regular_hours") or 0)
+    old_night = float(existing.get("nightshift_hours") or 0)
+    return float(existing["total_hours"]) + (reg - old_reg) + (night - old_night)
+
+
 def build_patch(
     row: dict,
     existing: Optional[dict],
@@ -83,7 +97,7 @@ def build_patch(
         patch["standby_allowance"] = True
 
     nh = float(patch.get("nightshift_hours") or (existing or {}).get("nightshift_hours") or 0)
-    patch["total_hours"] = reg + nh
+    patch["total_hours"] = _total_hours(existing, reg, nh)
 
     if existing:
         def _eq(field: str, new_val: Any) -> bool:

@@ -21,7 +21,7 @@ def build_preview(review: dict, period_start: str, period_end: str) -> Dict[str,
 
     nec_active = [
         e for e in employees
-        if (e.get("employment_type") or "").upper() == "NEC" and e.get("is_active") is not False
+        if (e.get("employment_type") or "").upper() == "NEC" and e.get("archived") is not True
     ]
 
     matched_db_ids: Set[int] = set()
