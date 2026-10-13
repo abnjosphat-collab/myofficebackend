@@ -36,6 +36,7 @@ class _FakeQuery:
         self.table_name = table_name
         self.state = state
         self._eq: Dict[str, Any] = {}
+        self._ilike: Optional[Tuple[str, str]] = None
         self._gt: Optional[Tuple[str, Any]] = None
         self._lt: Optional[Tuple[str, Any]] = None
         self._gte: Optional[Tuple[str, Any]] = None
@@ -49,17 +50,17 @@ class _FakeQuery:
     # compressors.py actually calls) ---
     def select(self, *a, **k): return self
     def eq(self, col, val): self._eq[col] = val; return self
+    def ilike(self, col, pattern): self._ilike = (col, pattern); return self
     def gt(self, col, val): self._gt = (col, val); return self
     def lt(self, col, val): self._lt = (col, val); return self
     def gte(self, col, val): self._gte = (col, val); return self
     def lte(self, col, val): self._lte = (col, val); return self
 
-    def order(self, col, desc=False, asc=None):
-        # compressors.py calls both `.order("date", asc=True)` and
-        # `.order("date", desc=True)` / `.order(..., desc=False)` — normalize
-        # to a single desc flag.
+    def order(self, col, *, desc=False, nullsfirst=None, foreign_table=None):
+        # The signature of postgrest's real `order()` (keyword-only `desc`). The fake once also accepted `asc=`, which
+        # the real library rejects with a TypeError, and so hid a bug that made every readings-history call fail.
         self._order_col = col
-        self._order_desc = (not asc) if asc is not None else desc
+        self._order_desc = desc
         return self
 
     def limit(self, n): self._limit = n; return self
@@ -71,6 +72,9 @@ class _FakeQuery:
         rows = self.state.tables.get(self.table_name, [])
         for col, val in self._eq.items():
             rows = [r for r in rows if r.get(col) == val]
+        if self._ilike:
+            c, pattern = self._ilike  # only the `prefix%` form is used
+            rows = [r for r in rows if str(r.get(c) or '').lower().startswith(pattern.rstrip('%').lower())]
         if self._gt:
             c, v = self._gt
             rows = [r for r in rows if r.get(c) is not None and r.get(c) > v]

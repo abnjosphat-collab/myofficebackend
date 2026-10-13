@@ -157,3 +157,20 @@ async def test_readings_by_date_db_failure_is_500():
     with pytest.raises(HTTPException) as exc:
         await get_readings_by_date(date="2024-01-15", supabase_client=fake)
     assert exc.value.status_code == 500
+
+
+# ─── the real postgrest builder (regression) ─────────────────────────────────────────
+
+def test_readings_queries_only_use_arguments_the_real_order_accepts():
+    """`order(..., asc=True)` raised a TypeError on the real library, so every readings-history call failed with a 500
+    and no compressor's history could be shown. The fake used to accept `asc`, so no test noticed."""
+    from postgrest import SyncPostgrestClient
+    import re, pathlib
+    # The real builder takes `desc` only.
+    builder = SyncPostgrestClient("https://example.supabase.co/rest/v1", headers={}).from_("compressor_readings").select("*")
+    builder.order("date", desc=False)
+    with pytest.raises(TypeError):
+        builder.order("date", asc=True)
+    # And the router no longer asks for it.
+    source = pathlib.Path(__file__).resolve().parents[1].joinpath("app/routers/compressors.py").read_text(encoding="utf-8")
+    assert not re.search(r"\.order\([^)]*\basc\s*=", source)

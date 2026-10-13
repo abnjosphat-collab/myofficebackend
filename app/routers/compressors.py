@@ -5,7 +5,7 @@ import os
 import json
 import uuid
 import logging
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from typing import List, Dict, Optional, Any, Tuple
 from enum import Enum
 from collections import defaultdict
@@ -38,6 +38,13 @@ SERVICE_RECORDS_TABLE = "service_records"
 MAINTENANCE_SCHEDULE_TABLE = "maintenance_schedule"
 ALERTS_TABLE = "alerts"
 SERVICE_INTERVALS_TABLE = "service_intervals"
+SCHEDULES_TABLE = "maintenance_schedules"
+#: Marker in a routine schedule's equipment_info, holding the register item id (stable across renames).
+ROUTINE_MARKER_PREFIX = "compressor-routine:"
+
+# Hour-service milestones in running hours (owner, 13 Oct 2026 — replaces the 1000–16000 ladder). Same ladder
+# for every compressor; the frontend's SERVICE_INTERVALS and the service_intervals table rows must match.
+SERVICE_MILESTONES = [400, 800, 1000, 2000, 4000, 8000]
 
 # Create router
 router = APIRouter()
@@ -65,25 +72,17 @@ class AlertType(str, Enum):
     SYSTEM = "system"
 
 # Pydantic Models
-class CompressorBase(BaseModel):
-    name: str
-    model: str
-    capacity: str
+class CompressorCreate(BaseModel):
+    """Start tracking a compressor that is in the Equipment register. Its name, model and location come from there."""
+    equipment_id: Optional[int] = None
     status: CompressorStatus = CompressorStatus.STANDBY
-    location: str
     color: str = "bg-blue-500"
     initial_total_running: float = 0.0  # Starting point for calculations
     initial_total_loaded: float = 0.0   # Starting point for calculations
-    total_running_hours: float = 0.0
-    total_loaded_hours: float = 0.0
     manufacturer: Optional[str] = None
-    serial_number: Optional[str] = None
     installation_date: Optional[str] = None
     last_service_date: Optional[str] = None
     notes: Optional[str] = None
-
-class CompressorCreate(CompressorBase):
-    pass
 
 class CompressorUpdate(BaseModel):
     name: Optional[str] = None
@@ -127,6 +126,10 @@ class StatusUpdateRequest(BaseModel):
 # router uses instead — one client, one set of credentials, no hidden mock.
 from app.supabase_client import supabase as _shared_supabase_client
 from app.auth import get_current_user, require_role
+from app.compressor_register import fields_from_register, load_register_units, sync_from_register, with_register
+
+#: Columns of a tracked compressor that the Equipment register owns (an update to them is ignored, not applied).
+REGISTER_OWNED = ("name", "model", "location")
 
 def get_supabase():
     return _shared_supabase_client
@@ -155,8 +158,7 @@ def get_service_urgency(hours_until_service: float, avg_daily_hours: float = 8.0
 
 def generate_service_intervals(current_hours: float) -> List[int]:
     """Generate upcoming service intervals"""
-    intervals = [1000, 2000, 4000, 8000, 16000]
-    return [interval for interval in intervals if interval > current_hours]
+    return [interval for interval in SERVICE_MILESTONES if interval > current_hours]
 
 def calculate_daily_hours(previous_total: float, current_total: float) -> float:
     """Calculate daily hours from cumulative totals"""
@@ -196,7 +198,7 @@ async def recalculate_subsequent_readings(compressor_id: str, from_date: str, su
             .select("*")\
             .eq("compressor_id", compressor_id)\
             .gt("date", from_date)\
-            .order("date", asc=True)\
+            .order("date", desc=False)\
             .execute()
         
         if not subsequent_readings.data:
@@ -299,19 +301,27 @@ async def get_compressors(
     location: Optional[str] = None,
     supabase_client = Depends(get_supabase)
 ):
-    """Get all compressors with optional filtering"""
+    """Get all compressors with optional filtering.
+
+    The compressors are the Equipment register's compressors: any that has no meter row yet is created here, and each
+    unit's name, model and location are the register's (see app/compressor_register.py).
+    """
     try:
+        units = load_register_units(supabase_client)
+        sync_from_register(supabase_client, units)
+
         query = supabase_client.table(COMPRESSORS_TABLE).select("*")
         
         if status:
             query = query.eq("status", status)
-        if location:
-            query = query.eq("location", location)
         
         result = query.order("created_at", desc=False).execute()
         
         # Return empty array if no data
-        compressors = result.data if result.data else []
+        compressors = with_register(result.data if result.data else [], units)
+        if location:
+            # Filtered after the register's location is applied, since that is the location shown.
+            compressors = [c for c in compressors if c.get("location") == location]
         
         # Add calculated efficiency for each compressor
         for compressor in compressors:
@@ -341,6 +351,10 @@ async def get_compressor_by_id(
             raise HTTPException(status_code=404, detail="Compressor not found")
         
         compressor = result.data[0]
+        if compressor.get("equipment_id") is not None:
+            with_register([compressor], [u for u in load_register_units(supabase_client) if u.get("id") == compressor["equipment_id"]])
+        else:
+            compressor["equipment_code"] = None
         running = compressor.get("total_running_hours", 0.0)
         loaded = compressor.get("total_loaded_hours", 0.0)
         compressor["efficiency"] = calculate_efficiency(running, loaded)
@@ -356,33 +370,46 @@ async def create_compressor(
     compressor: CompressorCreate,
     supabase_client = Depends(get_supabase)
 , current_user: dict = Depends(get_current_user)):
-    """Create a new compressor"""
+    """Start tracking a compressor from the Equipment register (it also happens automatically when the list is read).
+
+    Compressors are added in the Equipment register (category "Compressors"), not here. Asking for one that is already
+    tracked returns the existing row.
+    """
+    if compressor.equipment_id is None:
+        raise HTTPException(
+            status_code=400,
+            detail="Compressors are added in the Equipment register (category Compressors) and appear here automatically.",
+        )
     try:
-        compressor_data = compressor.dict()
-        compressor_data["id"] = str(uuid.uuid4())
-        compressor_data["created_at"] = datetime.utcnow().isoformat()
-        compressor_data["updated_at"] = datetime.utcnow().isoformat()
-        
-        # Set initial totals if not provided
-        if compressor_data.get("initial_total_running") is None:
-            compressor_data["initial_total_running"] = compressor_data.get("total_running_hours", 0.0)
-        if compressor_data.get("initial_total_loaded") is None:
-            compressor_data["initial_total_loaded"] = compressor_data.get("total_loaded_hours", 0.0)
-        
+        unit = next((u for u in load_register_units(supabase_client) if u.get("id") == compressor.equipment_id), None)
+        if unit is None:
+            raise HTTPException(status_code=404, detail="That equipment is not in the Equipment register as a compressor.")
+
+        existing = supabase_client.table(COMPRESSORS_TABLE).select("*").eq("equipment_id", compressor.equipment_id).execute()
+        if existing.data:
+            return {"success": True, "data": existing.data[0], "message": "Already tracked"}
+
+        compressor_data = {
+            **fields_from_register(unit),
+            "capacity": "",
+            "status": compressor.status.value,
+            "color": compressor.color,
+            "equipment_id": compressor.equipment_id,
+            "initial_total_running": compressor.initial_total_running,
+            "initial_total_loaded": compressor.initial_total_loaded,
+            "total_running_hours": compressor.initial_total_running,
+            "total_loaded_hours": compressor.initial_total_loaded,
+            "manufacturer": compressor.manufacturer,
+            "installation_date": compressor.installation_date,
+            "last_service_date": compressor.last_service_date,
+            "notes": compressor.notes,
+        }
         result = supabase_client.table(COMPRESSORS_TABLE).insert(compressor_data).execute()
-        
-        if hasattr(result, 'data') and result.data:
-            return {
-                "success": True, 
-                "data": result.data[0], 
-                "message": "Compressor created successfully"
-            }
-        else:
-            return {
-                "success": True, 
-                "data": compressor_data, 
-                "message": "Compressor created successfully (mock)"
-            }
+        if not (hasattr(result, "data") and result.data):
+            raise HTTPException(status_code=500, detail="The compressor could not be saved.")
+        return {"success": True, "data": result.data[0], "message": "Compressor created successfully"}
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Error creating compressor: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Error creating compressor: {str(e)}")
@@ -396,20 +423,31 @@ async def update_compressor(
     """Update a compressor"""
     try:
         update_data = compressor_update.dict(exclude_unset=True)
+        # A compressor that belongs to a register item takes its name, model and location from the register; a change to
+        # them here would be overwritten by the next sync, so it is left out and the response says so.
+        current = supabase_client.table(COMPRESSORS_TABLE).select("equipment_id").eq("id", compressor_id).execute()
+        ignored: List[str] = []
+        if current.data and current.data[0].get("equipment_id") is not None:
+            ignored = [k for k in REGISTER_OWNED if k in update_data]
+            for k in ignored:
+                update_data.pop(k)
         update_data["updated_at"] = datetime.utcnow().isoformat()
-        
+
         result = supabase_client.table(COMPRESSORS_TABLE).update(update_data).eq("id", compressor_id).execute()
-        
+        note = f" ({', '.join(ignored)} come from the Equipment register and were not changed)" if ignored else ""
+
         if hasattr(result, 'data') and result.data:
             return {
-                "success": True, 
-                "data": result.data[0], 
-                "message": "Compressor updated successfully"
+                "success": True,
+                "data": result.data[0],
+                "ignored_fields": ignored,
+                "message": f"Compressor updated successfully{note}"
             }
         else:
             return {
-                "success": True, 
-                "message": "Compressor updated successfully"
+                "success": True,
+                "ignored_fields": ignored,
+                "message": f"Compressor updated successfully{note}"
             }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error updating compressor: {str(e)}")
@@ -454,10 +492,18 @@ async def delete_compressor(
     compressor_id: str,
     supabase_client = Depends(get_supabase)
 , current_user: dict = Depends(require_role('manager'))):
-    """Delete a compressor"""
+    """Delete a compressor (one that is not tied to the Equipment register; a register compressor reappears at once)."""
     try:
+        current = supabase_client.table(COMPRESSORS_TABLE).select("equipment_id").eq("id", compressor_id).execute()
+        if current.data and current.data[0].get("equipment_id") is not None:
+            raise HTTPException(
+                status_code=409,
+                detail="This compressor comes from the Equipment register. Change its category or remove it there.",
+            )
         supabase_client.table(COMPRESSORS_TABLE).delete().eq("id", compressor_id).execute()
         return {"success": True, "message": "Compressor deleted successfully"}
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error deleting compressor: {str(e)}")
 
@@ -679,7 +725,7 @@ async def get_compressor_readings(
         query = supabase_client.table(READINGS_TABLE)\
             .select("*")\
             .eq("compressor_id", compressor_id)\
-            .order("date", asc=True)
+            .order("date", desc=False)
         
         query = apply_date_range(query, "date", start_date, end_date)
         
@@ -708,7 +754,7 @@ async def get_detailed_readings(
         query = supabase_client.table(READINGS_TABLE)\
             .select("*")\
             .eq("compressor_id", compressor_id)\
-            .order("date", asc=True)
+            .order("date", desc=False)
         
         query = apply_date_range(query, "date", start_date, end_date)
         
@@ -1294,59 +1340,11 @@ async def import_data(
     file: UploadFile = File(...),
     supabase_client = Depends(get_supabase)
 , current_user: dict = Depends(get_current_user)):
-    """Import data from CSV file"""
-    try:
-        contents = await read_and_validate_upload(file, max_bytes=10 * 1024 * 1024, allowed_exts={"csv"})
-        try:
-            content_str = contents.decode('utf-8')
-        except UnicodeDecodeError:
-            raise HTTPException(status_code=400, detail="File is not valid UTF-8 text — expected a CSV file")
-
-        # Parse CSV content
-        lines = content_str.strip().split('\n')
-        headers = lines[0].split(',')
-        
-        imported_count = 0
-        errors = []
-        
-        for i, line in enumerate(lines[1:], start=2):  # Skip header
-            try:
-                values = line.split(',')
-                if len(values) >= 6:
-                    compressor_data = {
-                        "id": str(uuid.uuid4()),
-                        "name": values[0].strip(),
-                        "model": values[1].strip(),
-                        "capacity": values[2].strip(),
-                        "status": values[3].strip().lower() if values[3].strip().lower() in ['running', 'standby', 'maintenance', 'offline'] else 'standby',
-                        "location": values[4].strip(),
-                        "total_running_hours": float(values[5].strip()) if len(values) > 5 and values[5].strip() else 0.0,
-                        "total_loaded_hours": float(values[6].strip()) if len(values) > 6 and values[6].strip() else 0.0,
-                        "initial_total_running": float(values[5].strip()) if len(values) > 5 and values[5].strip() else 0.0,
-                        "initial_total_loaded": float(values[6].strip()) if len(values) > 6 and values[6].strip() else 0.0,
-                        "created_at": datetime.utcnow().isoformat(),
-                        "updated_at": datetime.utcnow().isoformat()
-                    }
-                    
-                    # Insert into database
-                    supabase_client.table(COMPRESSORS_TABLE).insert(compressor_data).execute()
-                    imported_count += 1
-                    
-            except Exception as line_error:
-                errors.append(f"Line {i}: {str(line_error)}")
-        
-        return {
-            "success": True,
-            "imported_count": imported_count,
-            "errors": errors,
-            "message": f"Imported {imported_count} compressors successfully"
-        }
-        
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error importing data: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Error importing data: {str(e)}")
+    """Retired. A file used to create compressors here; they now come from the Equipment register."""
+    raise HTTPException(
+        status_code=410,
+        detail="Compressors are added in the Equipment register (category Compressors) and appear here automatically.",
+    )
 
 @router.post("/service-records")
 async def create_service_record(
@@ -1373,6 +1371,71 @@ async def create_service_record(
     except Exception as e:
         logger.error(f"Error creating service record: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Error creating service record: {str(e)}")
+
+def routine_marker(equipment_id: int) -> str:
+    return f"{ROUTINE_MARKER_PREFIX}{equipment_id}"
+
+
+def _next_monday(today: date) -> date:
+    return today + timedelta(days=(7 - today.weekday()) % 7 or 7)
+
+
+def ensure_weekly_routine_schedules(supabase_client, today: Optional[date] = None) -> Dict[str, Any]:
+    """Give every register compressor an active weekly routine schedule, creating the missing ones.
+
+    The schedules live in maintenance_schedules, so the ordinary generation run raises their work
+    orders — a routine that only exists if somebody opens the compressors page is not a schedule.
+    Idempotent: a compressor whose marker exists (active or deliberately paused) is skipped, as is
+    one whose meter row is offline. Raises on DB failure — the caller decides how loud to be.
+    """
+    today = today or date.today()
+    units = load_register_units(supabase_client)
+    rows = supabase_client.table(SCHEDULES_TABLE).select("id,equipment_info").eq("recurrence_type", "weekly").execute()
+    have = {r.get("equipment_info") for r in (getattr(rows, "data", rows) or [])}
+    metered = supabase_client.table(COMPRESSORS_TABLE).select("equipment_id,status").execute()
+    offline = {r.get("equipment_id") for r in (getattr(metered, "data", metered) or []) if r.get("status") == "offline"}
+
+    created, skipped = [], []
+    for unit in units:
+        marker = routine_marker(unit["id"])
+        if marker in have or unit["id"] in offline:
+            skipped.append(unit["id"])
+            continue
+        name = fields_from_register(unit)["name"]
+        body = {
+            "name": f"Weekly routine — {name}",
+            "equipment_info": marker,
+            "to_department": "Engineering",
+            "recurrence_type": "weekly",
+            "recurrence_dow": 1,
+            "priority": "medium",
+            "active": True,
+            "next_due_date": _next_monday(today).isoformat(),
+            "job_request_details": f"Routine weekly maintenance for {name} ({unit.get('location') or 'see register'}).",
+            "job_instructions": "Check oil level and top up, drain condensate, inspect belts, filters and hoses for wear and leaks, record running hours.",
+        }
+        inserted = supabase_client.table(SCHEDULES_TABLE).insert(body).execute()
+        data = getattr(inserted, "data", inserted) or []
+        created.append({"equipment_id": unit["id"], "schedule_id": data[0].get("id") if data else None})
+    return {"checked": len(units), "created": created, "skipped": skipped}
+
+
+@router.post("/routine-schedules/ensure")
+async def ensure_routine_schedules_endpoint(
+    supabase_client = Depends(get_supabase),
+    current_user: dict = Depends(require_role('manager')),
+):
+    """Create the missing weekly routine schedules for the register's compressors.
+
+    The same ensure also runs inside schedule generation, so this endpoint is the manual
+    trigger (and shows what it did) rather than something anyone must remember to call.
+    """
+    try:
+        return {"success": True, **ensure_weekly_routine_schedules(supabase_client)}
+    except Exception as e:
+        logger.error(f"Error ensuring routine schedules: {str(e)}")
+        raise HTTPException(status_code=500, detail="Could not ensure routine schedules.")
+
 
 @router.get("/test")
 async def test_endpoint():

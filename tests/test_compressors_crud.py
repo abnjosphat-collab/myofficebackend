@@ -97,37 +97,50 @@ async def test_get_compressor_by_id_db_failure_is_500_and_preserves_404_semantic
 
 # ─── create_compressor ───────────────────────────────────────────────────────────────
 
-async def test_create_compressor_inserts_and_returns_stored_row():
+async def test_create_compressor_without_a_register_item_is_refused_with_the_reason():
+    """Compressors are added in the Equipment register, so a create with no register item says where to do that."""
     fake = FakeSupabase({COMPRESSORS_TABLE: []})
-    payload = CompressorCreate(name="New", model="M1", capacity="300cfm", location="Plant 3")
-    result = await create_compressor(compressor=payload, supabase_client=fake, current_user={"user_id": "u1"})
-    assert result["success"] is True
-    assert result["data"]["name"] == "New"
-    assert "id" in result["data"]
+    with pytest.raises(HTTPException) as exc:
+        await create_compressor(compressor=CompressorCreate(), supabase_client=fake, current_user={"user_id": "u1"})
+    assert exc.value.status_code == 400
+    assert "Equipment register" in exc.value.detail
+    assert fake.state.tables[COMPRESSORS_TABLE] == []
+
+
+async def test_create_compressor_takes_name_model_and_location_from_the_register():
+    fake = FakeSupabase({
+        COMPRESSORS_TABLE: [],
+        "equipment": [{"id": 26, "equipment_id": "CMP 01", "name": "Compressor No 1 ", "model": None, "location": "Southwell ", "category": "Compressors"}],
+    })
+    result = await create_compressor(compressor=CompressorCreate(equipment_id=26), supabase_client=fake, current_user={"user_id": "u1"})
+    stored = fake.state.tables[COMPRESSORS_TABLE]
+    assert result["success"] is True and len(stored) == 1
+    assert stored[0]["name"] == "Compressor No 1" and stored[0]["location"] == "Southwell" and stored[0]["model"] == ""
+    assert stored[0]["equipment_id"] == 26 and stored[0]["status"] == "standby"
+
+
+async def test_create_compressor_for_equipment_that_is_not_a_compressor_is_404():
+    fake = FakeSupabase({COMPRESSORS_TABLE: [], "equipment": [{"id": 9, "equipment_id": "TRK 01", "name": "Truck", "category": "Trucks"}]})
+    with pytest.raises(HTTPException) as exc:
+        await create_compressor(compressor=CompressorCreate(equipment_id=9), supabase_client=fake, current_user={})
+    assert exc.value.status_code == 404
+
+
+async def test_create_compressor_already_tracked_returns_the_existing_row():
+    fake = FakeSupabase({
+        COMPRESSORS_TABLE: [_compressor(id="c1", equipment_id=26)],
+        "equipment": [{"id": 26, "equipment_id": "CMP 01", "name": "Compressor No 1", "category": "Compressors"}],
+    })
+    result = await create_compressor(compressor=CompressorCreate(equipment_id=26), supabase_client=fake, current_user={})
+    assert result["message"] == "Already tracked" and result["data"]["id"] == "c1"
     assert len(fake.state.tables[COMPRESSORS_TABLE]) == 1
 
 
-async def test_create_compressor_mock_branch_when_insert_returns_no_data():
-    class _NoDataFake:
-        def table(self, name):
-            class _Q:
-                def insert(self, data): self._data = data; return self
-                def execute(self): return type("R", (), {"data": None})()
-            return _Q()
-
-    payload = CompressorCreate(name="New", model="M1", capacity="300cfm", location="Plant 3")
-    result = await create_compressor(compressor=payload, supabase_client=_NoDataFake(), current_user={})
-    assert result["success"] is True
-    assert "mock" in result["message"]
-    assert result["data"]["name"] == "New"
-
-
 async def test_create_compressor_db_failure_is_500():
-    fake = FakeSupabase({})
+    fake = FakeSupabase({"equipment": [{"id": 26, "equipment_id": "CMP 01", "name": "Compressor No 1", "category": "Compressors"}]})
     fake.always_fail(COMPRESSORS_TABLE, "insert boom")
-    payload = CompressorCreate(name="New", model="M1", capacity="300cfm", location="Plant 3")
     with pytest.raises(HTTPException) as exc:
-        await create_compressor(compressor=payload, supabase_client=fake, current_user={})
+        await create_compressor(compressor=CompressorCreate(equipment_id=26), supabase_client=fake, current_user={})
     assert exc.value.status_code == 500
 
 
@@ -147,7 +160,7 @@ async def test_update_compressor_mock_branch_when_no_matching_row():
     fake = FakeSupabase({COMPRESSORS_TABLE: []})
     update = CompressorUpdate(name="Renamed")
     result = await update_compressor(compressor_id="ghost", compressor_update=update, supabase_client=fake, current_user={})
-    assert result == {"success": True, "message": "Compressor updated successfully"}
+    assert result == {"success": True, "ignored_fields": [], "message": "Compressor updated successfully"}
 
 
 async def test_update_compressor_db_failure_is_500():

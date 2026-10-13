@@ -1,5 +1,5 @@
 # tests/test_compressors_export_import.py — export_data (CSV StreamingResponse),
-# import_data (CSV upload -> bulk insert), and create_service_record. All zero
+# import_data (retired: compressors come from the Equipment register), and create_service_record. All zero
 # coverage before this file.
 #
 # import_data is decorated with @limiter.limit(...) (slowapi). Calling the
@@ -75,115 +75,17 @@ async def test_export_db_failure_is_500():
     assert exc.value.status_code == 500
 
 
-# ─── import_data ──────────────────────────────────────────────────────────────────────
+# ─── import_data (retired) ────────────────────────────────────────────────────────────
 
-async def test_import_inserts_valid_rows_with_expected_field_mapping():
+async def test_import_is_retired_and_points_to_the_equipment_register():
+    """Compressors come from the Equipment register, so a file can no longer create them (and nothing is written)."""
     fake = FakeSupabase({COMPRESSORS_TABLE: []})
-    csv_content = (
-        "name,model,capacity,status,location,running,loaded\n"
-        "Comp A,X1,500cfm,running,Plant 1,120,90\n"
-    ).encode()
-    file = _FakeUploadFile("import.csv", csv_content)
-    result = await _import_data(request=None, file=file, supabase_client=fake, current_user={})
-    assert result["success"] is True
-    assert result["imported_count"] == 1
-    assert result["errors"] == []
-    row = fake.state.tables[COMPRESSORS_TABLE][0]
-    assert row["name"] == "Comp A"
-    assert row["status"] == "running"
-    assert row["total_running_hours"] == 120.0
-    assert row["total_loaded_hours"] == 90.0
-    assert row["initial_total_running"] == 120.0
-    assert row["initial_total_loaded"] == 90.0
-
-
-async def test_import_unknown_status_falls_back_to_standby():
-    fake = FakeSupabase({COMPRESSORS_TABLE: []})
-    csv_content = "h1,h2,h3,h4,h5,h6,h7\nComp A,X1,500cfm,bogus-status,Plant 1,10,5\n".encode()
-    file = _FakeUploadFile("import.csv", csv_content)
-    result = await _import_data(request=None, file=file, supabase_client=fake, current_user={})
-    assert result["imported_count"] == 1
-    assert fake.state.tables[COMPRESSORS_TABLE][0]["status"] == "standby"
-
-
-async def test_import_row_with_too_few_columns_is_silently_skipped():
-    # documents actual behavior: a short row fails the `len(values) >= 6` gate and is
-    # neither imported NOR reported in `errors` -- it just silently vanishes.
-    fake = FakeSupabase({COMPRESSORS_TABLE: []})
-    csv_content = "h1,h2,h3,h4,h5,h6,h7\nComp A,X1,500cfm\n".encode()
-    file = _FakeUploadFile("import.csv", csv_content)
-    result = await _import_data(request=None, file=file, supabase_client=fake, current_user={})
-    assert result["imported_count"] == 0
-    assert result["errors"] == []
+    file = _FakeUploadFile("import.csv", b"name,model,capacity,status,location,running,loaded\nComp A,X1,500cfm,running,Plant 1,120,90\n")
+    with pytest.raises(HTTPException) as exc:
+        await _import_data(request=None, file=file, supabase_client=fake, current_user={})
+    assert exc.value.status_code == 410
+    assert "Equipment register" in exc.value.detail
     assert fake.state.tables[COMPRESSORS_TABLE] == []
-
-
-async def test_import_row_with_unparseable_number_is_reported_in_errors_not_raised():
-    fake = FakeSupabase({COMPRESSORS_TABLE: []})
-    csv_content = "h1,h2,h3,h4,h5,h6,h7\nComp A,X1,500cfm,running,Plant 1,not-a-number,5\n".encode()
-    file = _FakeUploadFile("import.csv", csv_content)
-    result = await _import_data(request=None, file=file, supabase_client=fake, current_user={})
-    assert result["imported_count"] == 0
-    assert len(result["errors"]) == 1
-    assert "Line 2" in result["errors"][0]
-
-
-async def test_import_continues_after_a_bad_row():
-    fake = FakeSupabase({COMPRESSORS_TABLE: []})
-    csv_content = (
-        "h1,h2,h3,h4,h5,h6,h7\n"
-        "Bad,X1,500cfm,running,Plant 1,not-a-number,5\n"
-        "Good,X1,500cfm,running,Plant 1,10,5\n"
-    ).encode()
-    file = _FakeUploadFile("import.csv", csv_content)
-    result = await _import_data(request=None, file=file, supabase_client=fake, current_user={})
-    assert result["imported_count"] == 1
-    assert len(result["errors"]) == 1
-    assert fake.state.tables[COMPRESSORS_TABLE][0]["name"] == "Good"
-
-
-async def test_import_missing_optional_hours_columns_default_to_zero():
-    fake = FakeSupabase({COMPRESSORS_TABLE: []})
-    csv_content = "h1,h2,h3,h4,h5,h6\nComp A,X1,500cfm,running,Plant 1,\n".encode()
-    file = _FakeUploadFile("import.csv", csv_content)
-    result = await _import_data(request=None, file=file, supabase_client=fake, current_user={})
-    assert result["imported_count"] == 1
-    row = fake.state.tables[COMPRESSORS_TABLE][0]
-    assert row["total_running_hours"] == 0.0
-    assert row["total_loaded_hours"] == 0.0
-
-
-async def test_import_rejects_non_csv_extension():
-    fake = FakeSupabase({COMPRESSORS_TABLE: []})
-    file = _FakeUploadFile("import.exe", b"whatever")
-    with pytest.raises(HTTPException) as exc:
-        await _import_data(request=None, file=file, supabase_client=fake, current_user={})
-    assert exc.value.status_code == 400
-
-
-async def test_import_generic_upload_failure_is_500_not_a_400():
-    # A failure that happens outside the per-row parse/insert loop (which catches its
-    # own errors into `errors[]`) and isn't the extension/size/utf-8 checks (which are
-    # already real HTTPExceptions) -- e.g. the upload stream itself breaking mid-read --
-    # must still surface as a real 500, not be swallowed.
-    class _BrokenUploadFile:
-        filename = "import.csv"
-        async def read(self):
-            raise OSError("stream reset by peer")
-
-    fake = FakeSupabase({COMPRESSORS_TABLE: []})
-    with pytest.raises(HTTPException) as exc:
-        await _import_data(request=None, file=_BrokenUploadFile(), supabase_client=fake, current_user={})
-    assert exc.value.status_code == 500
-
-
-async def test_import_rejects_non_utf8_file():
-    fake = FakeSupabase({COMPRESSORS_TABLE: []})
-    file = _FakeUploadFile("import.csv", b"\xff\xfe\x00bad-bytes")
-    with pytest.raises(HTTPException) as exc:
-        await _import_data(request=None, file=file, supabase_client=fake, current_user={})
-    assert exc.value.status_code == 400
-    assert "UTF-8" in exc.value.detail
 
 
 # ─── create_service_record ───────────────────────────────────────────────────────────

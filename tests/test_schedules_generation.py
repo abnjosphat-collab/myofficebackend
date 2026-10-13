@@ -11,7 +11,7 @@
 # exercised here rather than in its own file — it's a small, single-purpose helper only
 # ever called from _generate_one, not worth a third fake-supabase rig.
 
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 
 import pytest
 from fastapi import HTTPException
@@ -38,6 +38,9 @@ class _FakeQuery:
 
     def select(self, *a, **k): return self
     def eq(self, col, val): self._filters.append((col, val)); return self
+    # The compressor routine ensure (called from /generate) reads the register with ilike;
+    # recorded like any other filter, matching is still whatever select_return was configured.
+    def ilike(self, col, pattern): self._filters.append((col, pattern)); return self
     def order(self, *a, **k): return self
     def limit(self, *a, **k): return self
 
@@ -329,3 +332,30 @@ async def test_generate_mixed_batch_only_generates_the_schedules_actually_due(mo
     # The broken schedule's claim must have been released, not left dangling.
     releases = _calls(state, "maintenance_schedule_runs", "delete")
     assert any(("schedule_id", 5) in r["filters"] for r in releases)
+
+
+async def test_generate_creates_a_missing_compressor_weekly_routine(monkeypatch, patch_supabase):
+    """Generation also ensures each register compressor has a weekly routine schedule, so its
+    routine work order has something to be raised from — without disturbing the ordinary run."""
+    monkeypatch.setenv("CRON_SECRET", "s3cr3t")
+    state = patch_supabase({
+        "equipment": {"select_return": [
+            {"id": 7, "equipment_id": "CMP 03", "name": "CMP 03", "model": "",
+             "location": "Compressor house", "category": "Compressors", "serial_number": ""},
+        ]},
+        "maintenance_schedules": {"select_return": []},
+        "compressors": {"select_return": []},
+    })
+    result = await generate_due_work_orders(x_cron_secret="s3cr3t", authorization=None)
+    assert result["generated"] == 0
+    assert result["failed"] == []
+    inserts = _calls(state, "maintenance_schedules", "insert")
+    assert len(inserts) == 1
+    payload = inserts[0]["payload"]
+    assert payload["equipment_info"] == "compressor-routine:7"
+    assert payload["name"] == "Weekly routine — CMP 03"
+    assert payload["recurrence_type"] == "weekly"
+    assert payload["to_department"] == "Engineering"
+    assert payload["active"] is True
+    today = date.today()
+    assert payload["next_due_date"] == (today + timedelta(days=(7 - today.weekday()) % 7 or 7)).isoformat()

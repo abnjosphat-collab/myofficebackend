@@ -17,6 +17,7 @@ from pydantic import BaseModel, Field, field_validator
 
 from app.supabase_client import supabase
 from app.auth import get_current_user, require_role
+from app.routers.compressors import ensure_weekly_routine_schedules
 import logging
 
 logger = logging.getLogger(__name__)
@@ -343,7 +344,18 @@ async def generate_due_work_orders(
         logger.error(f"generate: could not load schedules: {e}")
         raise HTTPException(status_code=500, detail="Could not load schedules.")
 
-    created, failed = [], []
+    # Compressor weekly routines: a register compressor without an active weekly schedule gets one first,
+    # or the loop below has nothing to raise its routine work order from. A failure here is reported in the
+    # run's failed list, never silent — and it never stops the ordinary schedules.
+    try:
+        ensure_weekly_routine_schedules(supabase)
+    except Exception as e:
+        logger.error(f"generate: compressor routine ensure failed: {e}")
+        failed_pre = [{'schedule_id': 'compressor-routine-ensure', 'error': str(e)}]
+    else:
+        failed_pre = []
+
+    created, failed = [], list(failed_pre)
     for s in schedules:
         if not is_due(s, today):
             continue

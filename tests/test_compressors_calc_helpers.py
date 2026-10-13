@@ -70,15 +70,17 @@ def test_urgency_respects_custom_daily_hours():
 # ─── generate_service_intervals ─────────────────────────────────────────────────────
 
 def test_intervals_from_zero_hours_returns_all():
-    assert generate_service_intervals(0) == [1000, 2000, 4000, 8000, 16000]
+    # Owner, 13 Oct 2026: 400/800/1000/2000/4000/8000 h — replaces the 1000–16000 ladder.
+    assert generate_service_intervals(0) == [400, 800, 1000, 2000, 4000, 8000]
 
 
 def test_intervals_excludes_already_passed():
-    assert generate_service_intervals(1500) == [2000, 4000, 8000, 16000]
+    assert generate_service_intervals(1500) == [2000, 4000, 8000]
+    assert generate_service_intervals(500) == [800, 1000, 2000, 4000, 8000]
 
 
 def test_intervals_at_last_milestone_is_empty():
-    assert generate_service_intervals(16000) == []
+    assert generate_service_intervals(8000) == []
 
 
 def test_intervals_past_last_milestone_is_empty():

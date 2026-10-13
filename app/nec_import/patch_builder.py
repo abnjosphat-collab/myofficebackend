@@ -95,8 +95,24 @@ def build_patch(
         pass
     if interp.get("standby_marked") is True:
         patch["standby_allowance"] = True
+    # NEC2 scan extras: roster times are written when the scan has them, never
+    # cleared when it does not. Proven-zero night / visible-no-standby clear
+    # stale import values; unknown (missing times, cropped comments) is omitted
+    # by the assembler so stored values persist.
+    if interp.get("time_in"):
+        patch["start_time"] = interp["time_in"]
+    if interp.get("time_out"):
+        patch["end_time"] = interp["time_out"]
+    if interp.get("night_proven_zero") is True:
+        patch["nightshift_hours"] = 0
+        patch["nightshift_allowance"] = False
+    if interp.get("standby_clear") is True:
+        patch["standby_allowance"] = False
 
-    nh = float(patch.get("nightshift_hours") or (existing or {}).get("nightshift_hours") or 0)
+    if "nightshift_hours" in patch:
+        nh = float(patch["nightshift_hours"] or 0)
+    else:
+        nh = float((existing or {}).get("nightshift_hours") or 0)
     patch["total_hours"] = _total_hours(existing, reg, nh)
 
     if existing:

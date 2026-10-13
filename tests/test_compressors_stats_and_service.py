@@ -80,7 +80,7 @@ async def test_service_due_sorts_by_urgency_highest_first():
 
 async def test_service_due_skips_compressor_past_every_interval():
     fake = FakeSupabase({COMPRESSORS_TABLE: [
-        _compressor(id="c1", total_running_hours=20000.0),  # past the last (16000) interval
+        _compressor(id="c1", total_running_hours=20000.0),  # past the last (8000) interval
     ]})
     result = await get_service_due(supabase_client=fake)
     assert result == []
