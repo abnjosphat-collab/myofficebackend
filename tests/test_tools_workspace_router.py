@@ -499,23 +499,52 @@ def test_generated_register_number_uses_sop_prefix_and_sequence():
     assert second.json()["register_number"] == "PP-UG-ENG-AG-02"
 
 
-def test_issue_requires_current_competency_checks_and_pre_use_confirmation():
+def test_issue_requires_current_competency_and_marks_pre_use_pending_for_after_issue():
     admin, issuer = admin_and_issuer()
     admin_auth = {"Authorization": f"Bearer {admin}"}
     issuer_auth = {"Authorization": f"Bearer {issuer}"}
     employee = client.post("/api/tools-workspace/employees", headers=admin_auth, json={"employee_number": "E-COMP", "name": "Competent User", "department": "Engineering"}).json()
     tool = client.post("/api/tools-workspace/tools", headers=admin_auth, json={"register_number": "T-COMP", "name": "Grinder", "storage_location": "Store"}).json()
 
-    no_competency = client.post(f"/api/tools-workspace/tools/{tool['id']}/commands", headers=issuer_auth, json={"kind": "issue", "employee_id": employee["id"], "location": "Plant", "pre_use_check_completed": True})
+    no_competency = client.post(f"/api/tools-workspace/tools/{tool['id']}/commands", headers=issuer_auth, json={"kind": "issue", "employee_id": employee["id"], "location": "Plant"})
     make_eligible_and_current(admin_auth, employee, tool)
-    no_pre_use = client.post(f"/api/tools-workspace/tools/{tool['id']}/commands", headers=issuer_auth, json={"kind": "issue", "employee_id": employee["id"], "location": "Plant"})
-    issued = client.post(f"/api/tools-workspace/tools/{tool['id']}/commands", headers=issuer_auth, json={"kind": "issue", "employee_id": employee["id"], "location": "Plant", "pre_use_check_completed": True})
+    # The pre-use check is done after issuing, so it never blocks the issue and nothing fabricates a pass.
+    issued = client.post(f"/api/tools-workspace/tools/{tool['id']}/commands", headers=issuer_auth, json={"kind": "issue", "employee_id": employee["id"]})
 
     assert no_competency.status_code == 409
     assert "trained, qualified and authorized" in no_competency.json()["detail"]
-    assert no_pre_use.status_code == 409
     assert issued.status_code == 200
-    assert any(item["inspection_type"] == "pre_use" for item in client.get("/api/tools-workspace/compliance", headers=admin_auth).json()["inspections"])
+    assert issued.json()["tool"]["custody"]["pre_use_pending"] is True
+    assert issued.json()["tool"]["custody"]["location"] == "Store"
+    assert not any(item["inspection_type"] == "pre_use" for item in client.get("/api/tools-workspace/compliance", headers=admin_auth).json()["inspections"])
+
+    recorded = client.post(f"/api/tools-workspace/tools/{tool['id']}/inspections", headers=issuer_auth, json={"inspection_type": "pre_use", "outcome": "passed"})
+    assert recorded.status_code == 201
+    stored = client.get("/api/tools-workspace/tools", headers=admin_auth).json()
+    assert next(item for item in stored if item["id"] == tool["id"])["custody"]["pre_use_pending"] is False
+
+
+def test_simple_item_needs_no_training_or_schedules():
+    admin, issuer = admin_and_issuer()
+    admin_auth = {"Authorization": f"Bearer {admin}"}
+    issuer_auth = {"Authorization": f"Bearer {issuer}"}
+    employee = client.post("/api/tools-workspace/employees", headers=admin_auth, json={"employee_number": "E-SIMPLE", "name": "Simple User", "department": "Engineering"}).json()
+    tool = client.post("/api/tools-workspace/tools", headers=admin_auth, json={"register_number": "T-SIMPLE", "name": "Tape measure", "storage_location": "Store", "competency_required": False, "pre_use_check_required": False, "monthly_inspection_required": False, "quarterly_inspection_required": False}).json()
+
+    assert tool["competency_required"] is False
+    # No competency records exist, yet the issue succeeds and the employee shows eligible.
+    issued = client.post(f"/api/tools-workspace/tools/{tool['id']}/commands", headers=issuer_auth, json={"kind": "issue", "employee_id": employee["id"]})
+    assert issued.status_code == 200
+    assert issued.json()["tool"]["custody"]["pre_use_pending"] is False
+    stored = client.get("/api/tools-workspace/tools", headers=admin_auth).json()
+    assert any(item["employee_number"] == "E-SIMPLE" for item in next(row for row in stored if row["id"] == tool["id"])["eligible_employees"])
+
+    # Turning the requirement back on restores the gate.
+    assert client.patch(f"/api/tools-workspace/tools/{tool['id']}", headers=admin_auth, json={"competency_required": True}).status_code == 200
+    assert client.post(f"/api/tools-workspace/tools/{tool['id']}/commands", headers=issuer_auth, json={"kind": "return", "location": "Store", "condition": "Good"}).status_code == 200
+    reissue = client.post(f"/api/tools-workspace/tools/{tool['id']}/commands", headers=issuer_auth, json={"kind": "issue", "employee_id": employee["id"]})
+    assert reissue.status_code == 409
+    assert "trained, qualified and authorized" in reissue.json()["detail"]
 
 
 def test_quick_competency_update_preserves_certificate_and_expiry_details():
