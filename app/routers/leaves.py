@@ -24,6 +24,7 @@ class LeaveCreate(BaseModel):
     start_date: date = Field(...)
     end_date: date = Field(...)
     reason: str = Field(..., min_length=1)
+    overtime_id: Optional[int] = None  # set only by take-as-leave: the approved lieu OT this leave pays off
     emergency_contact: Optional[str] = None
     handover_to: Optional[str] = None
     notes: Optional[str] = None
@@ -70,6 +71,7 @@ class LeaveResponse(BaseModel):
     applied_date: datetime
     updated_at: Optional[datetime]
     notes: Optional[str]
+    overtime_id: Optional[int] = None
 
     class Config:
         from_attributes = True
@@ -128,6 +130,8 @@ async def create_leave(leave: LeaveCreate, current_user: dict = Depends(get_curr
             "applied_date": datetime.utcnow().isoformat(),
         }
 
+        if leave.overtime_id is not None:
+            data_to_insert["overtime_id"] = leave.overtime_id
         result = supabase.table("leaves").insert(data_to_insert).execute()
         created = one_row(result)
         if not created:
@@ -140,7 +144,7 @@ async def create_leave(leave: LeaveCreate, current_user: dict = Depends(get_curr
 # ---------- GET all leaves ----------
 @router.get("", response_model=List[LeaveResponse], dependencies=[Depends(get_current_user)])
 @router.get("/", response_model=List[LeaveResponse], dependencies=[Depends(get_current_user)])
-async def get_leaves(status: Optional[str] = None, leave_type: Optional[str] = None):
+async def get_leaves(status: Optional[str] = None, leave_type: Optional[str] = None, overtime_id: Optional[int] = None):
     try:
         def _query():
             query = supabase.table("leaves").select("*")
@@ -148,6 +152,8 @@ async def get_leaves(status: Optional[str] = None, leave_type: Optional[str] = N
                 query = query.eq("status", status)
             if leave_type:
                 query = query.eq("leave_type", leave_type)
+            if overtime_id is not None:
+                query = query.eq("overtime_id", overtime_id)
             # Stable ordering prevents records with the same application date
             # from drifting between pages while the register is read.
             return query.order("applied_date", desc=True).order("id", desc=True)

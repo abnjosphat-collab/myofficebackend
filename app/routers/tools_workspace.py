@@ -9,7 +9,7 @@ from xml.etree import ElementTree
 from fastapi import APIRouter, Depends, File, Form, Header, HTTPException, UploadFile
 from fastapi.responses import Response
 from openpyxl import load_workbook
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from app.supabase_client import rows, supabase
 from app.db_helpers import fetch_all_pages
 
@@ -133,7 +133,12 @@ ApprovalRole = Literal["hos","hod","security","finance","general_manager"]
 class AccountRoleUpdate(BaseModel):
     role:Literal["admin","issuer","viewer"]; department:Optional[str]=Field(default=None,max_length=100); approval_roles:list[ApprovalRole]=Field(default_factory=list,max_length=5)
 class EmployeeInput(BaseModel):
-    employee_number:str=Field(min_length=1,max_length=60); name:str=Field(min_length=2,max_length=120); department:str=Field(min_length=1,max_length=100); job_title:Optional[str]=Field(default=None,max_length=100); supervisor_name:Optional[str]=Field(default=None,max_length=120)
+    employee_number:Optional[str]=Field(default=None,max_length=60); name:str=Field(min_length=2,max_length=120); department:str=Field(min_length=1,max_length=100); job_title:Optional[str]=Field(default=None,max_length=100); supervisor_name:Optional[str]=Field(default=None,max_length=120)
+    @field_validator("employee_number",mode="before")
+    @classmethod
+    def _blank_number_is_unknown(cls,value):
+        if value is None: return None
+        text=str(value).strip(); return text or None
 class ToolInput(BaseModel):
     register_number:Optional[str]=Field(default=None,max_length=80); name:str=Field(min_length=2,max_length=160); make_model:Optional[str]=Field(default=None,max_length=200); serial_number:Optional[str]=Field(default=None,max_length=120); category:Optional[str]=Field(default=None,max_length=100); equipment_kind:str=Field(default="other-equipment",max_length=80); storage_location:str=Field(min_length=1,max_length=240); department:str=Field(default="Engineering",max_length=100); section:Optional[str]=Field(default=None,max_length=100); condition:str=Field(default="Good",max_length=60); notes:Optional[str]=Field(default=None,max_length=2000); approval_ref:Optional[str]=Field(default=None,max_length=160); calibration:Optional[str]=Field(default=None,max_length=160); specifications:dict[str,str]=Field(default_factory=dict); site_code:str=Field(default="PP",min_length=2,max_length=8,pattern=r"^[A-Za-z0-9]+$"); area_code:str=Field(default="UG",min_length=1,max_length=8,pattern=r"^[A-Za-z0-9]+$"); department_code:Optional[str]=Field(default=None,max_length=8,pattern=r"^[A-Za-z0-9]+$"); activity_code:Optional[str]=Field(default=None,max_length=8,pattern=r"^[A-Za-z0-9]+$"); home_storage_location:Optional[str]=Field(default=None,max_length=240); storage_conditions:Optional[str]=Field(default=None,max_length=1000); maintenance_requirements:Optional[str]=Field(default=None,max_length=2000); pre_use_check_required:bool=True; competency_required:bool=True; weekly_inspection_required:bool=False; monthly_inspection_required:bool=True; quarterly_inspection_required:bool=True; calibration_required:bool=False; calibration_frequency_days:Optional[int]=Field(default=None,ge=1,le=3650); replacement_value:Optional[float]=Field(default=None,ge=0); criticality:Literal["standard","high","safety_critical"]="standard"; cctv_required:bool=False; gps_required:bool=False; required_ppe:list[str]=Field(default_factory=list,max_length=20); ownership_type:Literal["company","contractor"]="company"; contractor_name:Optional[str]=Field(default=None,max_length=200); oem_manual_ref:Optional[str]=Field(default=None,max_length=240); purchase_date:Optional[str]=Field(default=None,pattern=r"^\d{4}-\d{2}-\d{2}$"); procurement_cost:Optional[float]=Field(default=None,ge=0); insured:Optional[bool]=None; last_verified:Optional[str]=Field(default=None,max_length=40); working_status:Optional[Literal["working","not_working"]]=None
 class ToolUpdate(BaseModel):
@@ -344,21 +349,32 @@ def read_notifications(body:NotificationReadInput,account=Depends(_session)):
 
 @router.get("/employees")
 def list_employees(account=Depends(_session)): return _visible_records("employees",account)
-class EmployeeActiveInput(BaseModel): active:bool
+class EmployeeUpdate(BaseModel):
+    active:Optional[bool]=None; employee_number:Optional[str]=Field(default=None,max_length=60)
+    @field_validator("employee_number",mode="before")
+    @classmethod
+    def _blank_number_is_unknown(cls,value):
+        if value is None: return None
+        text=str(value).strip(); return text or None
 @router.patch("/employees/{employee_id}")
-def set_employee_active(employee_id:str,body:EmployeeActiveInput,account=Depends(_operator)):
-    """Deactivate or reactivate an employee. Nothing is deleted: approvals and history stay, and the person simply stops being offered for issue and drops out of the default list."""
+def update_employee(employee_id:str,body:EmployeeUpdate,account=Depends(_operator)):
+    """Deactivate or reactivate an employee (nothing is deleted: approvals and history stay), or set the mine number that was unknown when they were added. An explicit null clears the number."""
     employee=_find("employees","id",employee_id)
     if not employee: raise HTTPException(404,"Employee was not found.")
     _ensure_managed_department(account,employee.get("department"))
-    if not body.active and any((tool.get("custody") or {}).get("employee_id")==employee["id"] for tool in _all("tools")):
+    patch=body.model_dump(exclude_unset=True)
+    if patch.get("active") is False and any((tool.get("custody") or {}).get("employee_id")==employee["id"] for tool in _all("tools")):
         raise HTTPException(409,"This employee still holds equipment. Receive it back before deactivating them.")
-    return _update("employees",employee["id"],{"active":body.active})
+    if "employee_number" in patch:
+        number=patch["employee_number"]
+        if number and any(row["id"]!=employee["id"] and (row.get("employee_number") or "").lower()==number.lower() for row in _all("employees")): raise HTTPException(409,"That employee number already exists.")
+    if not patch: return employee
+    return _update("employees",employee["id"],patch)
 @router.post("/employees",status_code=201)
 def create_employee(body:EmployeeInput,account=Depends(_operator)):
     _ensure_managed_department(account,body.department)
-    number=body.employee_number.strip()
-    if any(row["employee_number"].lower()==number.lower() for row in _all("employees")): raise HTTPException(409,"That employee number already exists.")
+    number=(body.employee_number or "").strip() or None
+    if number and any((row.get("employee_number") or "").lower()==number.lower() for row in _all("employees")): raise HTTPException(409,"That employee number already exists.")
     return _insert("employees",{"id":str(uuid.uuid4()),**body.model_dump(),"employee_number":number,"active":True,"created_at":_now(),"created_by":account["name"]})
 @router.get("/tools")
 def list_tools(account=Depends(_session)):
@@ -607,6 +623,7 @@ def _move(tool_id:str,body:MovementInput,account:dict[str,Any]):
     if tool.get("department")!=assigned_department: raise HTTPException(403,f"This Issuer may record movements only for {assigned_department} equipment.")
     open_loan=bool(tool.get("custody"))
     if body.kind=="issue" and (tool.get("archived") or tool.get("status")!="available"): raise HTTPException(409,"This tool is not available to issue.")
+    if body.kind=="issue" and _needs_attention(tool): raise HTTPException(409,"This tool is not fit to issue. Record what was repaired and mark it ready first.")
     if body.kind!="issue" and not open_loan: raise HTTPException(409,"This tool has no open loan.")
     employee=None; override_note=None
     if body.kind in {"issue","transfer"}:
@@ -729,7 +746,7 @@ async def preview_import(target:Literal["equipment","employees"]=Form(...),file:
     raw=[row for row in _rows_from_file(content,file.filename or "") if any(str(value or "").strip() for value in row)]
     if len(raw)<2: raise HTTPException(422,"The file needs a header row and at least one data row.")
     headers=[ALIASES.get(str(value or "").strip().lower(),str(value or "").strip().lower().replace(" ","_")) for value in raw[0]]
-    required={"equipment":{"register_number","name","storage_location"},"employees":{"employee_number","name","department"}}[target]
+    required={"equipment":{"register_number","name","storage_location"},"employees":{"name","department"}}[target]
     mapped=[{headers[i]:str(value or "").strip() for i,value in enumerate(row) if i<len(headers)} for row in raw[1:501]]
     preview=[{"row":i+2,"data":item,"errors":[f"Missing {field.replace('_',' ')}" for field in required if not item.get(field)]} for i,item in enumerate(mapped)]
     return {"target":target,"columns":headers,"rows":preview,"valid":sum(not row["errors"] for row in preview),"invalid":sum(bool(row["errors"]) for row in preview),"truncated":len(raw)>501}
@@ -742,7 +759,7 @@ def commit_import(body:ImportCommit,account=Depends(_operator)):
             if body.target=="employees":
                 model=EmployeeInput.model_validate(item)
                 _ensure_managed_department(account,model.department)
-                if _find("employees","employee_number",model.employee_number): raise ValueError("Employee number already exists")
+                if model.employee_number and _find("employees","employee_number",model.employee_number): raise ValueError("Employee number already exists")
                 accepted.append(_insert("employees",{"id":str(uuid.uuid4()),**model.model_dump(),"active":True,"created_by":account["name"],"created_at":_now()}))
             else:
                 model=ToolInput.model_validate(item)

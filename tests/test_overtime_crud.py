@@ -17,10 +17,12 @@ from fastapi import HTTPException
 
 from app import auth as auth_mod
 from app.routers import overtime as overtime_mod
+from pydantic import ValidationError
+
 from app.routers.overtime import (
-    OvertimeCreate, OvertimeUpdate, BulkStatusUpdate,
+    OvertimeCreate, OvertimeUpdate, BulkStatusUpdate, BulkEditUpdate, TakeAsLeaveInput,
     get_overtime, create_overtime, update_overtime, delete_overtime,
-    bulk_update_overtime_status,
+    bulk_update_overtime_status, bulk_edit_overtime, take_as_leave,
 )
 
 
@@ -297,6 +299,27 @@ async def test_create_overtime_department_provided_is_passed_through(patch_supab
     assert payload["department"] == "Processing"
 
 
+async def test_create_overtime_notes_provided_is_passed_through_and_read_back(patch_supabase):
+    fake = patch_supabase({"insert_return": [{"id": 1, "notes": "Gate 4 roster", "spares_used": "[]"}]})
+
+    result = await create_overtime(_create_input(notes="Gate 4 roster"), current_user=CURRENT_USER)
+
+    payload = next(c for c in fake.state["calls"] if c["op"] == "insert")["payload"]
+    assert payload["notes"] == "Gate 4 roster"
+    assert result["notes"] == "Gate 4 roster"
+
+
+async def test_create_overtime_notes_none_is_still_sent_not_dropped(patch_supabase):
+    # Same bug class as department: an undeclared field never reaches the insert.
+    fake = patch_supabase({"insert_return": [{"id": 1, "spares_used": "[]"}]})
+
+    await create_overtime(_create_input(), current_user=CURRENT_USER)
+
+    payload = next(c for c in fake.state["calls"] if c["op"] == "insert")["payload"]
+    assert "notes" in payload
+    assert payload["notes"] is None
+
+
 async def test_create_overtime_defaults_cost_centre_to_engineering(patch_supabase):
     fake = patch_supabase({"insert_return": [{"id": 1, "spares_used": "[]"}]})
 
@@ -377,6 +400,38 @@ async def test_update_overtime_exclude_unset_not_none_filter(patch_supabase):
     # `reason` was explicitly set to None in the OvertimeUpdate constructor call above,
     # so it counts as "set" for exclude_unset and must appear in the payload.
     assert "reason" in payload and payload["reason"] is None
+
+
+async def test_update_overtime_notes_patch_is_applied_and_read_back(patch_supabase):
+    fake = patch_supabase({
+        "select_return": [{"id": 7}],
+        "update_return": [{"id": 7, "notes": "Shift swapped", "spares_used": "[]"}],
+    })
+
+    result = await update_overtime(
+        7, OvertimeUpdate(notes="Shift swapped"),
+        authorization=None, current_user=CURRENT_USER,
+    )
+
+    payload = next(c for c in fake.state["calls"] if c["op"] == "update")["payload"]
+    assert payload == {"notes": "Shift swapped"}
+    assert result["notes"] == "Shift swapped"
+
+
+async def test_update_overtime_notes_null_clears(patch_supabase):
+    # exclude_unset, not a None-filter: an explicit null must clear notes.
+    fake = patch_supabase({
+        "select_return": [{"id": 7}],
+        "update_return": [{"id": 7, "notes": None, "spares_used": "[]"}],
+    })
+
+    await update_overtime(
+        7, OvertimeUpdate(notes=None, employee_name="X"),
+        authorization=None, current_user=CURRENT_USER,
+    )
+
+    payload = next(c for c in fake.state["calls"] if c["op"] == "update")["payload"]
+    assert "notes" in payload and payload["notes"] is None
 
 
 async def test_update_overtime_normalizes_blank_cost_centre_to_engineering(patch_supabase):
@@ -592,3 +647,183 @@ async def test_bulk_update_overtime_status_db_error_is_500(patch_supabase, patch
         )
     assert exc.value.status_code == 500
     assert "bulk failed" in exc.value.detail
+
+# ─── bulk_edit_overtime ──────────────────────────────────────────────────────────
+
+async def test_bulk_edit_updates_pending_records_with_only_the_patch(patch_supabase):
+    fake = patch_supabase({
+        "select_return": [{"id": 1, "status": "pending"}, {"id": 2, "status": "pending"}],
+        "update_return": [{"id": 1, "cost_centre": "Projects"}, {"id": 2, "cost_centre": "Projects"}],
+    })
+
+    result = await bulk_edit_overtime(
+        BulkEditUpdate(ids=[1, 2], cost_centre="Projects"), authorization=None, current_user=CURRENT_USER,
+    )
+
+    assert result.succeeded == 2 and result.failed == 0 and result.errors == []
+    update_call = next(c for c in fake.state["calls"] if c["op"] == "update")
+    assert update_call["payload"] == {"cost_centre": "Projects"}
+    assert ("id", "in", [1, 2]) in update_call["filters"]
+
+
+async def test_bulk_edit_skips_locked_records_for_non_manager(patch_supabase, patch_auth):
+    fake = patch_supabase({
+        "select_return": [{"id": 1, "status": "approved"}, {"id": 2, "status": "pending"}],
+        "update_return": [{"id": 2, "notes": "crew B"}],
+    })
+    patch_auth(role="viewer")
+
+    result = await bulk_edit_overtime(
+        BulkEditUpdate(ids=[1, 2], notes="crew B"),
+        authorization="Bearer [REDACTED]", current_user=CURRENT_USER,
+    )
+
+    assert result.succeeded == 1 and result.failed == 1
+    assert any("#1" in e and "approved" in e for e in result.errors)
+    update_call = next(c for c in fake.state["calls"] if c["op"] == "update")
+    assert ("id", "in", [2]) in update_call["filters"]
+
+
+async def test_bulk_edit_manager_edits_locked_records_too(patch_supabase, patch_auth):
+    fake = patch_supabase({
+        "select_return": [{"id": 1, "status": "rejected"}],
+        "update_return": [{"id": 1, "reason": "corrected"}],
+    })
+    patch_auth(role="manager")
+
+    result = await bulk_edit_overtime(
+        BulkEditUpdate(ids=[1], reason="corrected"),
+        authorization="Bearer [REDACTED]", current_user=CURRENT_USER,
+    )
+
+    assert result.succeeded == 1 and result.failed == 0
+
+
+async def test_bulk_edit_empty_patch_is_422(patch_supabase):
+    patch_supabase({"select_return": []})
+    with pytest.raises(HTTPException) as exc:
+        await bulk_edit_overtime(BulkEditUpdate(ids=[1]), authorization=None, current_user=CURRENT_USER)
+    assert exc.value.status_code == 422
+
+
+async def test_bulk_edit_lifecycle_field_is_rejected_loudly():
+    # status must never ride a bulk edit past the signature gate — and a mistyped
+    # field must 422, not silently edit nothing.
+    with pytest.raises(ValidationError):
+        BulkEditUpdate(ids=[1], status="approved")
+    with pytest.raises(ValidationError):
+        BulkEditUpdate(ids=[1], cost_center="Projects")
+
+
+async def test_bulk_edit_missing_ids_are_reported_not_silent(patch_supabase):
+    patch_supabase({
+        "select_return": [{"id": 2, "status": "pending"}],
+        "update_return": [{"id": 2, "notes": "x"}],
+    })
+    result = await bulk_edit_overtime(
+        BulkEditUpdate(ids=[1, 2], notes="x"), authorization=None, current_user=CURRENT_USER,
+    )
+    assert result.succeeded == 1 and result.failed == 1
+    assert any("#1" in e for e in result.errors)
+
+
+# ─── take-as-leave: approved lieu OT → one linked approved leave ────────────────
+
+class _TakeSupabase:
+    """Two-table fake: the overtime lookup plus the leaves lookup/insert, recorded."""
+
+    def __init__(self, overtime_rows, leaves_rows, created_leave):
+        self.state = {"calls": []}
+        self.cfgs = {
+            "overtime": {"select_return": overtime_rows},
+            "leaves": {"select_return": leaves_rows, "insert_return": [created_leave] if created_leave else []},
+        }
+
+    def table(self, name):
+        return _Query(name, self.state, self.cfgs[name])
+
+
+def _take_input(**overrides):
+    base = dict(start_date="2024-02-01", end_date="2024-02-01")
+    base.update(overrides)
+    return TakeAsLeaveInput(**base)
+
+
+def _lieu_ot(**overrides):
+    base = dict(id=7, employee_id="E1", employee_name="Alice Smith", position="Fitter",
+                overtime_type="regular", date="2024-01-15", status="approved", payout_method="lieu")
+    base.update(overrides)
+    return base
+
+
+async def test_take_as_leave_creates_an_approved_linked_leave(monkeypatch, patch_auth):
+    patch_auth("manager")
+    created = {"id": 9, "overtime_id": 7, "status": "approved"}
+    fake = _TakeSupabase([_lieu_ot()], [], created)
+    monkeypatch.setattr(overtime_mod, "supabase", fake)
+    result = await take_as_leave(7, _take_input(), authorization="Bearer [REDACTED]", current_user=CURRENT_USER)
+    assert result["created"] is True
+    assert result["leave"]["overtime_id"] == 7
+    inserts = [c for c in fake.state["calls"] if c["op"] == "insert"]
+    assert len(inserts) == 1 and inserts[0]["table"] == "leaves"
+    payload = inserts[0]["payload"]
+    assert payload["leave_type"] == "lieu"  # the stored key, like a manual lieu leave
+    assert payload["status"] == "approved"
+    assert payload["overtime_id"] == 7
+    assert payload["employee_id"] == "E1" and payload["employee_name"] == "Alice Smith"
+    assert payload["start_date"] == "2024-02-01" and payload["end_date"] == "2024-02-01"
+
+
+async def test_take_as_leave_is_idempotent_when_the_leave_already_exists(monkeypatch, patch_auth):
+    patch_auth("manager")
+    existing = {"id": 9, "overtime_id": 7, "status": "approved", "start_date": "2024-02-01"}
+    fake = _TakeSupabase([_lieu_ot()], [existing], None)
+    monkeypatch.setattr(overtime_mod, "supabase", fake)
+    result = await take_as_leave(7, _take_input(), authorization="Bearer [REDACTED]", current_user=CURRENT_USER)
+    assert result["created"] is False
+    assert result["leave"] == existing
+    assert [c for c in fake.state["calls"] if c["op"] == "insert"] == []
+
+
+async def test_take_as_leave_rejects_anything_but_approved_lieu(monkeypatch, patch_auth):
+    patch_auth("manager")
+    for ot in (_lieu_ot(payout_method="cash"), _lieu_ot(status="pending"), _lieu_ot(status="rejected")):
+        fake = _TakeSupabase([ot], [], None)
+        monkeypatch.setattr(overtime_mod, "supabase", fake)
+        with pytest.raises(HTTPException) as exc:
+            await take_as_leave(7, _take_input(), authorization="Bearer [REDACTED]", current_user=CURRENT_USER)
+        assert exc.value.status_code == 422
+        assert [c for c in fake.state["calls"] if c["op"] == "insert"] == []
+
+
+async def test_take_as_leave_rejects_a_backwards_range(monkeypatch, patch_auth):
+    patch_auth("manager")
+    fake = _TakeSupabase([_lieu_ot()], [], None)
+    monkeypatch.setattr(overtime_mod, "supabase", fake)
+    with pytest.raises(HTTPException) as exc:
+        await take_as_leave(7, _take_input(start_date="2024-02-02", end_date="2024-02-01"),
+                            authorization="Bearer [REDACTED]", current_user=CURRENT_USER)
+    assert exc.value.status_code == 422
+
+
+async def test_take_as_leave_missing_overtime_is_404(monkeypatch, patch_auth):
+    patch_auth("manager")
+    fake = _TakeSupabase([], [], None)
+    monkeypatch.setattr(overtime_mod, "supabase", fake)
+    with pytest.raises(HTTPException) as exc:
+        await take_as_leave(999, _take_input(), authorization="Bearer [REDACTED]", current_user=CURRENT_USER)
+    assert exc.value.status_code == 404
+
+
+async def test_take_as_leave_needs_a_manager(monkeypatch, patch_auth):
+    fake = _TakeSupabase([_lieu_ot()], [], None)
+    monkeypatch.setattr(overtime_mod, "supabase", fake)
+    with pytest.raises(HTTPException) as exc:
+        await take_as_leave(7, _take_input(), authorization=None, current_user=CURRENT_USER)
+    assert exc.value.status_code == 401
+    patch_auth("user")
+    with pytest.raises(HTTPException) as exc:
+        await take_as_leave(7, _take_input(), authorization="Bearer [REDACTED]", current_user=CURRENT_USER)
+    assert exc.value.status_code == 403
+    assert [c for c in fake.state["calls"] if c["op"] == "insert"] == []
+

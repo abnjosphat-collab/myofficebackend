@@ -148,7 +148,7 @@ def test_leave_create_rejects_end_date_before_start_date():
 async def test_get_leaves_no_filters_returns_all(patch_supabase):
     records = [{"id": 1, "status": "pending"}, {"id": 2, "status": "approved"}]
     state = patch_supabase({"leaves": {"select_return": records}})
-    result = await get_leaves(status=None, leave_type=None)
+    result = await get_leaves(status=None, leave_type=None, overtime_id=None)
     assert result == records
     call = state["calls"][0]
     assert call["filters"] == []
@@ -156,7 +156,7 @@ async def test_get_leaves_no_filters_returns_all(patch_supabase):
 
 async def test_get_leaves_filters_by_status_and_leave_type(patch_supabase):
     state = patch_supabase({"leaves": {"select_return": [{"id": 1}]}})
-    await get_leaves(status="approved", leave_type="sick")
+    await get_leaves(status="approved", leave_type="sick", overtime_id=None)
     call = state["calls"][0]
     assert ("status", "approved") in call["filters"]
     assert ("leave_type", "sick") in call["filters"]
@@ -165,7 +165,7 @@ async def test_get_leaves_filters_by_status_and_leave_type(patch_supabase):
 async def test_get_leaves_reads_beyond_first_database_page(patch_supabase):
     records = [{"id": i, "status": "approved"} for i in range(1001)]
     state = patch_supabase({"leaves": {"select_return": records}})
-    result = await get_leaves(status="approved", leave_type=None)
+    result = await get_leaves(status="approved", leave_type=None, overtime_id=None)
     assert len(result) == 1001
     assert len(state["calls"]) == 2
 
@@ -183,7 +183,7 @@ async def test_get_leaves_raises_500_on_db_failure(monkeypatch):
 
     monkeypatch.setattr(leaves_mod, "supabase", _RaisingSupabase())
     with pytest.raises(HTTPException) as exc_info:
-        await get_leaves(status=None, leave_type=None)
+        await get_leaves(status=None, leave_type=None, overtime_id=None)
     assert exc_info.value.status_code == 500
 
 
@@ -420,3 +420,29 @@ async def test_delete_leave_404_when_missing(patch_supabase):
     with pytest.raises(HTTPException) as exc_info:
         await delete_leave(999, current_user={"user_id": "u1"})
     assert exc_info.value.status_code == 500  # 404 raised internally, re-wrapped by outer except
+
+# --- overtime_id link (take-as-leave) ---
+
+async def test_create_leave_carries_the_overtime_link_when_sent(patch_supabase):
+    state = patch_supabase({
+        "leaves": {"insert_return": [{"id": 9, "overtime_id": 7, "status": "approved"}]},
+    })
+    result = await create_leave(_leave_create_payload(overtime_id=7), current_user={"user_id": "u1"})
+    assert result["overtime_id"] == 7
+    inserts = [c for c in state["calls"] if c["op"] == "insert"]
+    assert inserts[0]["payload"]["overtime_id"] == 7
+
+
+async def test_create_leave_omits_the_link_when_not_sent(patch_supabase):
+    state = patch_supabase({
+        "leaves": {"insert_return": [{"id": 9, "status": "pending"}]},
+    })
+    await create_leave(_leave_create_payload(), current_user={"user_id": "u1"})
+    inserts = [c for c in state["calls"] if c["op"] == "insert"]
+    assert "overtime_id" not in inserts[0]["payload"]
+
+
+async def test_get_leaves_filters_by_overtime_id(patch_supabase):
+    state = patch_supabase({"leaves": {"select_return": [{"id": 9}]}})
+    await get_leaves(status=None, leave_type=None, overtime_id=7)
+    assert ("overtime_id", 7) in state["calls"][0]["filters"]

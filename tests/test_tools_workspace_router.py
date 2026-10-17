@@ -255,6 +255,76 @@ def test_repaired_equipment_can_be_marked_ready_with_an_audit_event():
     assert "Switch replaced" in trail[0]["detail"]
 
 
+def test_issue_refuses_equipment_marked_not_working():
+    admin, issuer = admin_and_issuer()
+    auth = {"Authorization": f"Bearer {issuer}"}
+    admin_auth = {"Authorization": f"Bearer {admin}"}
+    employee = client.post("/api/tools-workspace/employees", headers=admin_auth, json={"employee_number": "E-NW", "name": "Alex", "department": "Engineering"}).json()
+    tool = client.post("/api/tools-workspace/tools", headers=admin_auth, json={"register_number": "T-NW", "name": "Angle grinder", "storage_location": "Workshop", "working_status": "not_working"}).json()
+    assert tool["status"] == "attention"
+    refused = client.post(f"/api/tools-workspace/tools/{tool['id']}/issue", headers=auth, json={"employee_id": employee["id"], "location": "Plant 4"})
+    assert refused.status_code == 409
+
+
+def test_issue_refuses_an_unfit_tool_whose_status_is_still_available():
+    admin, issuer = admin_and_issuer()
+    auth = {"Authorization": f"Bearer {issuer}"}
+    admin_auth = {"Authorization": f"Bearer {admin}"}
+    employee = client.post("/api/tools-workspace/employees", headers=admin_auth, json={"employee_number": "E-NW2", "name": "Alex", "department": "Engineering"}).json()
+    tool = client.post("/api/tools-workspace/tools", headers=admin_auth, json={"register_number": "T-NW2", "name": "Angle grinder", "storage_location": "Workshop"}).json()
+    make_eligible_and_current(admin_auth, employee, tool)
+    # A legacy or inconsistent row: available, but recorded as not working.
+    stored = next(row for row in tools_workspace._memory["tools"] if row["id"] == tool["id"])
+    stored["working_status"] = "not_working"
+    refused = client.post(f"/api/tools-workspace/tools/{tool['id']}/commands", headers=auth, json={"kind": "issue", "employee_id": employee["id"], "location": "Plant 4"})
+    assert refused.status_code == 409
+    assert "not fit to issue" in refused.json()["detail"]
+
+
+def test_employee_without_a_number_is_created_and_real_numbers_stay_unique():
+    admin, _ = admin_and_issuer()
+    auth = {"Authorization": f"Bearer {admin}"}
+    first = client.post("/api/tools-workspace/employees", headers=auth, json={"name": "No Number One", "department": "Engineering"})
+    assert first.status_code == 201 and first.json()["employee_number"] is None
+    second = client.post("/api/tools-workspace/employees", headers=auth, json={"name": "No Number Two", "department": "Engineering"})
+    assert second.status_code == 201  # unknown numbers never collide with each other
+    numbered = client.post("/api/tools-workspace/employees", headers=auth, json={"employee_number": "E-100", "name": "Numbered", "department": "Engineering"})
+    assert numbered.status_code == 201 and numbered.json()["employee_number"] == "E-100"
+    dup = client.post("/api/tools-workspace/employees", headers=auth, json={"employee_number": "e-100", "name": "Duplicate", "department": "Engineering"})
+    assert dup.status_code == 409
+
+
+def test_employee_number_can_be_added_later_changed_and_cleared():
+    admin, _ = admin_and_issuer()
+    auth = {"Authorization": f"Bearer {admin}"}
+    person = client.post("/api/tools-workspace/employees", headers=auth, json={"name": "Late Number", "department": "Engineering"}).json()
+    other = client.post("/api/tools-workspace/employees", headers=auth, json={"employee_number": "E-200", "name": "Other", "department": "Engineering"}).json()
+    added = client.patch(f"/api/tools-workspace/employees/{person['id']}", headers=auth, json={"employee_number": " E-201 "})
+    assert added.status_code == 200 and added.json()["employee_number"] == "E-201"
+    same = client.patch(f"/api/tools-workspace/employees/{person['id']}", headers=auth, json={"employee_number": "E-201"})
+    assert same.status_code == 200  # keeping your own number is not a duplicate
+    taken = client.patch(f"/api/tools-workspace/employees/{person['id']}", headers=auth, json={"employee_number": "e-200"})
+    assert taken.status_code == 409
+    cleared = client.patch(f"/api/tools-workspace/employees/{person['id']}", headers=auth, json={"employee_number": None})
+    assert cleared.status_code == 200 and cleared.json()["employee_number"] is None
+    assert other["employee_number"] == "E-200"
+
+
+def test_import_accepts_employees_without_numbers_but_rejects_duplicate_numbers():
+    admin, _ = admin_and_issuer()
+    auth = {"Authorization": f"Bearer {admin}"}
+    preview = client.post("/api/tools-workspace/imports/preview", headers=auth, data={"target": "employees"}, files={"file": ("employees.csv", b"name,department\nNo Number One,Engineering\n", "text/csv")})
+    assert preview.status_code == 200
+    assert preview.json()["valid"] == 1 and preview.json()["invalid"] == 0
+    committed = client.post("/api/tools-workspace/imports/commit", headers=auth, json={"target": "employees", "rows": [
+        {"name": "No Number One", "department": "Engineering"},
+        {"employee_number": "E-300", "name": "Numbered", "department": "Engineering"},
+        {"employee_number": "E-300", "name": "Duplicate", "department": "Engineering"},
+    ]})
+    assert committed.json()["accepted_count"] == 2 and committed.json()["rejected_count"] == 1
+    assert "already exists" in committed.json()["rejected"][0]["error"]
+
+
 def test_viewer_cannot_create_register_records():
     admin = register("admin")
     viewer = register("viewer", False)

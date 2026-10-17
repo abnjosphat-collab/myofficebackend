@@ -1,13 +1,13 @@
 from fastapi import APIRouter, HTTPException, Header, Depends
 from starlette.concurrency import run_in_threadpool
 from pydantic import BaseModel, Field, validator
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, cast
 from app.supabase_client import supabase
 from app.auth import get_current_user, require_role, require_role_if_status_in
 from app.db_helpers import get_or_404
 from app.serialization import encode_json_fields, decode_json_fields
 import logging
-from datetime import datetime
+from datetime import date, datetime
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -45,6 +45,9 @@ class OvertimeCreate(BaseModel):
     reason: Optional[str] = None
     contact_number: Optional[str] = None
     emergency_contact: Optional[str] = None
+    # Same bug class as department above: the form has always sent notes, but the
+    # model never declared it, so Pydantic dropped it on every save.
+    notes: Optional[str] = None
     # Reference/cost log only — same scope as breakdowns.spares_used and
     # work_orders.spares_used, neither of which touches Spares-module stock
     # (current_quantity stays a Stores-department function, per explicit product
@@ -82,6 +85,37 @@ class BulkStatusResponse(BaseModel):
     failed: int
     updated: List[Dict[str, Any]]
 
+class BulkEditUpdate(BaseModel):
+    # Bulk field edit. Identity fields (employee_*, position, department),
+    # times/hours, spares and every lifecycle field are deliberately absent:
+    # bulk-overwriting who worked the hours, or flipping approval state without
+    # the signature gate, is never a bulk operation. extra='forbid' so a
+    # mistyped field 422s loudly instead of silently editing nothing.
+    class Config:
+        extra = 'forbid'
+
+    ids: List[int] = Field(..., min_length=1)
+    date: Optional[str] = None
+    overtime_type: Optional[str] = None
+    planning_status: Optional[str] = None
+    payout_method: Optional[str] = None
+    cost_centre: Optional[str] = None
+    reason: Optional[str] = None
+    notes: Optional[str] = None
+
+
+class BulkEditResponse(BaseModel):
+    succeeded: int
+    failed: int
+    errors: List[str] = []
+    updated: List[Dict[str, Any]]
+
+
+class TakeAsLeaveInput(BaseModel):
+    # The days the lieu leave was actually taken on (not the OT date).
+    start_date: date
+    end_date: date
+
 
 # After approval/payment/rejection, business-field edits must not bypass workflow (F03).
 _OT_LOCKED_STATUSES = frozenset({"approved", "paid", "rejected"})
@@ -103,6 +137,7 @@ class OvertimeUpdate(BaseModel):
     reason: Optional[str] = None
     contact_number: Optional[str] = None
     emergency_contact: Optional[str] = None
+    notes: Optional[str] = None
     spares_used: Optional[List[Dict[str, Any]]] = None
     status: Optional[str] = None
     approved_by: Optional[str] = None
@@ -181,6 +216,7 @@ async def create_overtime(overtime: OvertimeCreate, current_user: dict = Depends
             "reason": overtime.reason,
             "contact_number": overtime.contact_number,
             "emergency_contact": overtime.emergency_contact,
+            "notes": overtime.notes,
             "spares_used": overtime.spares_used or [],
             "status": "pending",
             "applied_date": datetime.utcnow().isoformat()
@@ -245,6 +281,49 @@ async def bulk_update_overtime_status(
     except Exception as e:
         logger.error(f"Error bulk-updating overtime status: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Error bulk-updating overtime: {str(e)}")
+
+# POST bulk field edit — one request that rewrites the same unlocked fields on many
+# records. Locked-status records (approved/paid/rejected) are skipped for non-managers
+# with a per-record reason, exactly mirroring update_overtime's F03 gate.
+@router.post("/bulk-edit", response_model=BulkEditResponse)
+async def bulk_edit_overtime(
+    body: BulkEditUpdate,
+    authorization: Optional[str] = Header(None),
+    current_user: dict = Depends(get_current_user),
+):
+    ids = list(dict.fromkeys(body.ids))
+    patch = body.dict(exclude_unset=True)
+    patch.pop("ids", None)
+    if not patch:
+        raise HTTPException(status_code=422, detail="Nothing to change: unlock at least one field.")
+    try:
+        existing = cast(List[Dict[str, Any]], (supabase.table("overtime").select("id,status").in_("id", ids).execute()).data or [])
+        status_of = {row.get("id"): (row.get("status") or "pending").lower() for row in existing}
+        locked = [i for i in ids if status_of.get(i) in _OT_LOCKED_STATUSES]
+        editable = [i for i in ids if i not in locked]
+        errors: List[str] = []
+        if locked:
+            try:
+                await require_role("manager")(authorization)
+                editable = ids
+                locked = []
+            except HTTPException:
+                errors.extend(f"Request #{i} is {status_of.get(i)} — only a manager can change it." for i in locked)
+        updated = []
+        if editable:
+            response = supabase.table("overtime").update(patch).in_("id", editable).execute()
+            updated_rows = cast(List[Dict[str, Any]], response.data or [])
+            updated = [decode_json_fields(row, ['spares_used']) for row in updated_rows]
+        got = {row.get("id") for row in updated}
+        missing = [i for i in editable if i not in got]
+        errors.extend(f"Request #{i} was not found." for i in missing)
+        succeeded = len(updated)
+        return BulkEditResponse(succeeded=succeeded, failed=len(ids) - succeeded, errors=errors[:25], updated=updated)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error bulk-editing overtime: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error bulk-editing overtime: {str(e)}")
 
 
 # PATCH update overtime
@@ -313,6 +392,54 @@ async def delete_overtime(
     except Exception as e:
         logger.error(f"Error deleting overtime: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Error deleting overtime: {str(e)}")
+
+
+# ---------- POST take-as-leave: approved lieu OT becomes a linked approved leave ----------
+@router.post("/{overtime_id}/take-as-leave")
+async def take_as_leave(
+    overtime_id: int,
+    body: TakeAsLeaveInput,
+    authorization: Optional[str] = Header(None),
+    current_user: dict = Depends(get_current_user),
+):
+    # Recording taken lieu leave is approval-equivalent (it creates an APPROVED
+    # leave outright), so it needs the same manager authority as approving.
+    await require_role("manager")(authorization)
+    if body.end_date < body.start_date:
+        raise HTTPException(status_code=422, detail="The leave cannot end before it starts.")
+    try:
+        ot = get_or_404(supabase, "overtime", overtime_id, detail="Overtime not found")
+        if ot.get("status") != "approved":
+            raise HTTPException(status_code=422, detail="Only approved overtime can be taken as leave.")
+        if ot.get("payout_method") != "lieu":
+            raise HTTPException(status_code=422, detail="Only overtime owed as leave can be taken as leave.")
+        existing = (supabase.table("leaves").select("*").eq("overtime_id", overtime_id).execute()).data or []
+        if existing:
+            return {"created": False, "leave": existing[0]}
+        leave_data = {
+            "employee_id": ot.get("employee_id"),
+            "employee_name": ot.get("employee_name"),
+            "position": ot.get("position") or "",
+            "contact_number": ot.get("contact_number") or "",
+            "leave_type": "lieu",
+            "start_date": body.start_date.isoformat(),
+            "end_date": body.end_date.isoformat(),
+            "total_days": (body.end_date - body.start_date).days + 1,
+            "reason": f"Leave in lieu of overtime worked {ot.get("date")} (OT #{overtime_id})",
+            "status": "approved",
+            "applied_date": datetime.utcnow().isoformat(),
+            "overtime_id": overtime_id,
+        }
+        created = (supabase.table("leaves").insert(leave_data).execute()).data or []
+        if not created:
+            raise HTTPException(status_code=500, detail="No data returned after insertion")
+        return {"created": True, "leave": created[0]}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error taking lieu leave: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error taking lieu leave: {str(e)}")
+
 
 
 # ── Analyze — reads reason text + volume/trend, no external AI API required ────────
