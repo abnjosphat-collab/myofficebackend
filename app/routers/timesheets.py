@@ -7,6 +7,7 @@ from app.auth import get_current_user, require_role
 from app.aggregation import count_by
 from app.db_helpers import apply_date_range, fetch_all_pages, get_or_404
 from app.serialization import encode_json_fields, decode_json_fields
+from app.errors import server_error
 import logging
 
 logger = logging.getLogger(__name__)
@@ -76,7 +77,7 @@ async def get_timesheets(
         
     except Exception as e:
         logger.error(f"Error fetching timesheets: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Error fetching timesheets: {str(e)}")
+        raise server_error(e, "Loading timesheets")
 
 @router.post("")
 async def create_timesheet_entry(entry: TimesheetEntryCreate, current_user: dict = Depends(get_current_user)):
@@ -85,7 +86,7 @@ async def create_timesheet_entry(entry: TimesheetEntryCreate, current_user: dict
         logger.info(f"Creating timesheet entry for employee {entry.employee_id} on {entry.date}")
         
         # Convert to dict
-        data_to_insert = entry.dict()
+        data_to_insert = entry.model_dump()
         data_to_insert['date'] = data_to_insert['date'].isoformat()
         
         # Handle JSON fields
@@ -123,7 +124,7 @@ async def create_timesheet_entry(entry: TimesheetEntryCreate, current_user: dict
             
     except Exception as e:
         logger.error(f"Error creating timesheet entry: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise server_error(e, "Creating timesheet entry")
 
 @router.get("/{entry_id}", dependencies=[Depends(get_current_user)])
 async def get_timesheet_entry(entry_id: int):
@@ -135,7 +136,7 @@ async def get_timesheet_entry(entry_id: int):
 
     except Exception as e:
         logger.error(f"Error fetching timesheet entry: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise server_error(e, "Loading timesheet entry")
 
 @router.patch("/{entry_id}")
 async def update_timesheet_entry(entry_id: int, updated: TimesheetEntryUpdate, current_user: dict = Depends(get_current_user)):
@@ -165,7 +166,7 @@ async def update_timesheet_entry(entry_id: int, updated: TimesheetEntryUpdate, c
             
     except Exception as e:
         logger.error(f"Error updating timesheet entry: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise server_error(e, "Updating timesheet entry")
 
 @router.delete("/{entry_id}")
 async def delete_timesheet_entry(entry_id: int, current_user: dict = Depends(require_role('manager'))):
@@ -181,7 +182,7 @@ async def delete_timesheet_entry(entry_id: int, current_user: dict = Depends(req
         
     except Exception as e:
         logger.error(f"Error deleting timesheet entry: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise server_error(e, "Deleting timesheet entry")
 
 # Statistics endpoint
 @router.get("/stats/summary")  # deliberately open — aggregate counts, not individual records
@@ -240,4 +241,4 @@ async def get_timesheet_stats(
         
     except Exception as e:
         logger.error(f"Error fetching timesheet stats: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise server_error(e, "Loading timesheet stats")

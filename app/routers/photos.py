@@ -2,6 +2,7 @@
 from fastapi import APIRouter, HTTPException, UploadFile, File, Form, Query, Depends
 from app.supabase_client import supabase
 from app.auth import get_current_user, require_role
+from app.errors import server_error
 import uuid
 import logging
 
@@ -47,7 +48,7 @@ async def upload_photo(
         )
     except Exception as e:
         logger.error(f"upload_photo storage error: {e}")
-        raise HTTPException(500, f"Storage upload failed: {e}")
+        raise server_error(e, "Storage upload")
 
     try:
         url = supabase.storage.from_(BUCKET).get_public_url(storage_path)
@@ -66,4 +67,4 @@ async def delete_photo(path: str = Query(...), current_user: dict = Depends(requ
         return {"ok": True}
     except Exception as e:
         logger.error(f"delete_photo error: {e}")
-        raise HTTPException(500, str(e))
+        raise server_error(e, "Deleting photo")

@@ -70,4 +70,7 @@ async def test_health_check_unhealthy_when_query_raises(monkeypatch):
     result = await health_check()
     assert result["status"] == "unhealthy"
     assert result["database"] == "connection_failed"
-    assert "connection refused" in result["error"]
+    # Status only: the exception text must stay in the server log, never in
+    # the response.
+    assert "error" not in result
+    assert "connection refused" not in str(result)

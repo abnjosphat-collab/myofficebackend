@@ -12,6 +12,7 @@ from app.supabase_client import supabase, rows, one_row
 from app.auth import get_current_user
 from app.db_helpers import fetch_all_pages, get_or_404
 from app.serialization import encode_json_fields, decode_json_fields
+from app.errors import server_error
 
 logger = logging.getLogger(__name__)
 
@@ -199,7 +200,7 @@ async def list_artisan_timesheets(
         return [_decode(r) for r in rows(response)]
     except Exception as e:
         logger.error(f"Error listing artisan timesheets: {e}")
-        raise HTTPException(status_code=500, detail=f"Error listing artisan timesheets: {e}")
+        raise server_error(e, "Loading artisan timesheets")
 
 
 @router.get("/{timesheet_id}")
@@ -211,7 +212,7 @@ async def get_artisan_timesheet(timesheet_id: int, current_user: dict = Depends(
         raise
     except Exception as e:
         logger.error(f"Error fetching artisan timesheet {timesheet_id}: {e}")
-        raise HTTPException(status_code=500, detail=f"Error fetching artisan timesheet: {e}")
+        raise server_error(e, "Loading artisan timesheet")
 
 
 @router.post("")
@@ -236,7 +237,7 @@ async def create_artisan_timesheet(body: ArtisanTimesheetCreate, current_user: d
             _approved_leave_dates(body.employee_id, body.year, body.month),
         )
 
-        payload = encode_json_fields(body.dict(), JSON_FIELDS)
+        payload = encode_json_fields(body.model_dump(), JSON_FIELDS)
         now = _now()
         payload["created_at"] = now
         payload["updated_at"] = now
@@ -250,7 +251,7 @@ async def create_artisan_timesheet(body: ArtisanTimesheetCreate, current_user: d
         raise
     except Exception as e:
         logger.error(f"Error creating artisan timesheet: {e}")
-        raise HTTPException(status_code=500, detail=f"Error creating artisan timesheet: {e}")
+        raise server_error(e, "Creating artisan timesheet")
 
 
 @router.patch("/{timesheet_id}")
@@ -261,7 +262,7 @@ async def update_artisan_timesheet(
 ):
     try:
         existing = get_or_404(supabase, TABLE, timesheet_id, detail="Artisan timesheet not found")
-        data = body.dict(exclude_unset=True)
+        data = body.model_dump(exclude_unset=True)
         if not data:
             return _decode(existing)
 
@@ -288,7 +289,7 @@ async def update_artisan_timesheet(
         raise
     except Exception as e:
         logger.error(f"Error updating artisan timesheet {timesheet_id}: {e}")
-        raise HTTPException(status_code=500, detail=f"Error updating artisan timesheet: {e}")
+        raise server_error(e, "Updating artisan timesheet")
 
 
 @router.delete("/{timesheet_id}")
@@ -301,4 +302,4 @@ async def delete_artisan_timesheet(timesheet_id: int, current_user: dict = Depen
         raise
     except Exception as e:
         logger.error(f"Error deleting artisan timesheet {timesheet_id}: {e}")
-        raise HTTPException(status_code=500, detail=f"Error deleting artisan timesheet: {e}")
+        raise server_error(e, "Deleting artisan timesheet")

@@ -146,6 +146,7 @@ async def test_health_reports_503_on_db_failure(patch_supabase):
     with pytest.raises(HTTPException) as exc:
         await employees_health()
     assert exc.value.status_code == 503
+    assert "db down" not in str(exc.value.detail)  # status only, no exception text
 
 
 # ─── get_employees ───────────────────────────────────────────────────────────────────
@@ -303,6 +304,29 @@ async def test_update_employee_db_failure_is_500(patch_supabase):
     with pytest.raises(HTTPException) as exc:
         await update_employee(5, _employee(), current_user={"user_id": "u1"})
     assert exc.value.status_code == 500
+
+
+async def test_update_employee_persists_section_and_invalidates_cache(patch_supabase, monkeypatch):
+    # The Personnel round-trip behind the Matangira report: a section edit must reach the
+    # update payload, and the 60 s employees cache must be dropped so the next list is fresh.
+    calls = patch_supabase([
+        [{"id": 38839, "employee_id": "TBA34", "archived": False}],
+        [{"id": 38839, "employee_id": "TBA34", "section": "Management", "date_of_engagement": "2020-01-01"}],
+    ])
+    invalidated = []
+
+    async def _record(namespace):
+        invalidated.append(namespace)
+
+    monkeypatch.setattr(emp_mod, "invalidate_namespace", _record)
+    result = await update_employee(
+        38839, _employee(employee_id="TBA34", designation="Clerk", section="Management"),
+        current_user={"user_id": "u1"},
+    )
+    update_call = next(c for c in calls if c["op"] == "update")
+    assert update_call["payload"]["section"] == "Management"
+    assert invalidated == ["employees"]
+    assert result["section"] == "Management"
 
 
 # ─── delete_employee ─────────────────────────────────────────────────────────────────

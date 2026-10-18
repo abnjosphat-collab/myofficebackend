@@ -8,6 +8,7 @@ from app.supabase_client import supabase
 from app.auth import get_current_user, require_role
 from app.uploads import read_and_validate_upload, DOCUMENT_EXTS
 from app.db_helpers import fetch_all_pages, or_ilike
+from app.errors import server_error
 import logging, uuid as uuid_module
 
 logger = logging.getLogger(__name__)
@@ -41,7 +42,7 @@ async def list_documents(category_id: str, folder_id: Optional[str] = None):
         return await run_in_threadpool(lambda: fetch_all_pages(_page))
     except Exception as e:
         logger.error("list_documents error: %s", e)
-        raise HTTPException(500, str(e))
+        raise server_error(e, "Loading documents")
 
 
 # ── Global search (across every category/folder) ─────────────────────────────
@@ -60,7 +61,7 @@ async def search_documents(q: str):
         return r.data or []
     except Exception as e:
         logger.error("search_documents error: %s", e)
-        raise HTTPException(500, str(e))
+        raise server_error(e, "Search documents")
 
 
 # ── Folders (custom subfolders within a category) ────────────────────────────
@@ -84,7 +85,7 @@ async def list_folders(category_id: str):
         ))
     except Exception as e:
         logger.error("list_folders error: %s", e)
-        raise HTTPException(500, str(e))
+        raise server_error(e, "Loading folders")
 
 
 @router.post("/folders")
@@ -111,7 +112,7 @@ async def create_folder(body: FolderCreate, current_user: dict = Depends(get_cur
         raise
     except Exception as e:
         logger.error("create_folder error: %s", e)
-        raise HTTPException(500, str(e))
+        raise server_error(e, "Creating folder")
 
 
 @router.put("/folders/{folder_id}")
@@ -152,7 +153,7 @@ async def rename_folder(folder_id: str, body: FolderUpdate, current_user: dict =
         raise
     except Exception as e:
         logger.error("rename_folder error: %s", e)
-        raise HTTPException(500, str(e))
+        raise server_error(e, "Rename folder")
 
 
 @router.delete("/folders/{folder_id}")
@@ -162,7 +163,7 @@ async def delete_folder(folder_id: str, current_user: dict = Depends(require_rol
         return {"ok": True}
     except Exception as e:
         logger.error("delete_folder error: %s", e)
-        raise HTTPException(500, str(e))
+        raise server_error(e, "Deleting folder")
 
 
 # ── Upload ────────────────────────────────────────────────────────────────────
@@ -193,7 +194,7 @@ async def upload_document(
             {"content-type": file.content_type or "application/octet-stream"},
         )
     except Exception as e:
-        raise HTTPException(500, f"Storage upload failed: {e}")
+        raise server_error(e, "Storage upload")
 
     try:
         file_url = supabase.storage.from_(BUCKET).get_public_url(storage_path)
@@ -228,7 +229,7 @@ async def upload_document(
         return r.data[0]
     except Exception as e:
         logger.error("documents insert error: %s", e)
-        raise HTTPException(500, str(e))
+        raise server_error(e, "Upload document")
 
 
 # ── Update (rename / star / comment) ─────────────────────────────────────────
@@ -254,7 +255,7 @@ async def update_document(doc_id: str, body: DocUpdate, current_user: dict = Dep
         raise
     except Exception as e:
         logger.error("update_document error: %s", e)
-        raise HTTPException(500, str(e))
+        raise server_error(e, "Updating document")
 
 
 # ── Delete ────────────────────────────────────────────────────────────────────
@@ -277,4 +278,4 @@ async def delete_document(doc_id: str, current_user: dict = Depends(require_role
         return {"ok": True}
     except Exception as e:
         logger.error("delete_document error: %s", e)
-        raise HTTPException(500, str(e))
+        raise server_error(e, "Deleting document")

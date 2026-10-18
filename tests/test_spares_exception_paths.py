@@ -15,7 +15,6 @@ from app.routers.spares import (
     BulkSpareCreate, SpareCreate, SpareUpdate, SavedSpareReqCreate,
     get_spares, get_spare, bulk_create_spares, create_spare, update_spare,
     delete_spare, create_saved_spare_requisition, update_saved_spare_requisition,
-    test_connection,
 )
 
 
@@ -269,24 +268,5 @@ async def test_update_saved_requisition_db_failure_is_500(raising_supabase):
     assert exc.value.status_code == 500
 
 
-# ─── test_connection ────────────────────────────────────────────────────────────────
-
-async def test_connection_healthy_path(monkeypatch):
-    monkeypatch.setattr(
-        spares_mod, "supabase",
-        type("S", (), {"table": lambda self, _n: type(
-            "Q", (), {
-                "select": lambda self, *a, **k: self,
-                "limit": lambda self, *a, **k: self,
-                "execute": lambda self: _Resp([{"id": 1}]),
-            })()})())
-    result = await test_connection()
-    assert result["status"] == "ok"
-    assert result["database"] == "connected"
-    assert result["record_count"] == 1
-
-
-async def test_connection_db_error_path(raising_supabase):
-    result = await test_connection()
-    assert result["status"] == "error"
-    assert result["database"] == "disconnected"
+# NOTE: the /test/connection debug route was deleted; its removal is pinned by
+# test_endpoint_auth.py's REMOVED_DEBUG_ENDPOINTS.

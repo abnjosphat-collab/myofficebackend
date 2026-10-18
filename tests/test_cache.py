@@ -101,8 +101,10 @@ async def test_two_endpoints_same_namespace_dont_collide(fake_redis):
     assert await listing() == ["wo1", "wo2"]  # not clobbered by stats()'s cached value
 
 
-async def test_redis_outage_degrades_to_miss(monkeypatch):
-    # A broken Redis must not raise — cache_get returns None, the handler still runs.
+async def test_redis_outage_falls_back_to_memory(monkeypatch):
+    # Contract change (Item 3, Oct 2026): an outage used to mean "no caching at
+    # all" (every call recomputed). Now the in-memory fallback serves instead —
+    # still no raising, but the handler runs once, not twice.
     monkeypatch.setattr(cache_mod, "redis_client", FakeRedis(broken=True))
     calls = {"n": 0}
 
@@ -113,4 +115,59 @@ async def test_redis_outage_degrades_to_miss(monkeypatch):
 
     assert await get_employees() == ["x"]
     assert await get_employees() == ["x"]
-    assert calls["n"] == 2  # no caching possible, but no crash either
+    assert calls["n"] == 1  # second call served from the memory fallback
+    assert cache_mod.cache_stats()["memory_hits"] == 1
+
+
+async def test_invalidate_clears_the_memory_fallback_too(monkeypatch):
+    monkeypatch.setattr(cache_mod, "redis_client", FakeRedis(broken=True))
+    calls = {"n": 0}
+
+    @cache_mod.cached("employees", ttl=60)
+    async def get_employees():
+        calls["n"] += 1
+        return calls["n"]
+
+    assert await get_employees() == 1
+    assert await get_employees() == 1  # memory hit
+    await cache_mod.invalidate_namespace("employees")
+    assert await get_employees() == 2  # cleared: recomputed
+    assert cache_mod.cache_stats()["memory_keys"] == 1  # only the fresh entry
+
+
+async def test_memory_entries_expire_by_ttl(monkeypatch):
+    monkeypatch.setattr(cache_mod, "redis_client", FakeRedis(broken=True))
+    await cache_mod.cache_set("k", {"v": 1}, ttl=0, namespace="ns")
+    assert await cache_mod.cache_get("k") is None
+    assert cache_mod.cache_stats()["memory_keys"] == 0  # dropped on sight, not kept
+
+
+async def test_memory_is_not_consulted_while_redis_answers(fake_redis):
+    # Redis is the single source of truth while up: a Redis miss is a miss
+    # even when the fallback holds the key (e.g. Redis was flushed).
+    await cache_mod.cache_set("k", {"v": 1}, ttl=60, namespace="ns")
+    fake_redis.store.pop("k")
+    assert await cache_mod.cache_get("k") is None
+    assert cache_mod.cache_stats()["misses"] == 1
+    assert cache_mod.cache_stats()["memory_hits"] == 0
+
+
+async def test_memory_store_is_bounded(monkeypatch):
+    monkeypatch.setattr(cache_mod, "redis_client", FakeRedis(broken=True))
+    monkeypatch.setattr(cache_mod, "_MEMORY_MAX_KEYS", 2)
+    await cache_mod.cache_set("a", 1, ttl=60, namespace="ns")
+    await cache_mod.cache_set("b", 2, ttl=60, namespace="ns")
+    await cache_mod.cache_set("c", 3, ttl=60, namespace="ns")
+    assert cache_mod.cache_stats()["memory_keys"] == 2
+    assert await cache_mod.cache_get("a") is None  # oldest-expiring evicted
+    assert await cache_mod.cache_get("c") == 3
+
+
+async def test_stats_count_hits_misses_sets_and_outages(fake_redis):
+    await cache_mod.cache_set("k", [1], ttl=60, namespace="ns")
+    assert await cache_mod.cache_get("k") == [1]
+    assert await cache_mod.cache_get("missing") is None
+    stats = cache_mod.cache_stats()
+    assert (stats["sets"], stats["redis_hits"], stats["misses"]) == (1, 1, 1)
+    assert stats["memory_hits"] == 0 and stats["redis_outages"] == 0
+    assert stats["redis_in_cooldown"] is False

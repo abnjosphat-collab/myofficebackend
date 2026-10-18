@@ -138,6 +138,7 @@ class _FakeAuthUser:
     def __init__(self, uid="u-1", email="approver@x.com"):
         self.id = uid
         self.email = email
+        self.factors = []  # real get_user populates this; [] = not MFA-enrolled
 
 
 @pytest.fixture
@@ -259,7 +260,9 @@ async def test_get_overtime_db_error_is_500(monkeypatch):
     with pytest.raises(HTTPException) as exc:
         await get_overtime(status=None, overtime_type=None)
     assert exc.value.status_code == 500
-    assert "connection refused" in exc.value.detail
+    # 500s are generic since the server_error codemod: no internal text leaks.
+    assert "connection refused" not in exc.value.detail
+    assert exc.value.detail.startswith("Loading overtime failed. Please try again. (ref ")
 
 
 # ─── create_overtime ─────────────────────────────────────────────────────────────────
@@ -353,7 +356,9 @@ async def test_create_overtime_no_data_returned_is_500(patch_supabase):
     with pytest.raises(HTTPException) as exc:
         await create_overtime(_create_input(), current_user=CURRENT_USER)
     assert exc.value.status_code == 500
-    assert "no data returned" in exc.value.detail
+    # 500s are generic since the server_error codemod: no internal text leaks.
+    assert "no data returned" not in exc.value.detail
+    assert exc.value.detail.startswith("Creating overtime failed. Please try again. (ref ")
 
 
 async def test_create_overtime_db_error_is_500(patch_supabase):
@@ -361,7 +366,9 @@ async def test_create_overtime_db_error_is_500(patch_supabase):
     with pytest.raises(HTTPException) as exc:
         await create_overtime(_create_input(), current_user=CURRENT_USER)
     assert exc.value.status_code == 500
-    assert "insert failed" in exc.value.detail
+    # 500s are generic since the server_error codemod: no internal text leaks.
+    assert "insert failed" not in exc.value.detail
+    assert exc.value.detail.startswith("Creating overtime failed. Please try again. (ref ")
 
 
 # ─── update_overtime ─────────────────────────────────────────────────────────────────
@@ -472,7 +479,9 @@ async def test_update_overtime_db_error_is_500(patch_supabase):
     with pytest.raises(HTTPException) as exc:
         await update_overtime(7, OvertimeUpdate(reason="x"), authorization=None, current_user=CURRENT_USER)
     assert exc.value.status_code == 500
-    assert "connection lost" in exc.value.detail
+    # 500s are generic since the server_error codemod: no internal text leaks.
+    assert "connection lost" not in exc.value.detail
+    assert exc.value.detail.startswith("Updating overtime failed. Please try again. (ref ")
 
 
 async def test_update_overtime_not_found_is_404(patch_supabase):
@@ -646,7 +655,9 @@ async def test_bulk_update_overtime_status_db_error_is_500(patch_supabase, patch
             authorization="Bearer good-token", current_user=CURRENT_USER,
         )
     assert exc.value.status_code == 500
-    assert "bulk failed" in exc.value.detail
+    # 500s are generic since the server_error codemod: no internal text leaks.
+    assert "bulk failed" not in exc.value.detail
+    assert exc.value.detail.startswith("Bulk-updating overtime failed. Please try again. (ref ")
 
 # ─── bulk_edit_overtime ──────────────────────────────────────────────────────────
 

@@ -10,6 +10,8 @@ from app.serialization import convert_dates_to_iso
 from app.aggregation import count_by
 from app.db_helpers import fetch_all_pages, get_or_404
 from app.maintenance_events import append_event, diff_changes
+from app.errors import server_error
+from app.clock import today_harare
 import logging
 import json
 import re
@@ -315,7 +317,7 @@ async def get_work_orders(
 
     except Exception as e:
         logger.error(f"Error fetching work orders: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Error fetching work orders: {str(e)}")
+        raise server_error(e, "Loading work orders")
 
 def _generate_wo_number(offset: int = 0) -> str:
     """Next work-order number, server-side: WO-<max trailing digits + 1 + offset>, 5-wide.
@@ -339,7 +341,7 @@ def _is_unique_violation(err: Exception) -> bool:
 @router.post("/work-orders")
 async def create_work_order(work_order: WorkOrderCreate, current_user: dict = Depends(get_current_user)):
     try:
-        data_to_insert = work_order.dict()
+        data_to_insert = work_order.model_dump()
 
         # Set default title and description if not provided
         if not data_to_insert.get('title'):
@@ -401,7 +403,7 @@ async def create_work_order(work_order: WorkOrderCreate, current_user: dict = De
         raise
     except Exception as e:
         logger.error(f"Error creating work order: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Error creating work order: {str(e)}")
+        raise server_error(e, "Creating work order")
 
 @router.get("/work-orders/{work_order_id}", dependencies=[Depends(get_current_user)])
 async def get_work_order(work_order_id: int):
@@ -414,7 +416,7 @@ async def get_work_order(work_order_id: int):
         raise
     except Exception as e:
         logger.error(f"Error fetching work order: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Error fetching work order: {str(e)}")
+        raise server_error(e, "Loading work order")
 
 @router.patch("/work-orders/{work_order_id}")
 async def update_work_order(work_order_id: int, updated: WorkOrderUpdate, current_user: dict = Depends(get_current_user)):
@@ -469,7 +471,7 @@ async def update_work_order(work_order_id: int, updated: WorkOrderUpdate, curren
         raise
     except Exception as e:
         logger.error(f"Error updating work order: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Error updating work order: {str(e)}")
+        raise server_error(e, "Updating work order")
 
 
 def _version_conflict(current: dict) -> HTTPException:
@@ -502,7 +504,7 @@ async def delete_work_order(work_order_id: int, current_user: dict = Depends(req
         raise
     except Exception as e:
         logger.error(f"Error deleting work order: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Error deleting work order: {str(e)}")
+        raise server_error(e, "Deleting work order")
 
 @router.get("/work-orders/{work_order_id}/events", dependencies=[Depends(get_current_user)])
 async def get_work_order_events(work_order_id: int):
@@ -521,7 +523,7 @@ async def get_work_order_events(work_order_id: int):
         return rows(resp)
     except Exception as e:
         logger.error(f"Error fetching work order events: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Error fetching work order events: {str(e)}")
+        raise server_error(e, "Loading work order events")
 
 
 @router.get("/work-orders/{work_order_id}/comments", dependencies=[Depends(get_current_user)])
@@ -537,7 +539,7 @@ async def get_work_order_comments(work_order_id: int):
         return rows(resp)
     except Exception as e:
         logger.error(f"Error fetching work order comments: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Error fetching work order comments: {str(e)}")
+        raise server_error(e, "Loading work order comments")
 
 
 @router.post("/work-orders/{work_order_id}/comments", status_code=201)
@@ -567,7 +569,7 @@ async def add_work_order_comment(
         raise
     except Exception as e:
         logger.error(f"Error adding work order comment: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Error adding work order comment: {str(e)}")
+        raise server_error(e, "Adding work order comment")
 
 
 @router.get("/work-orders/allocated/{allocated_to}", dependencies=[Depends(get_current_user)])
@@ -585,7 +587,7 @@ async def get_work_orders_by_allocated(allocated_to: str):
         
     except Exception as e:
         logger.error(f"Error fetching work orders by allocated: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Error fetching work orders by allocated: {str(e)}")
+        raise server_error(e, "Loading work orders by allocated")
 
 # ==================== WORK ORDERS STATISTICS ====================
 @router.get("/work-orders/stats/summary")
@@ -602,8 +604,8 @@ async def get_work_order_stats():
         status_counts = count_by(status_priority_rows, 'status')
         priority_counts = count_by(status_priority_rows, 'priority')
 
-        # Count overdue work orders
-        today = date.today()
+        # Count overdue work orders ("today" in Africa/Harare, not server-local).
+        today = today_harare()
         records_all = supabase.table("work_orders").select("due_date, status").execute()
         overdue_count = 0
 
@@ -650,7 +652,7 @@ async def get_work_order_stats():
         
     except Exception as e:
         logger.error(f"Error fetching work order stats: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Error fetching work order stats: {str(e)}")
+        raise server_error(e, "Loading work order stats")
 
 # ==================== PPE ENDPOINTS (if you want them consolidated here) ====================
 @router.get("/ppe", dependencies=[Depends(get_current_user)])
@@ -685,12 +687,12 @@ async def get_ppe_records(
 
     except Exception as e:
         logger.error(f"Error fetching PPE records: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Error fetching PPE records: {str(e)}")
+        raise server_error(e, "Loading PPE records")
 
 @router.post("/ppe")
 async def create_ppe_record(record: PPEIssueCreate, current_user: dict = Depends(get_current_user)):
     try:
-        data_to_insert = record.dict()
+        data_to_insert = record.model_dump()
         
         if data_to_insert.get('issue_date'):
             data_to_insert['issue_date'] = data_to_insert['issue_date'].isoformat()
@@ -710,7 +712,7 @@ async def create_ppe_record(record: PPEIssueCreate, current_user: dict = Depends
             
     except Exception as e:
         logger.error(f"Error creating PPE record: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Error creating PPE record: {str(e)}")
+        raise server_error(e, "Creating PPE record")
 
 # ==================== MAINTENANCE DASHBOARD STATS ====================
 @router.get("/dashboard/stats", dependencies=[Depends(get_current_user)])
@@ -738,7 +740,7 @@ async def get_maintenance_dashboard_stats():
         
     except Exception as e:
         logger.error(f"Error fetching dashboard stats: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Error fetching dashboard stats: {str(e)}")
+        raise server_error(e, "Loading dashboard stats")
 
 # Health check endpoint
 @router.get("/health")

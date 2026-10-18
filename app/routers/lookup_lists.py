@@ -7,6 +7,7 @@ from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel, Field
 from app.supabase_client import supabase
 from app.auth import get_current_user, require_role
+from app.errors import server_error
 import logging
 
 logger = logging.getLogger(__name__)
@@ -25,7 +26,7 @@ async def get_lookup_list(list_name: str):
         return r.data or []
     except Exception as e:
         logger.error(f"Failed to fetch lookup list '{list_name}': {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise server_error(e, "Loading lookup list")
 
 
 @router.post("/{list_name}", dependencies=[Depends(get_current_user)])
@@ -41,7 +42,7 @@ async def add_lookup_value(list_name: str, body: LookupValueCreate):
         return r.data[0] if r.data else {"list_name": list_name, "value": value}
     except Exception as e:
         logger.error(f"Failed to add value to lookup list '{list_name}': {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise server_error(e, "Creating lookup value")
 
 
 @router.patch("/{list_name}/{value_id}", dependencies=[Depends(require_role('manager'))])
@@ -58,7 +59,7 @@ async def rename_lookup_value(list_name: str, value_id: int, body: LookupValueCr
         raise
     except Exception as e:
         logger.error(f"Failed to rename lookup value {value_id} in '{list_name}': {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise server_error(e, "Rename lookup value")
 
 
 @router.delete("/{list_name}/{value_id}", dependencies=[Depends(require_role('manager'))])
@@ -72,4 +73,4 @@ async def delete_lookup_value(list_name: str, value_id: int):
         raise
     except Exception as e:
         logger.error(f"Failed to delete lookup value {value_id} from '{list_name}': {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise server_error(e, "Deleting lookup value")

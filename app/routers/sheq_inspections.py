@@ -7,6 +7,7 @@ from app.supabase_client import supabase, rows, one_row
 from app.auth import get_current_user, require_role
 from app.aggregation import count_by
 from app.db_helpers import get_or_404, apply_date_range, or_ilike
+from app.errors import server_error
 import logging
 from datetime import datetime
 import uuid
@@ -184,7 +185,7 @@ async def get_inspections(
         
     except Exception as e:
         logger.error(f"Error fetching inspections: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Error fetching inspections: {str(e)}")
+        raise server_error(e, "Loading inspections")
 
 # GET stats overview
 @router.get("/stats/overview", dependencies=[Depends(get_current_user)])
@@ -260,7 +261,7 @@ async def get_inspection_stats():
         
     except Exception as e:
         logger.error(f"Error fetching stats: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Error fetching stats: {str(e)}")
+        raise server_error(e, "Loading stats")
 
 # GET single inspection
 @router.get("/{inspection_id}", dependencies=[Depends(get_current_user)])
@@ -296,7 +297,7 @@ async def get_inspection(inspection_id: str):
         raise
     except Exception as e:
         logger.error(f"Error fetching inspection: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Error fetching inspection: {str(e)}")
+        raise server_error(e, "Loading inspection")
 
 # POST create inspection
 @router.post("")
@@ -378,7 +379,7 @@ async def create_inspection(inspection: SHEQCreate, current_user: dict = Depends
         
     except Exception as e:
         logger.error(f"Error creating inspection: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Error creating inspection: {str(e)}")
+        raise server_error(e, "Creating inspection")
 
 # PATCH update inspection
 @router.patch("/{inspection_id}")
@@ -398,7 +399,7 @@ async def update_inspection(inspection_id: str, updated: SHEQUpdate, current_use
 
         # Prepare update data - map camelCase to lowercase for DB
         data_to_update = {}
-        update_dict = updated.dict(exclude_unset=True)
+        update_dict = updated.model_dump(exclude_unset=True)
         
         # Map fields to lowercase column names
         field_mapping = {
@@ -501,7 +502,7 @@ async def update_inspection(inspection_id: str, updated: SHEQUpdate, current_use
         raise
     except Exception as e:
         logger.error(f"Error updating inspection: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Error updating inspection: {str(e)}")
+        raise server_error(e, "Updating inspection")
 
 # DELETE inspection
 @router.delete("/{inspection_id}")
@@ -530,7 +531,7 @@ async def delete_inspection(inspection_id: str, current_user: dict = Depends(req
         raise
     except Exception as e:
         logger.error(f"Error deleting inspection: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Error deleting inspection: {str(e)}")
+        raise server_error(e, "Deleting inspection")
 
 # GET findings for an inspection
 @router.get("/{inspection_id}/findings", dependencies=[Depends(get_current_user)])
@@ -548,7 +549,7 @@ async def get_findings(inspection_id: str):
         
     except Exception as e:
         logger.error(f"Error fetching findings: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Error fetching findings: {str(e)}")
+        raise server_error(e, "Loading findings")
 
 # POST add finding to inspection
 @router.post("/{inspection_id}/findings")
@@ -592,7 +593,7 @@ async def add_finding(inspection_id: str, finding: FindingCreate, current_user: 
         raise
     except Exception as e:
         logger.error(f"Error adding finding: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Error adding finding: {str(e)}")
+        raise server_error(e, "Adding finding")
 
 # PATCH update finding
 @router.patch("/findings/{finding_id}")
@@ -612,7 +613,7 @@ async def update_finding(finding_id: str, updated: FindingUpdate, current_user: 
 
         # Prepare update data
         data_to_update = {}
-        update_dict = updated.dict(exclude_unset=True)
+        update_dict = updated.model_dump(exclude_unset=True)
 
         # Map to lowercase column names
         field_mapping = {
@@ -652,7 +653,7 @@ async def update_finding(finding_id: str, updated: FindingUpdate, current_user: 
         raise
     except Exception as e:
         logger.error(f"Error updating finding: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Error updating finding: {str(e)}")
+        raise server_error(e, "Updating finding")
 
 # DELETE finding
 @router.delete("/findings/{finding_id}")
@@ -680,4 +681,4 @@ async def delete_finding(finding_id: str, current_user: dict = Depends(require_r
         raise
     except Exception as e:
         logger.error(f"Error deleting finding: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Error deleting finding: {str(e)}")
+        raise server_error(e, "Deleting finding")

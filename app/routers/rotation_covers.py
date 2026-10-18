@@ -189,7 +189,7 @@ async def create_cover(body: RotationCoverCreate, current_user: dict = Depends(g
             body.absent_employee_name, date_from, date_to,
         )
 
-        payload = body.dict()
+        payload = body.model_dump()
         payload["date_from"] = date_from
         payload["date_to"] = date_to
 
@@ -209,7 +209,7 @@ async def create_cover(body: RotationCoverCreate, current_user: dict = Depends(g
 async def update_cover(cover_id: int, body: RotationCoverUpdate, current_user: dict = Depends(get_current_user)):
     try:
         existing = get_or_404(supabase, TABLE, cover_id, detail="Rotation cover not found")
-        data = body.dict(exclude_unset=True)
+        data = body.model_dump(exclude_unset=True)
         if not data:
             return existing
 

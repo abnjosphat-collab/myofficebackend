@@ -11,6 +11,7 @@ from app.auth import get_current_user, require_role
 from app.uploads import read_and_validate_upload, SPREADSHEET_EXTS
 from app.serialization import convert_dates_to_iso
 from app.db_helpers import get_or_404
+from app.errors import server_error
 import logging
 import io
 try:
@@ -428,7 +429,7 @@ async def infer_spare_columns(file: UploadFile = File(...), current_user: dict =
         raise
     except Exception as e:
         logger.error(f"Column inference error: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
+        raise server_error(e, "Inferring spare columns")
 
 
 # GET all spares
@@ -483,7 +484,7 @@ async def get_spares(
 
     except Exception as e:
         logger.error(f"Error fetching spares: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Error fetching spares: {str(e)}")
+        raise server_error(e, "Loading spares")
 
 # GET single spare
 @router.get("/{spare_id}", dependencies=[Depends(get_current_user)])
@@ -500,7 +501,7 @@ async def get_spare(spare_id: int):
         raise
     except Exception as e:
         logger.error(f"Error fetching spare: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Error fetching spare: {str(e)}")
+        raise server_error(e, "Loading spare")
 
 # POST bulk create spares
 @router.post("/bulk", status_code=201)
@@ -542,14 +543,14 @@ async def bulk_create_spares(request: Request, payload: BulkSpareCreate, current
                 batch = new_items[i:i + BATCH]
                 try:
                     supabase.table("spares").insert(
-                        [filter_for_db(item.dict()) for item in batch]
+                        [filter_for_db(item.model_dump()) for item in batch]
                     ).execute()
                     created += len(batch)
                 except Exception as ins_err:
                     logger.warning(f"Insert batch {i // BATCH} failed, going row-by-row: {ins_err}")
                     for item in batch:
                         try:
-                            supabase.table("spares").insert(filter_for_db(item.dict())).execute()
+                            supabase.table("spares").insert(filter_for_db(item.model_dump())).execute()
                             created += 1
                         except Exception as row_err:
                             logger.warning(f"Insert row error {item.stock_code}: {row_err}")
@@ -562,7 +563,7 @@ async def bulk_create_spares(request: Request, payload: BulkSpareCreate, current
                     # (quantity 0, min 1, max 5, priority medium, no supplier or location...) and an import meant
                     # to fix prices or categories would overwrite the stock on hand and the supplier of every
                     # existing part.
-                    upd_data = {k: v for k, v in filter_for_db(item.dict(exclude_unset=True)).items()
+                    upd_data = {k: v for k, v in filter_for_db(item.model_dump(exclude_unset=True)).items()
                                 if k != 'stock_code'}
                     if not upd_data:
                         skipped += 1
@@ -589,7 +590,7 @@ async def bulk_create_spares(request: Request, payload: BulkSpareCreate, current
 
             for i in range(0, len(new_items), BATCH):
                 batch   = new_items[i:i + BATCH]
-                records = [filter_for_db(item.dict()) for item in batch]
+                records = [filter_for_db(item.model_dump()) for item in batch]
                 try:
                     supabase.table("spares").insert(records).execute()
                     created += len(batch)
@@ -597,7 +598,7 @@ async def bulk_create_spares(request: Request, payload: BulkSpareCreate, current
                     logger.warning(f"Insert batch error (rows {i}–{i + len(batch)}): {batch_err}")
                     for item in batch:
                         try:
-                            supabase.table("spares").insert(filter_for_db(item.dict())).execute()
+                            supabase.table("spares").insert(filter_for_db(item.model_dump())).execute()
                             created += 1
                         except Exception as row_err:
                             logger.warning(f"Row error {item.stock_code}: {row_err}")
@@ -608,7 +609,7 @@ async def bulk_create_spares(request: Request, payload: BulkSpareCreate, current
 
     except Exception as e:
         logger.error(f"Bulk create error: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Bulk create failed: {str(e)}")
+        raise server_error(e, "Bulk-creating spares")
 
 
 # POST create spare
@@ -623,7 +624,7 @@ async def create_spare(spare: SpareCreate, current_user: dict = Depends(get_curr
             raise HTTPException(status_code=400, detail=f"Stock code '{spare.stock_code}' already exists")
 
         # Insert new spare (filter to known DB columns only)
-        response = supabase.table("spares").insert(filter_for_db(spare.dict())).execute()
+        response = supabase.table("spares").insert(filter_for_db(spare.model_dump())).execute()
 
         result = one_row(response)
         if result is None:
@@ -638,7 +639,7 @@ async def create_spare(spare: SpareCreate, current_user: dict = Depends(get_curr
         raise
     except Exception as e:
         logger.error(f"Error creating spare: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Error creating spare: {str(e)}")
+        raise server_error(e, "Creating spare")
 
 # PUT update spare
 @router.put("/{spare_id}")
@@ -660,7 +661,7 @@ async def update_spare(spare_id: int, spare_update: SpareUpdate, current_user: d
                 raise HTTPException(status_code=400, detail=f"Stock code '{spare_update.stock_code}' already exists")
         
         # Clean and filter update data to known DB columns only
-        update_data = filter_for_db(clean_data(spare_update.dict(exclude_unset=True)))
+        update_data = filter_for_db(clean_data(spare_update.model_dump(exclude_unset=True)))
         
         if not update_data:
             raise HTTPException(status_code=400, detail="No data provided for update")
@@ -724,7 +725,7 @@ async def update_spare(spare_id: int, spare_update: SpareUpdate, current_user: d
         raise
     except Exception as e:
         logger.error(f"Error updating spare: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Error updating spare: {str(e)}")
+        raise server_error(e, "Updating spare")
 
 # DELETE spare
 @router.delete("/{spare_id}")
@@ -750,7 +751,7 @@ async def delete_spare(spare_id: int, current_user: dict = Depends(require_role(
         raise
     except Exception as e:
         logger.error(f"Error deleting spare: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Error deleting spare: {str(e)}")
+        raise server_error(e, "Deleting spare")
 
 # GET suggestions for a field
 @router.get("/suggestions/{field}", dependencies=[Depends(get_current_user)])
@@ -863,23 +864,10 @@ async def spares_health_check():
             "table_exists": True
         }
     except Exception as e:
-        return {"status": "unhealthy", "error": str(e)}
-
-# Test endpoint
-@router.get("/test/connection")
-async def test_connection():
-    """Test database connection"""
-    try:
-        response = supabase.table("spares").select("id", count="exact").limit(1).execute()
-
-        return {
-            "status": "ok",
-            "database": "connected",
-            "table": "spares",
-            "record_count": len(rows(response))
-        }
-    except Exception as e:
-        return {"status": "error", "database": "disconnected", "error": str(e)}
+        logger.error(f"Spares health check failed: {e}")
+        # Status only — the exception text stays in the server log, never in
+        # the response.
+        return {"status": "unhealthy", "service": "spares", "database": "disconnected"}
 
 # Export data endpoint
 @router.get("/export/data", dependencies=[Depends(get_current_user)])
@@ -900,7 +888,7 @@ async def export_spares():
 
     except Exception as e:
         logger.error(f"Error exporting spares: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Error exporting spares: {str(e)}")
+        raise server_error(e, "Exporting spares")
 
 # ── Saved Spare Requisitions ──────────────────────────────────────────────────
 # Run this SQL in Supabase before using these endpoints:
@@ -944,7 +932,7 @@ async def create_saved_spare_requisition(data: SavedSpareReqCreate, current_user
     """Save a spare requisition to Supabase"""
     try:
         now = datetime.utcnow().isoformat()
-        row = {**data.dict(), "saved_at": now, "updated_at": now}
+        row = {**data.model_dump(), "saved_at": now, "updated_at": now}
         response = supabase.table("spare_requisitions").insert(row).execute()
         created = one_row(response)
         if created is None:
@@ -954,14 +942,14 @@ async def create_saved_spare_requisition(data: SavedSpareReqCreate, current_user
         raise
     except Exception as e:
         logger.error(f"Error saving spare requisition: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise server_error(e, "Creating saved spare requisition")
 
 @router.put("/saved-requisitions/{req_id}")
 async def update_saved_spare_requisition(req_id: str, data: SavedSpareReqCreate, current_user: dict = Depends(get_current_user)):
     """Update a saved spare requisition"""
     try:
         now = datetime.utcnow().isoformat()
-        row = {**data.dict(), "updated_at": now}
+        row = {**data.model_dump(), "updated_at": now}
         response = supabase.table("spare_requisitions").update(row).eq("id", req_id).execute()
         updated = one_row(response)
         if updated is None:
@@ -971,7 +959,7 @@ async def update_saved_spare_requisition(req_id: str, data: SavedSpareReqCreate,
         raise
     except Exception as e:
         logger.error(f"Error updating spare requisition: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise server_error(e, "Updating saved spare requisition")
 
 @router.delete("/saved-requisitions/{req_id}")
 async def delete_saved_spare_requisition(req_id: str, current_user: dict = Depends(require_role('manager'))):
@@ -981,4 +969,4 @@ async def delete_saved_spare_requisition(req_id: str, current_user: dict = Depen
         return {"message": "Deleted", "id": req_id}
     except Exception as e:
         logger.error(f"Error deleting spare requisition: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise server_error(e, "Deleting saved spare requisition")

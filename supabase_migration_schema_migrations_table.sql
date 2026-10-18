@@ -12,3 +12,7 @@ CREATE TABLE IF NOT EXISTS schema_migrations (
   applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   note TEXT
 );
+-- Tracker table is touched only by scripts/track_migration.py, which uses the
+-- shared service-role singleton (service_role bypasses RLS): RLS on, no policies.
+-- (Table does not exist on live yet — carried here so it is born with RLS.)
+ALTER TABLE public.schema_migrations ENABLE ROW LEVEL SECURITY;

@@ -4,6 +4,8 @@ from typing import Optional
 import logging
 from app.supabase_client import supabase, rows, one_row
 from app.auth import get_current_user, require_role
+from app.errors import server_error
+from app.clock import today_harare
 from datetime import datetime, timedelta
 
 logger = logging.getLogger(__name__)
@@ -66,14 +68,14 @@ async def get_availabilities():
         return equipment
     except Exception as e:
         logger.error(f"Error fetching availabilities: {e}")
-        raise HTTPException(status_code=500, detail=f"Error fetching availabilities: {e}")
+        raise server_error(e, "Loading availabilities")
 
 
 @router.get("/availabilities/stats")
 async def get_availability_stats():
     """Aggregate availability statistics."""
     try:
-        thirty_days_ago = (datetime.now() - timedelta(days=30)).strftime("%Y-%m-%d")
+        thirty_days_ago = (today_harare() - timedelta(days=30)).isoformat()
         equipment = rows(supabase.table("equipment").select("*").execute())
 
         if not equipment:
@@ -97,7 +99,7 @@ async def get_availability_stats():
         # CAN be computed for real, the same way availability_from_breakdowns()
         # does it: 24 possible hours/day per machine, minus that machine's actual
         # breakdown downtime in the window, from the breakdowns table.
-        week_start = (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d")
+        week_start = (today_harare() - timedelta(days=7)).isoformat()
         week_bd_resp = supabase.table("breakdowns").select("downtime_minutes").gte("breakdown_date", week_start).execute()
         week_bd_hours = sum((b.get("downtime_minutes") or 0) for b in rows(week_bd_resp)) / 60.0
         week_possible_hours = total * 24 * 7
@@ -118,14 +120,14 @@ async def get_availability_stats():
         }
     except Exception as e:
         logger.error(f"Error calculating stats: {e}")
-        raise HTTPException(status_code=500, detail=f"Error: {e}")
+        raise server_error(e, "Loading availability stats")
 
 
 @router.get("/availabilities/history/{equipment_id}", dependencies=[Depends(get_current_user)])
 async def get_availability_history(equipment_id: int, days: int = 30):
     """Availability history for one piece of equipment."""
     try:
-        start_date = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
+        start_date = (today_harare() - timedelta(days=days)).isoformat()
         response = (supabase.table("availabilities")
                     .select("*")
                     .eq("equipment_id", equipment_id)
@@ -135,7 +137,7 @@ async def get_availability_history(equipment_id: int, days: int = 30):
         return rows(response)
     except Exception as e:
         logger.error(f"Error fetching history: {e}")
-        raise HTTPException(status_code=500, detail=f"Error: {e}")
+        raise server_error(e, "Loading availability history")
 
 
 # ─── CRUD for availability records ────────────────────────────────────────────
@@ -163,7 +165,7 @@ async def list_availability_records(
         return records
     except Exception as e:
         logger.error(f"list_availability_records error: {e}")
-        raise HTTPException(500, str(e))
+        raise server_error(e, "Loading availability records")
 
 
 @router.get("/availability-records/from-breakdowns", dependencies=[Depends(get_current_user)])
@@ -229,7 +231,7 @@ async def availability_from_breakdowns(
 
     except Exception as e:
         logger.error(f"availability_from_breakdowns error: {e}")
-        raise HTTPException(500, str(e))
+        raise server_error(e, "Availability from breakdowns")
 
 
 @router.post("/availability-records")
@@ -250,7 +252,7 @@ async def create_availability_record(body: AvailRecordIn, current_user: dict = D
         raise
     except Exception as e:
         logger.error(f"create_availability_record error: {e}")
-        raise HTTPException(500, str(e))
+        raise server_error(e, "Creating availability record")
 
 
 @router.put("/availability-records/{record_id}")
@@ -272,7 +274,7 @@ async def update_availability_record(record_id: int, body: AvailRecordIn, curren
         raise
     except Exception as e:
         logger.error(f"update_availability_record error: {e}")
-        raise HTTPException(500, str(e))
+        raise server_error(e, "Updating availability record")
 
 
 @router.delete("/availability-records/{record_id}")
@@ -283,4 +285,4 @@ async def delete_availability_record(record_id: int, current_user: dict = Depend
         return {"ok": True}
     except Exception as e:
         logger.error(f"delete_availability_record error: {e}")
-        raise HTTPException(500, str(e))
+        raise server_error(e, "Deleting availability record")

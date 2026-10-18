@@ -14,6 +14,7 @@ from pydantic import BaseModel
 from app.auth import get_current_user, require_role
 from app.db_helpers import response_rows
 from app.supabase_client import supabase
+from app.errors import server_error
 
 logger = logging.getLogger(__name__)
 
@@ -127,7 +128,7 @@ def _write(op: str, data: dict[str, Any], item_id: Optional[str] = None) -> Inve
         q = supabase.table(TABLE)
         result = response_rows((q.insert(data) if op == "insert" else q.update(data).eq("id", item_id)).execute())
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"The inventory item was not saved: {e}")
+        raise server_error(e, "Saving inventory item")
     if not result:
         if op == "update":  # deleted by someone else since it was read
             raise HTTPException(status_code=404, detail="Inventory item not found; it may have just been deleted.")
@@ -186,7 +187,7 @@ async def delete_inventory_item(item_id: str, current_user: dict = Depends(requi
     try:
         supabase.table(TABLE).delete().eq("id", item_id).execute()
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"The inventory item was not deleted: {e}")
+        raise server_error(e, "Deleting inventory item")
     return {"message": "Inventory item deleted successfully"}
 
 

@@ -50,6 +50,7 @@ from datetime import date, datetime
 from app.supabase_client import supabase
 from app.auth import get_current_user, require_role
 from app.db_helpers import fetch_all_pages, get_or_404
+from app.errors import server_error
 import logging
 
 logger = logging.getLogger(__name__)
@@ -165,7 +166,7 @@ async def list_assignments(active_only: bool = False):
         return await run_in_threadpool(lambda: fetch_all_pages(lambda start,end:q.range(start,end).execute(),extract_rows=_rows))
     except Exception as e:
         logger.error(f"list_assignments error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise server_error(e, "Loading assignments")
 
 # ─── GET one ──────────────────────────────────────────────────────────────────
 
@@ -177,7 +178,7 @@ async def get_assignment(assignment_id: int):
         raise
     except Exception as e:
         logger.error(f"get_assignment({assignment_id}) error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise server_error(e, "Loading assignment")
 
 # ─── POST create ──────────────────────────────────────────────────────────────
 
@@ -218,7 +219,7 @@ async def create_assignment(payload: ShiftRosterCreate, current_user: dict = Dep
         raise
     except Exception as e:
         logger.error(f"create_assignment error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise server_error(e, "Creating assignment")
 
 # Columns added by the optional migration — may not exist yet in older deployments
 _OPTIONAL_COLS = frozenset({"standby_periods", "shift_label", "shift_hours", "shift_timing_periods", "day_overrides"})
@@ -234,7 +235,7 @@ async def update_assignment(assignment_id: int, payload: ShiftRosterUpdate, curr
     try:
         _require_exists(assignment_id)
 
-        data = payload.dict(exclude_unset=True)
+        data = payload.model_dump(exclude_unset=True)
         if "cycle_start_date" in data and isinstance(data["cycle_start_date"], date):
             data["cycle_start_date"] = data["cycle_start_date"].isoformat()
         data["updated_at"] = datetime.utcnow().isoformat()
@@ -263,7 +264,7 @@ async def update_assignment(assignment_id: int, payload: ShiftRosterUpdate, curr
         raise
     except Exception as e:
         logger.error(f"update_assignment({assignment_id}) error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise server_error(e, "Updating assignment")
 
 # ─── DELETE ───────────────────────────────────────────────────────────────────
 
@@ -277,4 +278,4 @@ async def delete_assignment(assignment_id: int, current_user: dict = Depends(req
         raise
     except Exception as e:
         logger.error(f"delete_assignment({assignment_id}) error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise server_error(e, "Deleting assignment")

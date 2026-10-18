@@ -311,7 +311,9 @@ async def test_create_pto_report_unexpected_db_error_is_500(patch_supabase):
     with pytest.raises(HTTPException) as exc:
         await create_pto_report(report, current_user={"user_id": "u1"})
     assert exc.value.status_code == 500
-    assert "connection reset" in exc.value.detail
+    # 500s are generic since the server_error codemod: no internal text leaks.
+    assert "connection reset" not in exc.value.detail
+    assert exc.value.detail.startswith("Creating report failed. Please try again. (ref ")
 
 
 # ─── update_pto_report ───────────────────────────────────────────────────────────

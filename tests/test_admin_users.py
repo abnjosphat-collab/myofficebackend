@@ -303,3 +303,43 @@ async def test_reset_password_404_when_target_missing(monkeypatch):
     with pytest.raises(HTTPException) as exc:
         await admin.send_password_reset("ghost", current_user={"role": "admin", "user_id": "u-1"})
     assert exc.value.status_code == 404
+
+
+# ─── auth-cache invalidation ──────────────────────────────────────────────
+
+def _seed_auth_cache(user_id):
+    """A cached verified entry for `user_id`, as get_current_user would store."""
+    from app import auth as auth_mod
+    auth_mod._auth_cache["deadbeef"] = (
+        9999999999.0,
+        {"user_id": user_id, "email": "a@b.com", "role": "user"},
+        True,
+    )
+    return auth_mod
+
+
+async def test_update_user_role_change_invalidates_target(monkeypatch):
+    _patch(monkeypatch, profiles={"user_profiles": [_profile(id="u-2")]})
+    auth_mod = _seed_auth_cache("u-2")
+    await admin.update_user("u-2", admin.UserProfileUpdate(role="manager"),
+                            current_user={"role": "admin", "user_id": "u-1"})
+    assert auth_mod._auth_cache == {}
+
+
+async def test_set_user_active_invalidates_target(monkeypatch):
+    _patch(monkeypatch, profiles={"user_profiles": [_profile(id="u-2")]})
+    auth_mod = _seed_auth_cache("u-2")
+    await admin.set_user_active("u-2", admin.SetActiveRequest(active=False),
+                                current_user={"role": "admin", "user_id": "u-1"})
+    assert auth_mod._auth_cache == {}
+
+
+async def test_reset_mfa_factors_invalidates_target(monkeypatch):
+    _patch(monkeypatch, profiles={"user_profiles": [_profile(id="u-2")]})
+    monkeypatch.setattr(admin, "_auth_admin_request", lambda m, p: (200, {"totp": []}))
+    auth_mod = _seed_auth_cache("u-2")
+    auth_mod._factor_cache["u-2"] = (9999999999.0, True)
+    result = await admin.reset_mfa_factors("u-2", current_user={"role": "admin", "user_id": "u-1"})
+    assert result == {"ok": True, "removed": 0}
+    assert auth_mod._auth_cache == {}
+    assert "u-2" not in auth_mod._factor_cache

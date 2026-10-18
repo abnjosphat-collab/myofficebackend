@@ -127,6 +127,7 @@ class StatusUpdateRequest(BaseModel):
 from app.supabase_client import supabase as _shared_supabase_client
 from app.auth import get_current_user, require_role
 from app.compressor_register import fields_from_register, load_register_units, sync_from_register, with_register
+from app.errors import server_error
 
 #: Columns of a tracked compressor that the Equipment register owns (an update to them is ignored, not applied).
 REGISTER_OWNED = ("name", "model", "location")
@@ -363,7 +364,7 @@ async def get_compressor_by_id(
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error fetching compressor: {str(e)}")
+        raise server_error(e, "Loading compressor")
 
 @router.post("/compressors", response_model=Dict[str, Any])
 async def create_compressor(
@@ -412,7 +413,7 @@ async def create_compressor(
         raise
     except Exception as e:
         logger.error(f"Error creating compressor: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Error creating compressor: {str(e)}")
+        raise server_error(e, "Creating compressor")
 
 @router.put("/compressors/{compressor_id}", response_model=Dict[str, Any])
 async def update_compressor(
@@ -422,7 +423,7 @@ async def update_compressor(
 , current_user: dict = Depends(get_current_user)):
     """Update a compressor"""
     try:
-        update_data = compressor_update.dict(exclude_unset=True)
+        update_data = compressor_update.model_dump(exclude_unset=True)
         # A compressor that belongs to a register item takes its name, model and location from the register; a change to
         # them here would be overwritten by the next sync, so it is left out and the response says so.
         current = supabase_client.table(COMPRESSORS_TABLE).select("equipment_id").eq("id", compressor_id).execute()
@@ -450,7 +451,7 @@ async def update_compressor(
                 "message": f"Compressor updated successfully{note}"
             }
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error updating compressor: {str(e)}")
+        raise server_error(e, "Updating compressor")
 
 @router.patch("/compressors/{compressor_id}/status", response_model=Dict[str, Any])
 async def update_compressor_status(
@@ -485,7 +486,7 @@ async def update_compressor_status(
                 "message": "Compressor status updated"
             }
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error updating compressor status: {str(e)}")
+        raise server_error(e, "Updating compressor status")
 
 @router.delete("/compressors/{compressor_id}")
 async def delete_compressor(
@@ -505,7 +506,7 @@ async def delete_compressor(
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error deleting compressor: {str(e)}")
+        raise server_error(e, "Deleting compressor")
 
 # Daily Entry Operations
 @router.post("/daily-entries/cumulative", response_model=Dict[str, Any])
@@ -711,7 +712,7 @@ async def create_daily_entry_cumulative(
         raise
     except Exception as e:
         logger.error(f"Error creating daily entry: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Error creating daily entry: {str(e)}")
+        raise server_error(e, "Creating daily entry")
 
 @router.get("/readings/{compressor_id}", dependencies=[Depends(get_current_user)])
 async def get_compressor_readings(
@@ -834,7 +835,7 @@ async def get_readings_by_date(
         raise
     except Exception as e:
         logger.error(f"Error fetching readings by date: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Error fetching readings: {str(e)}")
+        raise server_error(e, "Loading readings")
 
 async def check_and_update_service_due(compressor_id: str, current_hours: float, supabase_client):
     """Check if service is due and update maintenance schedule"""
@@ -995,7 +996,7 @@ async def get_stats(supabase_client = Depends(get_supabase)):
         }
     except Exception as e:
         logger.error(f"Error calculating statistics: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Error calculating statistics: {str(e)}")
+        raise server_error(e, "Calculating statistics")
 
 @router.get("/service-due", dependencies=[Depends(get_current_user)])
 async def get_service_due(supabase_client = Depends(get_supabase)):
@@ -1037,7 +1038,7 @@ async def get_service_due(supabase_client = Depends(get_supabase)):
         return service_due_list
     except Exception as e:
         logger.error(f"Error checking service due: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Error checking service due: {str(e)}")
+        raise server_error(e, "Checking service due")
 
 # Analytics endpoints
 @router.get("/analytics/performance-metrics", dependencies=[Depends(get_current_user)])
@@ -1331,7 +1332,7 @@ async def export_data(
         
     except Exception as e:
         logger.error(f"Error exporting data: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Error exporting data: {str(e)}")
+        raise server_error(e, "Exporting data")
 
 @router.post("/import")
 @limiter.limit("10/minute")
@@ -1355,7 +1356,7 @@ async def create_service_record(
     """Create a service record"""
     try:
         # Add metadata
-        data = service_record.dict()
+        data = service_record.model_dump()
         data["id"] = str(uuid.uuid4())
         data["created_at"] = datetime.utcnow().isoformat()
 
@@ -1370,7 +1371,7 @@ async def create_service_record(
         
     except Exception as e:
         logger.error(f"Error creating service record: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Error creating service record: {str(e)}")
+        raise server_error(e, "Creating service record")
 
 def routine_marker(equipment_id: int) -> str:
     return f"{ROUTINE_MARKER_PREFIX}{equipment_id}"
@@ -1436,10 +1437,6 @@ async def ensure_routine_schedules_endpoint(
         logger.error(f"Error ensuring routine schedules: {str(e)}")
         raise HTTPException(status_code=500, detail="Could not ensure routine schedules.")
 
-
-@router.get("/test")
-async def test_endpoint():
-    return {"message": "Compressors API is working", "timestamp": datetime.utcnow().isoformat()}
 
 # Function to initialize data on startup
 async def on_startup():

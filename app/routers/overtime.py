@@ -6,6 +6,7 @@ from app.supabase_client import supabase
 from app.auth import get_current_user, require_role, require_role_if_status_in
 from app.db_helpers import get_or_404
 from app.serialization import encode_json_fields, decode_json_fields
+from app.errors import server_error
 import logging
 from datetime import date, datetime
 
@@ -191,7 +192,7 @@ async def get_overtime(status: Optional[str] = None, overtime_type: Optional[str
 
     except Exception as e:
         logger.error(f"Error fetching overtime: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Error fetching overtime: {str(e)}")
+        raise server_error(e, "Loading overtime")
 
 # POST create overtime
 @router.post("")
@@ -239,7 +240,7 @@ async def create_overtime(overtime: OvertimeCreate, current_user: dict = Depends
             
     except Exception as e:
         logger.error(f"Error creating overtime: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Error creating overtime: {str(e)}")
+        raise server_error(e, "Creating overtime")
 
 # POST bulk approve/reject — one request instead of N sequential PATCHes from the browser.
 @router.post("/bulk-status", response_model=BulkStatusResponse)
@@ -280,7 +281,7 @@ async def bulk_update_overtime_status(
         return BulkStatusResponse(succeeded=succeeded, failed=failed, updated=updated)
     except Exception as e:
         logger.error(f"Error bulk-updating overtime status: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Error bulk-updating overtime: {str(e)}")
+        raise server_error(e, "Bulk-updating overtime")
 
 # POST bulk field edit — one request that rewrites the same unlocked fields on many
 # records. Locked-status records (approved/paid/rejected) are skipped for non-managers
@@ -292,7 +293,7 @@ async def bulk_edit_overtime(
     current_user: dict = Depends(get_current_user),
 ):
     ids = list(dict.fromkeys(body.ids))
-    patch = body.dict(exclude_unset=True)
+    patch = body.model_dump(exclude_unset=True)
     patch.pop("ids", None)
     if not patch:
         raise HTTPException(status_code=422, detail="Nothing to change: unlock at least one field.")
@@ -323,7 +324,7 @@ async def bulk_edit_overtime(
         raise
     except Exception as e:
         logger.error(f"Error bulk-editing overtime: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Error bulk-editing overtime: {str(e)}")
+        raise server_error(e, "Bulk-editing overtime")
 
 
 # PATCH update overtime
@@ -367,7 +368,7 @@ async def update_overtime(overtime_id: int, updated: OvertimeUpdate, authorizati
         raise
     except Exception as e:
         logger.error(f"Error updating overtime: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Error updating overtime: {str(e)}")
+        raise server_error(e, "Updating overtime")
 
 # DELETE overtime
 @router.delete("/{overtime_id}")
@@ -391,7 +392,7 @@ async def delete_overtime(
         raise
     except Exception as e:
         logger.error(f"Error deleting overtime: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Error deleting overtime: {str(e)}")
+        raise server_error(e, "Deleting overtime")
 
 
 # ---------- POST take-as-leave: approved lieu OT becomes a linked approved leave ----------
@@ -438,7 +439,7 @@ async def take_as_leave(
         raise
     except Exception as e:
         logger.error(f"Error taking lieu leave: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Error taking lieu leave: {str(e)}")
+        raise server_error(e, "Taking lieu leave")
 
 
 
@@ -950,4 +951,4 @@ async def analyze_overtime(data: OvertimeAnalysisInput):
         return _analyze_overtime(data)
     except Exception as e:
         logger.error(f"Overtime analysis error: {e}")
-        raise HTTPException(status_code=500, detail=f"Analysis failed: {e}")
+        raise server_error(e, "Analysis")

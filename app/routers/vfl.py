@@ -8,6 +8,7 @@ from app.supabase_client import supabase, rows, one_row
 from app.auth import get_current_user, require_role
 from app.aggregation import count_by
 from app.db_helpers import get_or_404, apply_date_range, or_ilike, distinct_suggestions, status_choice_validator
+from app.errors import server_error
 import logging
 from datetime import datetime
 import uuid
@@ -207,7 +208,7 @@ async def get_vfl_reports(
         
     except Exception as e:
         logger.error(f"Error fetching VFL reports: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Error fetching reports: {str(e)}")
+        raise server_error(e, "Loading reports")
 
 # GET unique observers for auto-complete
 @router.get("/suggestions/observers", dependencies=[Depends(get_current_user)])
@@ -334,7 +335,7 @@ async def get_vfl_stats():
         
     except Exception as e:
         logger.error(f"Error fetching stats: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Error fetching stats: {str(e)}")
+        raise server_error(e, "Loading stats")
 
 # GET single report
 @router.get("/{report_id}", dependencies=[Depends(get_current_user)])
@@ -370,7 +371,7 @@ async def get_vfl_report(report_id: str):
         raise
     except Exception as e:
         logger.error(f"Error fetching report: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Error fetching report: {str(e)}")
+        raise server_error(e, "Loading report")
 
 # POST create report
 @router.post("")
@@ -450,7 +451,7 @@ async def create_vfl_report(report: VFLReportCreate, current_user: dict = Depend
         raise
     except Exception as e:
         logger.error(f"Error creating VFL report: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Error creating report: {str(e)}")
+        raise server_error(e, "Creating report")
 
 # PATCH update report
 @router.patch("/{report_id}")
@@ -470,7 +471,7 @@ async def update_vfl_report(report_id: str, updated: VFLReportUpdate, current_us
 
         # Prepare update data - map camelCase to snake_case for DB
         data_to_update = {}
-        update_dict = updated.dict(exclude_unset=True)
+        update_dict = updated.model_dump(exclude_unset=True)
         
         # Map fields to snake_case column names
         field_mapping = {
@@ -579,7 +580,7 @@ async def update_vfl_report(report_id: str, updated: VFLReportUpdate, current_us
         raise
     except Exception as e:
         logger.error(f"Error updating report: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Error updating report: {str(e)}")
+        raise server_error(e, "Updating report")
 
 # DELETE report
 @router.delete("/{report_id}")
@@ -608,4 +609,4 @@ async def delete_vfl_report(report_id: str, current_user: dict = Depends(require
         raise
     except Exception as e:
         logger.error(f"Error deleting report: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Error deleting report: {str(e)}")
+        raise server_error(e, "Deleting report")

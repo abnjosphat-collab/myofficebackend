@@ -89,12 +89,21 @@ def test_write_endpoints_require_auth(method, path):
     assert resp.status_code == 401, f"{method.upper()} {path} returned {resp.status_code}, expected 401"
 
 
+# The 8 data-bearing open reads are DELIBERATE (see docs/ENGINEERING_STANDARDS.md,
+# "Open reads: what and why") — aggregate/operational data the homepage and shared
+# pick-lists need without a token — plus the health probes. Anything listed here
+# returning 401 is a bug; any other data-bearing read NOT requiring auth is a bug.
 OPEN_READS = [
     "/api/health",
-    "/api/equipment",                 # equipment list isn't PII — stays open
     "/api/employees/health/status",   # health probe stays open
+    "/api/availabilities",            # equipment + latest availability, merged
+    "/api/availabilities/stats",      # aggregate counts
+    "/api/breakdowns/dashboard/overview",  # homepage KPI aggregates
+    "/api/equipment",                 # equipment list isn't PII — stays open
     "/api/leaves/stats/summary",      # aggregate counts, not individual records
-    "/api/timesheets/stats/summary",
+    "/api/lookup-lists/location",     # shared pick-list values
+    "/api/maintenance/work-orders/stats/summary",  # aggregate counts
+    "/api/timesheets/stats/summary",  # aggregate counts, not individual records
 ]
 
 
@@ -133,7 +142,27 @@ REMOVED_DEBUG_ENDPOINTS = [
 ]
 
 
+# Liveness "is the router mounted" probes, deleted 2026-10: unauthenticated
+# surface with no legitimate use (the /health routes cover liveness).
+REMOVED_LIVENESS_PROBES = [
+    "/api/compressors/test",
+    "/api/nearmiss/test",
+    "/api/requisitions/test",
+    "/api/spares/test/connection",
+]
+
+
 @pytest.mark.parametrize("path", REMOVED_DEBUG_ENDPOINTS)
 def test_debug_test_endpoints_removed(path):
     resp = client.get(path)
     assert resp.status_code == 404, f"GET {path} should be gone (404), got {resp.status_code}"
+
+
+@pytest.mark.parametrize("path", REMOVED_LIVENESS_PROBES)
+def test_liveness_probes_removed(path):
+    # Gone means: 404 (no route), or 401 where the path is now shadowed by
+    # that router's protected /{id} route (/api/nearmiss/test and
+    # /api/requisitions/test hit the auth gate before any handler). Either
+    # way the open debug payload is gone — a 200 here is the failure.
+    resp = client.get(path)
+    assert resp.status_code in (401, 404), f"GET {path} should be gone (401/404), got {resp.status_code}"

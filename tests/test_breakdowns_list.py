@@ -134,7 +134,9 @@ async def test_query_failure_raises_500(monkeypatch):
     with pytest.raises(HTTPException) as exc:
         await get_breakdowns(status=None, breakdown_type=None, department=None, limit=100, offset=0)
     assert exc.value.status_code == 500
-    assert "db exploded" in exc.value.detail
+    # 500s are generic since the server_error codemod: no internal text leaks.
+    assert "db exploded" not in exc.value.detail
+    assert exc.value.detail.startswith("Loading breakdowns failed. Please try again. (ref ")
 
 
 # ─── Response cache ─────────────────────────────────────────────────────────────────

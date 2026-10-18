@@ -145,6 +145,7 @@ async def test_health_reports_503_on_db_failure(patch_supabase):
     with pytest.raises(HTTPException) as exc:
         await equipment_health()
     assert exc.value.status_code == 503
+    assert "db down" not in str(exc.value.detail)  # status only, no exception text
 
 
 # ─── get_equipment ───────────────────────────────────────────────────────────────────
@@ -274,6 +275,17 @@ async def test_update_equipment_blank_equipment_id_is_not_sent(patch_supabase):
     await update_equipment(5, _equipment(equipment_id=""), current_user={"user_id": "u1"})
     update_payload = [c for c in calls if c["op"] == "update"][0]["payload"]
     assert "equipment_id" not in update_payload
+
+
+async def test_update_equipment_explicit_null_clears_default_does_not_clobber(patch_supabase):
+    calls = patch_supabase([
+        [{"id": 5}],
+        [{"id": 5, "name": "Air Compressor"}],
+    ])
+    await update_equipment(5, _equipment(location=None), current_user={"user_id": "u1"})
+    update_payload = [c for c in calls if c["op"] == "update"][0]["payload"]
+    assert update_payload["location"] is None
+    assert "status" not in update_payload  # the "operational" default stays out unless sent
 
 
 async def test_update_equipment_no_rows_returned_is_500(patch_supabase):

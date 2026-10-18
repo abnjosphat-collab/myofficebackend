@@ -4,6 +4,7 @@ from app.crud_router import CrudRouter
 from app.supabase_client import supabase
 from fastapi import HTTPException, Depends
 from app.auth import get_current_user
+from app.errors import server_error
 import logging
 
 logger = logging.getLogger(__name__)
@@ -73,4 +74,4 @@ async def production_summary():
             "records": len(rows),
         }
     except Exception as e:
-        raise HTTPException(500, str(e))
+        raise server_error(e, "Production summary")

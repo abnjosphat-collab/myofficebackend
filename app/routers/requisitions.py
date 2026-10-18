@@ -6,6 +6,7 @@ from app.supabase_client import supabase, rows, one_row
 from app.auth import get_current_user, require_role
 from app.aggregation import count_by
 from app.db_helpers import apply_date_range, get_or_404
+from app.errors import server_error
 import logging
 
 logger = logging.getLogger(__name__)
@@ -53,11 +54,13 @@ async def health_check():
             "timestamp": datetime.utcnow().isoformat()
         }
     except Exception as e:
+        logger.error(f"Requisitions health check failed: {e}")
+        # Status only — the exception text stays in the server log, never in
+        # the response.
         return {
             "status": "unhealthy",
             "service": "requisitions",
             "database": "disconnected",
-            "error": str(e),
             "timestamp": datetime.utcnow().isoformat()
         }
 
@@ -122,7 +125,7 @@ async def create_requisition(requisition: RequisitionCreate, request: Request = 
         raise
     except Exception as e:
         logger.error(f"Error creating requisition: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise server_error(e, "Creating requisition")
 
 # ============= GET ALL (handles both / and no trailing slash) =============
 @router.get("", dependencies=[Depends(get_current_user)])
@@ -159,7 +162,7 @@ async def get_requisitions(
         return requisitions
 
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise server_error(e, "Loading requisitions")
 
 # ============= GET SINGLE =============
 @router.get("/{requisition_id}", dependencies=[Depends(get_current_user)])
@@ -178,7 +181,7 @@ async def get_requisition(requisition_id: int):
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise server_error(e, "Loading requisition")
 
 # ============= UPDATE =============
 @router.patch("/{requisition_id}")
@@ -194,7 +197,7 @@ async def update_requisition(requisition_id: int, update: RequisitionUpdate, cur
         # exclude_unset, not a None-filter: an explicitly-sent null must clear the
         # field (e.g. required_for, notes), not be silently dropped like the old
         # per-field `is not None` checks here did. See work_orders (backend edec24a).
-        update_data = update.dict(exclude_unset=True)
+        update_data = update.model_dump(exclude_unset=True)
         update_data.pop('items', None)  # items is a separate table, handled below
         if update_data.get('date') is not None:
             update_data['date'] = update_data['date'].isoformat()
@@ -227,7 +230,7 @@ async def update_requisition(requisition_id: int, update: RequisitionUpdate, cur
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise server_error(e, "Updating requisition")
 
 # ============= DELETE =============
 @router.delete("/{requisition_id}")
@@ -240,7 +243,7 @@ async def delete_requisition(requisition_id: int, current_user: dict = Depends(r
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise server_error(e, "Deleting requisition")
 
 # ============= DAILY TOTAL =============
 @router.get("/daily-total/{date}", dependencies=[Depends(get_current_user)])
@@ -255,7 +258,7 @@ async def get_daily_total(date: date):
         total = sum(item['cost_per_unit'] * item['quantity'] for item in items_rows) if items_rows else 0
         return {"date": date.isoformat(), "total": total}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise server_error(e, "Loading daily total")
 
 # ============= STATISTICS =============
 @router.get("/stats/summary", dependencies=[Depends(get_current_user)])
@@ -275,13 +278,4 @@ async def get_stats():
             "section_breakdown": section_counts
         }
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-# ============= TEST ENDPOINT =============
-@router.get("/test")
-async def test_endpoint():
-    return {
-        "status": "ok",
-        "message": "Requisitions router is working",
-        "timestamp": datetime.utcnow().isoformat()
-    }
+        raise server_error(e, "Loading stats")

@@ -10,6 +10,7 @@ from app.supabase_client import supabase, rows, one_row
 from app.auth import get_current_user, require_role
 from app.aggregation import count_by
 from app.db_helpers import get_or_404, apply_date_range, or_ilike, distinct_suggestions, status_choice_validator
+from app.errors import server_error
 import logging
 from datetime import datetime
 import uuid
@@ -315,7 +316,7 @@ async def get_pto_reports(
         
     except Exception as e:
         logger.error(f"Error fetching PTO reports: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Error fetching reports: {str(e)}")
+        raise server_error(e, "Loading reports")
 
 # GET unique observers for auto-complete
 @router.get("/suggestions/observers", dependencies=[Depends(get_current_user)])
@@ -426,7 +427,7 @@ async def get_pto_stats():
         
     except Exception as e:
         logger.error(f"Error fetching stats: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Error fetching stats: {str(e)}")
+        raise server_error(e, "Loading stats")
 
 # GET single report
 @router.get("/{report_id}", dependencies=[Depends(get_current_user)])
@@ -463,7 +464,7 @@ async def get_pto_report(report_id: str):
         raise
     except Exception as e:
         logger.error(f"Error fetching report: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Error fetching report: {str(e)}")
+        raise server_error(e, "Loading report")
 
 # POST create report
 @router.post("")
@@ -487,12 +488,12 @@ async def create_pto_report(report: PTOReportCreate, current_user: dict = Depend
             "job_task_observed": report.jobTaskObserved,
             "sheq_ref_no": report.sheqRefNo,
             "observation_type": report.observationType,
-            "time_on_job": report.timeOnJob.dict(),
-            "notification": report.notification.dict(),
-            "reasons": report.reasons.dict(),
-            "procedures": report.procedures.dict(),
-            "risk_assessment": report.riskAssessment.dict(),
-            "suggested_remedies": report.suggestedRemedies.dict(),
+            "time_on_job": report.timeOnJob.model_dump(),
+            "notification": report.notification.model_dump(),
+            "reasons": report.reasons.model_dump(),
+            "procedures": report.procedures.model_dump(),
+            "risk_assessment": report.riskAssessment.model_dump(),
+            "suggested_remedies": report.suggestedRemedies.model_dump(),
             "observation_scope": report.observationScope,
             "follow_up_needed": report.followUpNeeded,
             "status": report.status,
@@ -551,7 +552,7 @@ async def create_pto_report(report: PTOReportCreate, current_user: dict = Depend
         raise
     except Exception as e:
         logger.error(f"Error creating PTO report: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Error creating report: {str(e)}")
+        raise server_error(e, "Creating report")
 
 # PATCH update report
 @router.patch("/{report_id}")
@@ -571,7 +572,7 @@ async def update_pto_report(report_id: str, updated: PTOReportUpdate, current_us
 
         # Prepare update data - map camelCase to snake_case for DB
         data_to_update = {}
-        update_dict = updated.dict(exclude_unset=True)
+        update_dict = updated.model_dump(exclude_unset=True)
         
         # Map fields to snake_case column names
         field_mapping = {
@@ -602,8 +603,8 @@ async def update_pto_report(report_id: str, updated: PTOReportUpdate, current_us
             # IS the caller asking to clear that field. Fixed 2026-08-30.
             if key in field_mapping and key != "actionPlan":
                 # Convert Pydantic models to dict
-                if hasattr(value, 'dict'):
-                    data_to_update[field_mapping[key]] = value.dict()
+                if hasattr(value, 'model_dump'):
+                    data_to_update[field_mapping[key]] = value.model_dump()
                 else:
                     data_to_update[field_mapping[key]] = value
         
@@ -690,7 +691,7 @@ async def update_pto_report(report_id: str, updated: PTOReportUpdate, current_us
         raise
     except Exception as e:
         logger.error(f"Error updating report: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Error updating report: {str(e)}")
+        raise server_error(e, "Updating report")
 
 # DELETE report
 @router.delete("/{report_id}")
@@ -719,4 +720,4 @@ async def delete_pto_report(report_id: str, current_user: dict = Depends(require
         raise
     except Exception as e:
         logger.error(f"Error deleting report: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Error deleting report: {str(e)}")
+        raise server_error(e, "Deleting report")

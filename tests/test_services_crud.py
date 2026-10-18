@@ -113,7 +113,9 @@ async def test_list_services_db_error_is_500(patch_supabase):
     with pytest.raises(HTTPException) as exc:
         await list_services()
     assert exc.value.status_code == 500
-    assert "db down" in exc.value.detail
+    # 500s are generic since the server_error codemod: no internal text leaks.
+    assert "db down" not in exc.value.detail
+    assert exc.value.detail.startswith("Loading services failed. Please try again. (ref ")
 
 
 # ─── create_service ──────────────────────────────────────────────────────────────────
@@ -144,7 +146,9 @@ async def test_create_service_db_error_is_500(patch_supabase):
     with pytest.raises(HTTPException) as exc:
         await create_service(ServiceIn(supplier="X"), current_user=CURRENT_USER)
     assert exc.value.status_code == 500
-    assert "insert failed" in exc.value.detail
+    # 500s are generic since the server_error codemod: no internal text leaks.
+    assert "insert failed" not in exc.value.detail
+    assert exc.value.detail.startswith("Creating service failed. Please try again. (ref ")
 
 
 # ─── update_service ──────────────────────────────────────────────────────────────────
@@ -191,7 +195,9 @@ async def test_update_service_db_error_is_500(patch_supabase):
     with pytest.raises(HTTPException) as exc:
         await update_service("s1", ServiceIn(supplier="X"), current_user=CURRENT_USER)
     assert exc.value.status_code == 500
-    assert "update failed" in exc.value.detail
+    # 500s are generic since the server_error codemod: no internal text leaks.
+    assert "update failed" not in exc.value.detail
+    assert exc.value.detail.startswith("Updating service failed. Please try again. (ref ")
 
 
 # ─── delete_service ──────────────────────────────────────────────────────────────────
@@ -209,7 +215,9 @@ async def test_delete_service_db_error_is_500(patch_supabase):
     with pytest.raises(HTTPException) as exc:
         await delete_service("s1", current_user=MANAGER_USER)
     assert exc.value.status_code == 500
-    assert "delete failed" in exc.value.detail
+    # 500s are generic since the server_error codemod: no internal text leaks.
+    assert "delete failed" not in exc.value.detail
+    assert exc.value.detail.startswith("Deleting service failed. Please try again. (ref ")
 
 
 # ─── stage signatures ────────────────────────────────────────────────────────────────

@@ -1,7 +1,21 @@
+import pytest
 from fastapi.testclient import TestClient
 
+from app.rate_limit import limiter
 from app.routers import tools_workspace
 from main import app
+
+
+@pytest.fixture(autouse=True)
+def disable_limiter():
+    # /auth/register (5/min) and /auth/login (10/min) are slowapi-limited;
+    # this file registers/logs in dozens of times per test through one
+    # shared TestClient IP, so the limiter stays off here. The live limits
+    # are covered in tests/test_rate_limit.py.
+    original = limiter.enabled
+    limiter.enabled = False
+    yield
+    limiter.enabled = original
 
 
 client = TestClient(app)
@@ -780,3 +794,105 @@ def test_external_gate_pass_requires_sequential_reauthenticated_signatures_and_p
     assert pdf.status_code == 200
     assert pdf.headers["content-type"] == "application/pdf"
     assert pdf.content.startswith(b"%PDF")
+
+
+def _account_id(admin_token: str, username: str):
+    accounts = client.get("/api/tools-workspace/accounts", headers={"Authorization": f"Bearer {admin_token}"}).json()
+    return next(item for item in accounts if item["username"] == username)["id"]
+
+
+def test_admin_can_reset_an_account_password():
+    admin = register("admin")
+    register("viewer")
+    target = _account_id(admin, "viewer")
+    reset = client.post(f"/api/tools-workspace/accounts/{target}/reset-password", headers={"Authorization": f"Bearer {admin}"}, json={"password": "newpass12"})
+    assert reset.status_code == 200
+    assert reset.json() == {"ok": True}
+    old = client.post("/api/tools-workspace/auth/login", json={"username": "viewer", "password": "secret12"})
+    assert old.status_code == 401
+    new = client.post("/api/tools-workspace/auth/login", json={"username": "viewer", "password": "newpass12"})
+    assert new.status_code == 200
+    assert new.json()["token"]
+
+
+def test_non_admin_cannot_reset_passwords():
+    admin, issuer = admin_and_issuer()
+    target = _account_id(admin, "engineering-issuer")
+    denied = client.post(f"/api/tools-workspace/accounts/{target}/reset-password", headers={"Authorization": f"Bearer {issuer}"}, json={"password": "newpass12"})
+    assert denied.status_code == 403
+
+
+def test_reset_password_rejects_unknown_account_and_short_password():
+    admin = register("admin")
+    auth = {"Authorization": f"Bearer {admin}"}
+    missing = client.post("/api/tools-workspace/accounts/does-not-exist/reset-password", headers=auth, json={"password": "newpass12"})
+    assert missing.status_code == 404
+    target = _account_id(admin, "admin")
+    short = client.post(f"/api/tools-workspace/accounts/{target}/reset-password", headers=auth, json={"password": "abc"})
+    assert short.status_code == 422
+
+
+def test_password_reset_request_reaches_the_admin_bell():
+    admin = register("admin")
+    register("viewer")
+    asked = client.post("/api/tools-workspace/auth/request-password-reset", json={"username": "viewer"})
+    assert asked.status_code == 200
+    assert asked.json() == {"ok": True}
+    # Unknown usernames answer the same but record nothing.
+    ghost = client.post("/api/tools-workspace/auth/request-password-reset", json={"username": "ghost"})
+    assert ghost.status_code == 200
+    admin_auth = {"Authorization": f"Bearer {admin}"}
+    queued = client.get("/api/tools-workspace/password-requests", headers=admin_auth).json()
+    assert [row["identifier"] for row in queued] == ["viewer"]
+    bell = client.get("/api/tools-workspace/notifications", headers=admin_auth).json()
+    pw = [alert for alert in bell["alerts"] if alert["kind"] == "password_request"]
+    assert len(pw) == 1 and pw[0]["username"] == "viewer" and pw[0]["account_name"] == "Viewer"
+    key = pw[0]["key"]
+    read = client.post("/api/tools-workspace/notifications/read", headers=admin_auth, json={"keys": [key]})
+    assert read.status_code == 202
+    assert read.json() == {"read": [key]}
+    # A repeat ask while one is pending records nothing new.
+    again = client.post("/api/tools-workspace/auth/request-password-reset", json={"username": "viewer"})
+    assert again.status_code == 200
+    queued2 = client.get("/api/tools-workspace/password-requests", headers=admin_auth).json()
+    assert len(queued2) == 1
+
+
+def test_non_admin_sees_no_password_requests():
+    admin, issuer = admin_and_issuer()
+    client.post("/api/tools-workspace/auth/request-password-reset", json={"username": "engineering-issuer"})
+    issuer_auth = {"Authorization": f"Bearer {issuer}"}
+    denied = client.get("/api/tools-workspace/password-requests", headers=issuer_auth)
+    assert denied.status_code == 403
+    bell = client.get("/api/tools-workspace/notifications", headers=issuer_auth).json()
+    assert all(alert["kind"] != "password_request" for alert in bell["alerts"])
+
+
+def test_admin_reset_clears_the_password_request():
+    admin = register("admin")
+    register("viewer")
+    client.post("/api/tools-workspace/auth/request-password-reset", json={"username": "viewer"})
+    admin_auth = {"Authorization": f"Bearer {admin}"}
+    target = _account_id(admin, "viewer")
+    reset = client.post(f"/api/tools-workspace/accounts/{target}/reset-password", headers=admin_auth, json={"password": "newpass12"})
+    assert reset.status_code == 200
+    assert client.get("/api/tools-workspace/password-requests", headers=admin_auth).json() == []
+    bell = client.get("/api/tools-workspace/notifications", headers=admin_auth).json()
+    assert all(alert["kind"] != "password_request" for alert in bell["alerts"])
+
+
+def test_signed_in_user_can_change_own_password():
+    register("admin")
+    viewer = register("viewer")
+    auth = {"Authorization": f"Bearer {viewer}"}
+    wrong = client.put("/api/tools-workspace/auth/password", headers=auth, json={"current_password": "nope12", "new_password": "newpass12"})
+    assert wrong.status_code == 401
+    short = client.put("/api/tools-workspace/auth/password", headers=auth, json={"current_password": "secret12", "new_password": "abc"})
+    assert short.status_code == 422
+    changed = client.put("/api/tools-workspace/auth/password", headers=auth, json={"current_password": "secret12", "new_password": "newpass12"})
+    assert changed.status_code == 200
+    old = client.post("/api/tools-workspace/auth/login", json={"username": "viewer", "password": "secret12"})
+    assert old.status_code == 401
+    new = client.post("/api/tools-workspace/auth/login", json={"username": "viewer", "password": "newpass12"})
+    assert new.status_code == 200
+    assert new.json()["token"]

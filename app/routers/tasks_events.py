@@ -69,7 +69,7 @@ async def list_comments(task_id: int):
 async def add_comment(task_id: int, data: TaskEventComment):
     r = (
         supabase.table("tasks_events_comments")
-        .insert({**data.dict(), "task_id": task_id})
+        .insert({**data.model_dump(), "task_id": task_id})
         .execute()
     )
     if not r.data:

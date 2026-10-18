@@ -4,7 +4,7 @@ from starlette.concurrency import run_in_threadpool
 from app.auth import get_current_user, require_role
 from pydantic import BaseModel, Field, validator
 from typing import Optional, List
-from datetime import datetime, timedelta
+from datetime import datetime
 import logging
 import os
 from supabase import create_client, Client
@@ -13,6 +13,8 @@ from app.cache import cached, cache_get, cache_set, build_key, invalidate_namesp
 from app.serialization import encode_json_fields, decode_json_fields
 from app.supabase_client import rows, one_row
 from app.db_helpers import fetch_all_pages
+from app.errors import server_error
+from app.clock import today_harare, week_start_harare
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -87,7 +89,7 @@ class BreakdownCreate(BaseModel):
     @validator('breakdown_date', pre=True)
     def validate_date(cls, v):
         if not v:
-            return datetime.utcnow().strftime('%Y-%m-%d')
+            return today_harare().isoformat()
         return v
 
     @validator('machine_description', pre=True, always=True)
@@ -161,11 +163,13 @@ def calculate_time_metrics(data: dict) -> dict:
         }
     except Exception as e:
         logger.error(f"Error calculating time metrics: {e}")
+        # Uncomputed is None, never 0: zeros here would be stored on the
+        # record and read back as measured "no downtime".
         return {
-            "response_time_minutes": 0,
-            "repair_time_minutes": 0,
-            "downtime_minutes": 0,
-            "net_downtime_minutes": 0
+            "response_time_minutes": None,
+            "repair_time_minutes": None,
+            "downtime_minutes": None,
+            "net_downtime_minutes": None
         }
 
 def calculate_spare_costs(spares: List[SparePart]) -> dict:
@@ -175,7 +179,7 @@ def calculate_spare_costs(spares: List[SparePart]) -> dict:
         spares_with_costs = []
         
         for spare in spares:
-            spare_dict = spare.dict()
+            spare_dict = spare.model_dump()
             # Ensure total_cost is calculated
             quantity = spare_dict.get('quantity', 1)
             unit_price = spare_dict.get('unit_price', 0.0)
@@ -190,7 +194,11 @@ def calculate_spare_costs(spares: List[SparePart]) -> dict:
         }
     except Exception as e:
         logger.error(f"Error calculating spare costs: {e}")
-        return {"total_spare_cost": 0.0, "spares_used": []}
+        # Raise, never a zeroed fallback: the old {"total_spare_cost": 0.0,
+        # "spares_used": []} return silently ERASED the spares list on every
+        # save whose costing failed. Both callers run inside try/except that
+        # already turn this into an honest 500.
+        raise
 
 def check_supabase():
     """Check if Supabase is connected"""
@@ -294,7 +302,7 @@ async def get_breakdowns(
 
     except Exception as e:
         logger.error(f"Error fetching breakdowns: {e}")
-        raise HTTPException(status_code=500, detail=f"Error fetching breakdowns: {str(e)}")
+        raise server_error(e, "Loading breakdowns")
 
 @router.post("/")
 async def create_breakdown(breakdown: BreakdownCreate, current_user: dict = Depends(get_current_user)):
@@ -303,7 +311,7 @@ async def create_breakdown(breakdown: BreakdownCreate, current_user: dict = Depe
     
     try:
         # Convert to dict
-        data = breakdown.dict()
+        data = breakdown.model_dump()
         
         # Calculate time metrics (only returns columns that exist in database)
         time_metrics = calculate_time_metrics(data)
@@ -364,7 +372,7 @@ async def create_breakdown(breakdown: BreakdownCreate, current_user: dict = Depe
         raise
     except Exception as e:
         logger.error(f"Error creating breakdown: {e}")
-        raise HTTPException(status_code=500, detail=f"Error creating breakdown: {str(e)}")
+        raise server_error(e, "Creating breakdown")
 
 @router.get("/{breakdown_id}", dependencies=[Depends(get_current_user)])
 async def get_breakdown(breakdown_id: str):
@@ -384,7 +392,7 @@ async def get_breakdown(breakdown_id: str):
         raise
     except Exception as e:
         logger.error(f"Error fetching breakdown: {e}")
-        raise HTTPException(status_code=500, detail=f"Error fetching breakdown: {str(e)}")
+        raise server_error(e, "Loading breakdown")
 
 @router.patch("/{breakdown_id}")
 async def update_breakdown(breakdown_id: str, breakdown_update: BreakdownUpdate, current_user: dict = Depends(get_current_user)):
@@ -399,7 +407,7 @@ async def update_breakdown(breakdown_id: str, breakdown_update: BreakdownUpdate,
             raise HTTPException(status_code=404, detail="Breakdown not found")
 
         # Get update data
-        update_data = breakdown_update.dict(exclude_unset=True)
+        update_data = breakdown_update.model_dump(exclude_unset=True)
         
         # Handle description field mapping
         if 'breakdown_description' in update_data:
@@ -408,14 +416,13 @@ async def update_breakdown(breakdown_id: str, breakdown_update: BreakdownUpdate,
         # Handle spares_used
         if 'spares_used' in update_data:
             if update_data['spares_used']:
-                # calculate_spare_costs expects List[SparePart] (it calls spare.dict()
-                # on each item) — breakdown_update.dict() already turned those into
-                # plain dicts, so pass the un-dict()'d model field instead. Passing
-                # update_data['spares_used'] here silently blew up inside
-                # calculate_spare_costs's own try/except, which swallowed the error and
-                # fell back to {"total_spare_cost": 0.0, "spares_used": []} — so editing
-                # a breakdown's spares_used didn't just miscompute the cost, it erased
-                # the spares list entirely on every save.
+                # calculate_spare_costs expects List[SparePart] (it serializes
+                # each item) — breakdown_update.dict() already turned those
+                # into plain dicts, so pass the un-serialized model field
+                # instead. Passing update_data['spares_used'] here raises
+                # inside calculate_spare_costs (which re-raises rather than
+                # returning a zeroed fallback, after a bug where the old
+                # fallback silently erased the spares list on every save).
                 costs = calculate_spare_costs(breakdown_update.spares_used)
                 update_data['total_spare_cost'] = costs['total_spare_cost']
                 update_data['spares_used'] = costs['spares_used']
@@ -467,7 +474,7 @@ async def update_breakdown(breakdown_id: str, breakdown_update: BreakdownUpdate,
         raise
     except Exception as e:
         logger.error(f"Error updating breakdown: {e}")
-        raise HTTPException(status_code=500, detail=f"Error updating breakdown: {str(e)}")
+        raise server_error(e, "Updating breakdown")
 
 @router.delete("/{breakdown_id}")
 async def delete_breakdown(breakdown_id: str, current_user: dict = Depends(require_role('manager'))):
@@ -490,7 +497,7 @@ async def delete_breakdown(breakdown_id: str, current_user: dict = Depends(requi
         raise
     except Exception as e:
         logger.error(f"Error deleting breakdown: {e}")
-        raise HTTPException(status_code=500, detail=f"Error deleting breakdown: {str(e)}")
+        raise server_error(e, "Deleting breakdown")
 
 @router.get("/dashboard/overview")
 @cached("breakdowns", ttl=60)
@@ -507,17 +514,19 @@ async def get_dashboard_overview():
         high_priority = sum(1 for r in records if r.get('priority') == 'high')
         critical_priority = sum(1 for r in records if r.get('priority') == 'critical')
 
-        # Get today's breakdowns
-        now = datetime.utcnow()
-        today = now.strftime('%Y-%m-%d')
-        today_breakdowns = sum(1 for r in records if r.get('breakdown_date') == today)
+        # "Today"/"this week" in Africa/Harare (the mine's timezone), not UTC:
+        # in the two hours after local midnight UTC still says "yesterday".
+        # Null guards: a null breakdown_date/downtime_minutes must skip the
+        # bucket, never crash the sum or silently match.
+        today = today_harare().isoformat()
+        today_breakdowns = sum(1 for r in records if (r.get('breakdown_date') or '') == today)
 
         # Calculate today's downtime
-        today_downtime = sum(r.get('downtime_minutes', 0) for r in records if r.get('breakdown_date') == today)
+        today_downtime = sum((r.get('downtime_minutes') or 0) for r in records if (r.get('breakdown_date') or '') == today)
 
-        # This week's breakdowns (Monday through today, UTC)
-        week_start = (now - timedelta(days=now.weekday())).strftime('%Y-%m-%d')
-        week_breakdowns = sum(1 for r in records if r.get('breakdown_date', '') >= week_start)
+        # This week's breakdowns (Monday through today, Harare)
+        week_start = week_start_harare().isoformat()
+        week_breakdowns = sum(1 for r in records if (r.get('breakdown_date') or '') >= week_start)
 
         return {
             "metrics": {
@@ -563,10 +572,11 @@ async def health_check():
         }
     except Exception as e:
         logger.error(f"Health check failed: {e}")
+        # Status only — the exception text stays in the server log, never in
+        # the response.
         return {
             "status": "unhealthy",
-            "database": "connection_failed",
-            "error": str(e)
+            "database": "connection_failed"
         }
 
 @router.get("/analytics/heatmap", dependencies=[Depends(get_current_user)])
@@ -1048,4 +1058,4 @@ async def get_breakdown_heatmap(
         
     except Exception as e:
         logger.error(f"Error generating heatmap analytics: {e}")
-        raise HTTPException(status_code=500, detail=f"Error generating analytics: {str(e)}")
+        raise server_error(e, "Generating analytics")

@@ -15,6 +15,22 @@
 # tables, not query-building mechanics, and a one-size-fits-all fake would either lose
 # fidelity for them or bloat this one with generality only they'd use.
 
+import pytest
+
+
+@pytest.fixture(autouse=True)
+def _reset_response_cache():
+    """app/cache.py keeps module-global state (memory fallback, Redis breaker,
+    counters). Reset it before every test so cached entries, a tripped
+    breaker or counters from one test can never leak into the next."""
+    from app import cache as cache_mod
+    cache_mod._reset_for_tests()
+    # Same for the auth cache (app/auth.py): entries are keyed by token and
+    # tests reuse the same "Bearer [REDACTED]" strings with different roles —
+    # without a reset, one test's verified role would leak into the next.
+    from app import auth as auth_mod
+    auth_mod._reset_for_tests()
+
 
 class FakeResult:
     def __init__(self, data):

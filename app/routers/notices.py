@@ -32,6 +32,7 @@ from app.aggregation import count_by
 from app.db_helpers import fetch_all_pages, get_or_404
 from app.crud_router import CrudRouter
 from app.uploads import read_and_validate_upload, NOTICE_ATTACHMENT_EXTS
+from app.errors import server_error
 import logging, uuid as uuid_module
 
 logger = logging.getLogger(__name__)
@@ -132,7 +133,7 @@ async def upload_notice_attachment(file: UploadFile = File(...)):
             {"content-type": file.content_type or "application/octet-stream"},
         )
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Storage upload failed: {e}")
+        raise server_error(e, "Storage upload")
 
     try:
         file_url = supabase.storage.from_(ATTACHMENT_BUCKET).get_public_url(storage_path)
@@ -160,7 +161,7 @@ async def get_notice(notice_id: str):
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise server_error(e, "Loading notice")
 
 
 # GET statistics
@@ -202,4 +203,4 @@ async def get_stats():
         return stats
 
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise server_error(e, "Loading stats")

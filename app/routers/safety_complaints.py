@@ -6,6 +6,7 @@ from typing import Optional, List
 from app.supabase_client import supabase
 from app.auth import get_current_user, require_role
 from app.db_helpers import apply_date_range
+from app.errors import server_error
 import logging
 from datetime import datetime, date
 import uuid
@@ -145,7 +146,7 @@ async def list_complaints(
         return mapped
     except Exception as e:
         logger.error(f"Error listing safety complaints: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise server_error(e, "Loading complaints")
 
 
 @router.get("/{complaint_id}", dependencies=[Depends(get_current_user)])
@@ -159,7 +160,7 @@ async def get_complaint(complaint_id: str):
         raise
     except Exception as e:
         logger.error(f"Error fetching complaint {complaint_id}: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise server_error(e, "Loading complaint")
 
 
 @router.post("", status_code=201)
@@ -192,7 +193,7 @@ async def create_complaint(payload: SafetyComplaintCreate, current_user: dict = 
         raise
     except Exception as e:
         logger.error(f"Error creating complaint: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise server_error(e, "Creating complaint")
 
 
 _DATE_COLS = {"by_when", "date_closed", "date"}
@@ -200,7 +201,7 @@ _DATE_COLS = {"by_when", "date_closed", "date"}
 @router.patch("/{complaint_id}")
 async def update_complaint(complaint_id: str, payload: SafetyComplaintUpdate, current_user: dict = Depends(get_current_user)):
     try:
-        raw = payload.dict(exclude_none=True)
+        raw = payload.model_dump(exclude_none=True)
         # Convert empty strings to None for date-typed columns so Postgres doesn't reject them
         updates = {k: (None if k in _DATE_COLS and v == "" else v) for k, v in raw.items()}
         if not updates:
@@ -213,7 +214,7 @@ async def update_complaint(complaint_id: str, payload: SafetyComplaintUpdate, cu
         raise
     except Exception as e:
         logger.error(f"Error updating complaint {complaint_id}: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise server_error(e, "Updating complaint")
 
 
 @router.delete("/{complaint_id}", status_code=204)
@@ -226,4 +227,4 @@ async def delete_complaint(complaint_id: str, current_user: dict = Depends(requi
         raise
     except Exception as e:
         logger.error(f"Error deleting complaint {complaint_id}: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise server_error(e, "Deleting complaint")

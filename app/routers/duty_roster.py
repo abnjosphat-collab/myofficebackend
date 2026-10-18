@@ -144,7 +144,7 @@ async def create_duty_entry(body: DutyRosterCreate, current_user: dict = Depends
         date_to = body.date_to.isoformat()
         _reject_overlap(department, date_from, date_to)
 
-        payload = body.dict()
+        payload = body.model_dump()
         payload["department"] = department
         payload["date_from"] = date_from
         payload["date_to"] = date_to
@@ -165,7 +165,7 @@ async def create_duty_entry(body: DutyRosterCreate, current_user: dict = Depends
 async def update_duty_entry(entry_id: int, body: DutyRosterUpdate, current_user: dict = Depends(get_current_user)):
     try:
         existing = get_or_404(supabase, TABLE, entry_id, detail="Duty roster entry not found")
-        data = body.dict(exclude_unset=True)
+        data = body.model_dump(exclude_unset=True)
         if not data:
             return existing
 

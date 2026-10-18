@@ -7,10 +7,9 @@ with slightly different error handling, dump idioms, 404 semantics and route sty
 `CrudRouter` captures the shape once; a router becomes a few lines of config, and
 anything non-standard is added by subclassing and appending to `self.router`.
 
-Deliberately Pydantic-**v1**-compatible: uses `model.dict(...)`, not `.model_dump(...)`.
-The project pins Pydantic v2 (where `.dict()` is a supported deprecated alias), but we
-keep the v1 idiom on purpose — see the project's Render constraint. No `@field_validator`,
-no v2-only APIs here.
+Uses Pydantic v2's `model_dump(...)` throughout (the deprecated `.dict()` alias
+was converted project-wide as a behaviour-preserving mechanical step). No
+`@field_validator`, no other v2-only APIs here.
 
 Behaviour is a faithful union of the hand-written routers it replaces:
 
@@ -18,9 +17,9 @@ Behaviour is a faithful union of the hand-written routers it replaces:
   optional equality `filters` ({query_param: column}), `order(order_by, desc=order_desc)`,
   optional `default_limit` (also reads `?limit=`). Returns the row list. 500 on error.
   Requires a signed-in user (this business data isn't public).
-- **POST ""** / **POST "/"** — insert `body.dict(exclude_none=True)`; 500 if the insert
+- **POST ""** / **POST "/"** — insert `body.model_dump(exclude_none=True)`; 500 if the insert
   returns nothing; returns the created row. Requires a signed-in user.
-- **PATCH "/{item_id}"** — update `body.dict(exclude_unset=True)` (explicit nulls clear a
+- **PATCH "/{item_id}"** — update `body.model_dump(exclude_unset=True)` (explicit nulls clear a
   field, unset fields are left alone — the null-filter fix, backend edec24a); 404 if the
   row doesn't exist; returns the updated row. Requires a signed-in user.
 - **DELETE "/{item_id}"** — delete by id; returns `{"ok": True}`. Requires manager+.
@@ -59,6 +58,7 @@ from pydantic import BaseModel
 from app.supabase_client import supabase, rows as db_rows, one_row
 from app.auth import get_current_user, require_role
 from app.db_helpers import or_ilike
+from app.errors import server_error
 import logging
 
 logger = logging.getLogger(__name__)
@@ -187,11 +187,11 @@ class CrudRouter:
                 return [serialize_row(r) for r in result]
             except Exception as e:
                 logger.error(f"[{table}] list failed: {e}")
-                raise HTTPException(status_code=500, detail=str(e))
+                raise server_error(e, "Loading items")
 
         async def create_item(data: create_model):
             try:
-                payload = data.dict(exclude_none=True)
+                payload = data.model_dump(exclude_none=True)
                 if before_create:
                     payload = before_create(payload)
                 r = supabase.table(table).insert(payload).execute()
@@ -203,12 +203,12 @@ class CrudRouter:
                 raise
             except Exception as e:
                 logger.error(f"[{table}] create failed: {e}")
-                raise HTTPException(status_code=500, detail=str(e))
+                raise server_error(e, "Creating item")
 
         async def update_item(item_id: str, data: update_model):
             # exclude_unset (not a None-filter): an explicitly-sent null clears the field,
             # an unset field is left untouched. See work_orders (backend edec24a).
-            payload = data.dict(exclude_unset=True)
+            payload = data.model_dump(exclude_unset=True)
             if reject_empty_update and not payload:
                 raise HTTPException(status_code=400, detail="No fields to update")
             if before_update:

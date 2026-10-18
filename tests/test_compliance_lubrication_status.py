@@ -33,8 +33,8 @@ def test_compliance_31_days_out_is_current():
     assert _compute_status(_iso(31)) == "current"
 
 
-def test_compliance_malformed_date_is_current_not_a_crash():
-    assert _compute_status("not-a-date") == "current"
+def test_compliance_malformed_date_is_unknown_not_a_crash():
+    assert _compute_status("not-a-date") == "unknown"
 
 
 # ─── lubrication._lube_status — 7-day window (narrower than compliance's 30) ───────
@@ -56,5 +56,5 @@ def test_lube_8_days_out_is_current():
     assert _lube_status(_iso(8)) == "current"
 
 
-def test_lube_malformed_date_is_current_not_a_crash():
-    assert _lube_status("garbage") == "current"
+def test_lube_malformed_date_is_unknown_not_a_crash():
+    assert _lube_status("garbage") == "unknown"

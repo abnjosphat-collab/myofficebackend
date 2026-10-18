@@ -32,6 +32,7 @@ from app.supabase_client import supabase, one_row
 from app.auth import get_current_user, require_role
 from app.db_helpers import fetch_all_pages
 from app.stock_levels import adjust_stock, item_deltas
+from app.errors import server_error
 
 logger = logging.getLogger(__name__)
 
@@ -116,7 +117,7 @@ def _with_stock(row: dict, report: dict) -> dict:
 
 async def _create_issue(data: StockIssueCreate):
     try:
-        payload = _clean_issue_write(data.dict(exclude_none=True))
+        payload = _clean_issue_write(data.model_dump(exclude_none=True))
         created = one_row(await run_in_threadpool(lambda: supabase.table("stock_issues").insert(payload).execute()))
         if created is None:
             raise HTTPException(status_code=500, detail="Insert failed")
@@ -124,13 +125,13 @@ async def _create_issue(data: StockIssueCreate):
         raise
     except Exception as e:
         logger.error(f"[stock_issues] create failed: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise server_error(e, "Creating issue")
     report = await run_in_threadpool(lambda: adjust_stock(item_deltas(_items_of(created)), issue=True))
     return _with_stock(created, report)
 
 
 async def _update_issue(item_id: int, data: StockIssueUpdate):
-    payload = _clean_issue_write(data.dict(exclude_unset=True))
+    payload = _clean_issue_write(data.model_dump(exclude_unset=True))
     if not payload:
         raise HTTPException(status_code=400, detail="No fields to update")
     try:
@@ -144,7 +145,7 @@ async def _update_issue(item_id: int, data: StockIssueUpdate):
         raise
     except Exception as e:
         logger.error(f"[stock_issues] update failed: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise server_error(e, "Updating issue")
     report = {"stock": [], "warnings": []}
     if "items" in payload:
         # Only the difference moves: more issued than before takes more off, less puts the rest back.
@@ -164,7 +165,7 @@ async def _delete_issue(item_id: int, current_user: dict = Depends(require_role(
         await run_in_threadpool(lambda: supabase.table("stock_issues").delete().eq("id", item_id).execute())
     except Exception as e:
         logger.error(f"[stock_issues] delete failed: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise server_error(e, "Deleting issue")
     # Deleting an issue (a record made in error) puts what it took back on the shelf.
     report = await run_in_threadpool(lambda: adjust_stock(item_deltas(_items_of(before or {})), issue=False)) if before else {"stock": [], "warnings": []}
     return {"ok": True, "stock": report["stock"], "stock_warnings": report["warnings"]}

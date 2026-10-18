@@ -61,6 +61,7 @@ def test_open_reads_stay_open_for_anonymous():
 class _FakeUser:
     id = "u-1"
     email = "x@y.com"
+    factors = []  # real get_user populates this; [] = not MFA-enrolled
 
 
 class _FakeAuthOK:

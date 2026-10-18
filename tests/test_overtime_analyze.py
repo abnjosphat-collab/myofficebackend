@@ -411,4 +411,6 @@ async def test_analyze_overtime_route_wraps_failure_as_500(monkeypatch):
     with pytest.raises(HTTPException) as exc:
         await analyze_overtime(OvertimeAnalysisInput(records=[]))
     assert exc.value.status_code == 500
-    assert "unexpected shape" in exc.value.detail
+    # 500s are generic since the server_error codemod: no internal text leaks.
+    assert "unexpected shape" not in exc.value.detail
+    assert exc.value.detail.startswith("Analysis failed. Please try again. (ref ")

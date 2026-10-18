@@ -1,0 +1,65 @@
+-- supabase_migration_housekeeping_indexes.sql — duplicate/redundant index review.
+--
+-- NOT APPLIED. Owner decision (Gate 3): run the verification queries first, then
+-- uncomment the DROPs you accept. Analysis date 2026-10-18, from the migration
+-- files only (static review of 79 CREATE INDEX statements). "Unused" indexes
+-- cannot be found statically — they need live pg_stat_user_indexes reads; the
+-- queries for that are at the bottom.
+--
+-- REDUNDANT (a composite index's leftmost column serves the single-column
+-- queries, so the narrow index only costs write overhead):
+--   1. timesheets_employee_idx ON timesheets (employee_id)
+--      covered by timesheets_emp_date_idx ON timesheets (employee_id, date)
+--      (supabase_migration_timesheets.sql).
+--   2. idx_lookup_lists_name ON lookup_lists (list_name)
+--      covered by idx_lookup_lists_name_value_ci ON lookup_lists (list_name, lower(value))
+--      (supabase_migration_lookup_lists.sql).
+--   3. document_folders_category_idx ON document_folders (category_id)
+--      covered by document_folders_category_name_idx ON document_folders (category_id, name)
+--      (supabase_migration_document_folders.sql).
+--   4. tools_workspace_competency_employee_idx ON tools_workspace_competencies (employee_id)
+--      covered by tools_workspace_competency_scope_uidx
+--      ON tools_workspace_competencies (employee_id, coalesce(tool_id::text,''), ...)
+--      (supabase_migration_tools_workspace_sop_controls.sql). The sibling
+--      tools_workspace_competency_tool_idx is NOT redundant (tool_id sits inside
+--      a coalesce in second position).
+--
+-- DUPLICATE DEFINITIONS (same index name + same columns in two files; IF NOT
+-- EXISTS makes the second a no-op, so there is only one live index each — this
+-- is file hygiene, delete one statement):
+--   5. tools_workspace_notification_reads_account_idx — in both
+--      supabase_migration_tools_workspace.sql and
+--      supabase_migration_tools_workspace_notification_reads.sql.
+--   6. tools_workspace_source_registers_uploaded_idx — in both
+--      supabase_migration_tools_workspace.sql and
+--      supabase_migration_tools_workspace_source_registers.sql.
+--
+-- Uncomment to drop (one at a time, off-peak; DROP INDEX takes an
+-- ACCESS EXCLUSIVE lock — add CONCURRENTLY outside a transaction if the table
+-- is hot):
+-- DROP INDEX IF EXISTS public.timesheets_employee_idx;
+-- DROP INDEX IF EXISTS public.idx_lookup_lists_name;
+-- DROP INDEX IF EXISTS public.document_folders_category_idx;
+-- DROP INDEX IF EXISTS public.tools_workspace_competency_employee_idx;
+
+-- Verification before dropping: the covering index must exist, and the
+-- redundant one should show ~zero scans (run twice, a week apart, to catch
+-- weekly jobs):
+-- SELECT indexrelid::regclass AS index, idx_scan, idx_tup_read, idx_tup_fetch
+-- FROM pg_stat_user_indexes
+-- WHERE indexrelid::regclass::text IN (
+--   'timesheets_employee_idx', 'timesheets_emp_date_idx',
+--   'idx_lookup_lists_name', 'idx_lookup_lists_name_value_ci',
+--   'document_folders_category_idx', 'document_folders_category_name_idx',
+--   'tools_workspace_competency_employee_idx', 'tools_workspace_competency_scope_uidx'
+-- )
+-- ORDER BY 1;
+--
+-- Find genuinely unused indexes (excluding PKs/unique constraints, which also
+-- enforce integrity):
+-- SELECT schemaname || '.' || relname AS table, indexrelid::regclass AS index,
+--        idx_scan, pg_size_pretty(pg_relation_size(indexrelid)) AS size
+-- FROM pg_stat_user_indexes
+-- JOIN pg_index USING (indexrelid)
+-- WHERE idx_scan = 0 AND NOT indisunique AND indexrelid::regclass::text NOT LIKE 'pg_%'
+-- ORDER BY pg_relation_size(indexrelid) DESC;

@@ -19,7 +19,6 @@ from app.routers.near_miss import (
     get_reports, get_report, create_report, update_report, delete_report,
     NearMissCreate, NearMissUpdate,
 )
-from app.routers.near_miss import test_endpoint as _router_test_endpoint
 
 
 # ─── in-memory fake Supabase (single table, but same shape as the sibling files) ────
@@ -374,9 +373,5 @@ async def test_delete_report_unexpected_exception_is_500(patch_supabase):
     assert exc_info.value.status_code == 500
 
 
-# ─── /test — router liveness check ──────────────────────────────────────────────────
-
-async def test_test_endpoint_reports_success():
-    result = await _router_test_endpoint()
-    assert result["status"] == "success"
-    assert "timestamp" in result
+# NOTE: the /test debug route was deleted; its removal is pinned by
+# test_endpoint_auth.py's REMOVED_DEBUG_ENDPOINTS.

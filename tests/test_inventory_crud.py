@@ -132,7 +132,10 @@ def test_a_failed_save_is_reported_with_its_reason(db):
     db.fail_ops.add("insert")
     with pytest.raises(HTTPException) as err:
         add()
-    assert err.value.status_code == 500 and "not saved" in err.value.detail
+    # Generic since the server_error codemod: the operation is named, the
+    # internal reason stays in the server log (with the ref id).
+    assert err.value.status_code == 500
+    assert err.value.detail.startswith("Saving inventory item failed. Please try again. (ref ")
 
 
 def test_an_update_to_an_item_deleted_meanwhile_is_a_404(db, monkeypatch):

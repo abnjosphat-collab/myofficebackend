@@ -17,6 +17,7 @@ from starlette.concurrency import run_in_threadpool
 from app.auth import get_current_user, role_at_least
 from app.db_helpers import fetch_all_pages
 from app.supabase_client import supabase, one_row
+from app.errors import server_error
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -43,7 +44,7 @@ async def list_quotations():
         ))
     except Exception as e:
         logger.error(f"list_quotations error: {e}")
-        raise HTTPException(500, str(e))
+        raise server_error(e, "Loading quotations")
     return [_out(row) for row in data]
 
 
@@ -68,7 +69,7 @@ async def save_quotation(quotation_id: str, body: SaveQuotation, current_user: d
         result = await run_in_threadpool(lambda: supabase.table(TABLE).upsert(row, on_conflict="id").execute())
     except Exception as e:
         logger.error(f"save_quotation error: {e}")
-        raise HTTPException(500, str(e))
+        raise server_error(e, "Saving quotation")
     saved = one_row(result)
     if not saved:
         raise HTTPException(500, "The quotation was not saved.")
@@ -90,5 +91,5 @@ async def delete_quotation(quotation_id: str, current_user: dict = Depends(get_c
         raise
     except Exception as e:
         logger.error(f"delete_quotation error: {e}")
-        raise HTTPException(500, str(e))
+        raise server_error(e, "Deleting quotation")
     return {"ok": True}

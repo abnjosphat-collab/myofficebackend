@@ -196,7 +196,9 @@ async def test_upload_attachment_storage_failure_is_500(patch_supabase):
     with pytest.raises(HTTPException) as exc:
         await upload_attachment("s1", file, current_user=CURRENT_USER)
     assert exc.value.status_code == 500
-    assert "storage offline" in exc.value.detail
+    # 500s are generic since the server_error codemod: no internal text leaks.
+    assert "storage offline" not in exc.value.detail
+    assert exc.value.detail.startswith("Storage upload failed. Please try again. (ref ")
 
 
 async def test_upload_attachment_public_url_failure_still_succeeds_with_empty_url(patch_supabase):

@@ -8,6 +8,7 @@ from app.auth import get_current_user, require_role
 from app.serialization import convert_dates_to_iso
 from app.aggregation import count_by
 from app.db_helpers import fetch_all_pages, get_or_404
+from app.errors import server_error
 import logging
 import json
 
@@ -103,13 +104,13 @@ async def get_ppe_records(
 
     except Exception as e:
         logger.error(f"Error fetching PPE records: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Error fetching PPE records: {str(e)}")
+        raise server_error(e, "Loading PPE records")
 
 @router.post("")
 async def create_ppe_record(record: PPEIssueCreate, current_user: dict = Depends(get_current_user)):
     try:
         # Convert Pydantic model to dict and handle date serialization
-        data_to_insert = record.dict()
+        data_to_insert = record.model_dump()
         
         # Ensure dates are properly formatted for database
         if data_to_insert.get('issue_date'):
@@ -131,7 +132,7 @@ async def create_ppe_record(record: PPEIssueCreate, current_user: dict = Depends
             
     except Exception as e:
         logger.error(f"Error creating PPE record: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Error creating PPE record: {str(e)}")
+        raise server_error(e, "Creating PPE record")
 
 @router.get("/{record_id:int}", dependencies=[Depends(get_current_user)])
 async def get_ppe_record(record_id: int):
@@ -145,7 +146,7 @@ async def get_ppe_record(record_id: int):
         raise
     except Exception as e:
         logger.error(f"Error fetching PPE record: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Error fetching PPE record: {str(e)}")
+        raise server_error(e, "Loading PPE record")
 
 @router.patch("/{record_id}")
 async def update_ppe_record(record_id: int, updated: PPEIssueUpdate, current_user: dict = Depends(get_current_user)):
@@ -177,7 +178,7 @@ async def update_ppe_record(record_id: int, updated: PPEIssueUpdate, current_use
         raise
     except Exception as e:
         logger.error(f"Error updating PPE record: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Error updating PPE record: {str(e)}")
+        raise server_error(e, "Updating PPE record")
 
 @router.delete("/{record_id}")
 async def delete_ppe_record(record_id: int, current_user: dict = Depends(require_role('manager'))):
@@ -191,7 +192,7 @@ async def delete_ppe_record(record_id: int, current_user: dict = Depends(require
         raise
     except Exception as e:
         logger.error(f"Error deleting PPE record: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Error deleting PPE record: {str(e)}")
+        raise server_error(e, "Deleting PPE record")
 
 @router.get("/employee/{employee_id}", dependencies=[Depends(get_current_user)])
 async def get_employee_ppe_records(employee_id: str):
@@ -207,7 +208,7 @@ async def get_employee_ppe_records(employee_id: str):
         
     except Exception as e:
         logger.error(f"Error fetching employee PPE records: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Error fetching employee PPE records: {str(e)}")
+        raise server_error(e, "Loading employee PPE records")
 
 # Statistics Endpoint
 @router.get("/stats/summary", dependencies=[Depends(get_current_user)])
@@ -262,7 +263,7 @@ async def get_ppe_stats():
         
     except Exception as e:
         logger.error(f"Error fetching PPE stats: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Error fetching PPE stats: {str(e)}")
+        raise server_error(e, "Loading PPE stats")
 
 
 # ─── PPE replacement matrix ────────────────────────────────────────────────────
@@ -350,12 +351,11 @@ async def set_ppe_matrix_entry(entry: MatrixEntry, current_user: dict = Depends(
             "updated_at": datetime.utcnow().isoformat(),
         }, on_conflict="ppe_type").execute()
     except Exception as e:
-        raise HTTPException(status_code=500,
-                            detail=f"Could not save matrix — has the ppe_matrix table been created? {e}")
+        raise server_error(e, "Saving matrix")
     try:
         updated = _apply_matrix_to_type(entry.ppe_type, entry.interval_months)
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Matrix saved, but recalculating existing records failed: {e}")
+        raise server_error(e, "Matrix saved, but recalculating existing records")
     return {"ppe_type": entry.ppe_type, "interval_months": entry.interval_months, "updated": updated}
 
 
@@ -375,7 +375,7 @@ async def apply_ppe_matrix(ppe_type: str, current_user: dict = Depends(require_r
     try:
         updated = _apply_matrix_to_type(ppe_type, interval)
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Could not recalculate records: {e}")
+        raise server_error(e, "Recalculating records")
     return {"ppe_type": ppe_type, "interval_months": interval, "updated": updated}
 
 

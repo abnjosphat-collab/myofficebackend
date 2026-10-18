@@ -57,10 +57,10 @@ async def test_create_sets_created_and_updated_timestamps(monkeypatch):
 # ─── BreakdownCreate validators ─────────────────────────────────────────────────────
 
 async def test_create_blank_breakdown_date_defaults_to_today(monkeypatch):
-    from datetime import datetime
+    from app.clock import today_harare
     _patch(monkeypatch)
     result = await create_breakdown(_make(breakdown_date=""), current_user=CURRENT_USER)
-    assert result["data"]["breakdown_date"] == datetime.utcnow().strftime('%Y-%m-%d')
+    assert result["data"]["breakdown_date"] == today_harare().isoformat()
 
 
 async def test_create_explicit_machine_description_is_kept_verbatim(monkeypatch):
@@ -160,7 +160,9 @@ async def test_create_returns_500_on_db_exception(monkeypatch):
     with pytest.raises(HTTPException) as exc:
         await create_breakdown(_make(), current_user=CURRENT_USER)
     assert exc.value.status_code == 500
-    assert "db exploded" in exc.value.detail
+    # 500s are generic since the server_error codemod: no internal text leaks.
+    assert "db exploded" not in exc.value.detail
+    assert exc.value.detail.startswith("Creating breakdown failed. Please try again. (ref ")
 
 
 async def test_create_no_supabase_client_raises_500(monkeypatch):

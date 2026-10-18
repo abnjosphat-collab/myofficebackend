@@ -8,6 +8,10 @@ from app.supabase_client import supabase
 from app.auth import get_current_user, require_role
 from app.cache import cached, invalidate_namespace
 from app.db_helpers import fetch_all_pages, get_or_404
+from app.errors import server_error
+import logging
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -142,7 +146,8 @@ async def employees_health():
         _data(supabase.table("employees").select("id").limit(1).execute())
         return {"status": "healthy", "service": "employees", "database": "connected"}
     except Exception as e:
-        raise HTTPException(503, detail=f"Employees service unhealthy: {e}")
+        logger.error(f"Employees health check failed: {e}")
+        raise HTTPException(503, detail="Employees service unhealthy.")
 
 
 @router.get("/search/{query}", dependencies=[Depends(get_current_user)])
@@ -170,7 +175,7 @@ async def search_employees(
         rows = _data(r)
         return [_dates_from_db(e) for e in rows] if rows else []
     except Exception as e:
-        raise HTTPException(500, detail=f"Search error: {e}")
+        raise server_error(e, "Searching employees")
 
 
 @router.post("/bulk-normalize", dependencies=[Depends(require_role('manager'))])
@@ -184,15 +189,10 @@ async def bulk_normalize_employees(body: BulkNormalizeRequest):
     errors: List[str] = []
 
     for item in body.updates:
-        patch: dict = {}
-        if item.designation is not None:
-            patch["designation"] = item.designation
-        if item.section is not None:
-            patch["section"] = item.section
-        if item.phone is not None:
-            patch["phone"] = item.phone
-        if item.archived is not None:
-            patch["archived"] = item.archived
+        # exclude_unset, not a None-filter: an explicitly-sent null must clear the
+        # field, not be silently dropped. See work_orders (backend edec24a).
+        patch: dict = item.model_dump(exclude_unset=True)
+        patch.pop("id", None)
 
         if not patch:
             continue
@@ -229,7 +229,7 @@ async def get_employees():
         ))
         return [_dates_from_db(e) for e in rows] if rows else []
     except Exception as e:
-        raise HTTPException(500, detail=f"Error fetching employees: {e}")
+        raise server_error(e, "Loading employees")
 
 
 @router.get("/{id}", dependencies=[Depends(get_current_user)])
@@ -241,7 +241,7 @@ async def get_employee(id: int):
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(500, detail=f"Error fetching employee: {e}")
+        raise server_error(e, "Loading employee")
 
 
 @router.post("")
@@ -263,7 +263,7 @@ async def create_employee(employee: Employee, current_user: dict = Depends(get_c
                        "Choose a different ID."
             )
 
-        payload = _prepare_employee_write(employee.dict())
+        payload = _prepare_employee_write(employee.model_dump())
         rows = _data(supabase.table("employees").insert(payload).execute())
         if not rows:
             raise HTTPException(500, detail="No data returned after insertion")
@@ -273,7 +273,7 @@ async def create_employee(employee: Employee, current_user: dict = Depends(get_c
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(500, detail=f"Error creating employee: {e}")
+        raise server_error(e, "Creating employee")
 
 
 @router.put("/{id}")
@@ -318,7 +318,7 @@ async def update_employee(id: int, updated: Employee, current_user: dict = Depen
                     detail=f"Employee ID '{new_emp_id}' is already used by another employee."
                 )
 
-        payload = _prepare_employee_write(updated.dict(), existing)
+        payload = _prepare_employee_write(updated.model_dump(), existing)
         rows = _data(
             supabase.table("employees").update(payload).eq("id", id).execute()
         )
@@ -330,7 +330,7 @@ async def update_employee(id: int, updated: Employee, current_user: dict = Depen
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(500, detail=f"Error updating employee: {e}")
+        raise server_error(e, "Updating employee")
 
 
 @router.delete("/{id}")
@@ -361,4 +361,4 @@ async def delete_employee(id: int, current_user: dict = Depends(require_role('ma
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(500, detail=f"Error deleting employee: {e}")
+        raise server_error(e, "Deleting employee")

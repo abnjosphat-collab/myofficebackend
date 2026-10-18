@@ -46,6 +46,7 @@ class _FakeAuthUser:
     def __init__(self, uid="u-1", email="a@b.com"):
         self.id = uid
         self.email = email
+        self.factors = []  # real get_user populates this; [] = not MFA-enrolled
 
 
 class _SelectResp:

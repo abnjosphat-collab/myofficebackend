@@ -6,6 +6,19 @@
 import pytest
 from fastapi import HTTPException
 import app.routers.admin as admin
+from app.rate_limit import limiter
+
+
+@pytest.fixture(autouse=True)
+def disable_limiter():
+    # request_password_reset is @limiter.limit-decorated (slowapi needs a real
+    # Request unless disabled); these tests call the coroutine directly with
+    # request=None, so the limiter stays off here. The live limit is covered
+    # in tests/test_rate_limit.py through TestClient.
+    original = limiter.enabled
+    limiter.enabled = False
+    yield
+    limiter.enabled = original
 
 
 # ─── Fakes ──────────────────────────────────────────────────────────────────
@@ -29,6 +42,15 @@ class _FakeTable:
         self.state["mode"] = "update"
         self._pending_update = data
         self.state["last_update"] = (self.name, data)
+        return self
+
+    def insert(self, data):
+        self.state["mode"] = "insert"
+        self.state.setdefault("insert_calls", []).append((self.name, data))
+        self.state["profiles"].setdefault(self.name, []).append(dict(data))
+        return self
+
+    def order(self, *a, **k):
         return self
 
     def eq(self, *a, **k):
@@ -228,3 +250,158 @@ async def test_reset_password_blocked_for_super_admin_target(monkeypatch):
     with pytest.raises(HTTPException) as exc:
         await admin.send_password_reset("u-2", current_user={"role": "admin", "user_id": "u-1"})
     assert exc.value.status_code == 403
+
+
+# ─── password-reset requests (signed-out ask → admin bell) ───────────────────
+
+@pytest.mark.asyncio
+async def test_request_records_pending_for_known_email(monkeypatch):
+    state = _patch(monkeypatch, profiles={"user_profiles": [_profile(id="u-2", email="target@x.com")]})
+    result = await admin.request_password_reset(request=None, body=admin.PasswordResetAsk(email="Target@X.com"))
+    assert result == {"ok": True}
+    assert state["insert_calls"] == [("password_reset_requests", {"source": "myoffice", "identifier": "target@x.com", "status": "pending"})]
+
+
+@pytest.mark.asyncio
+async def test_request_for_unknown_email_answers_ok_but_records_nothing(monkeypatch):
+    state = _patch(monkeypatch, profiles={"user_profiles": []})
+    result = await admin.request_password_reset(request=None, body=admin.PasswordResetAsk(email="ghost@x.com"))
+    assert result == {"ok": True}
+    assert state.get("insert_calls", []) == []
+
+
+@pytest.mark.asyncio
+async def test_request_repeat_while_pending_records_nothing(monkeypatch):
+    state = _patch(monkeypatch, profiles={
+        "user_profiles": [_profile(email="target@x.com")],
+        "password_reset_requests": [{"id": "r1", "status": "pending"}],
+    })
+    result = await admin.request_password_reset(request=None, body=admin.PasswordResetAsk(email="target@x.com"))
+    assert result == {"ok": True}
+    assert state.get("insert_calls", []) == []
+
+
+@pytest.mark.asyncio
+async def test_list_requests_returns_pending_rows(monkeypatch):
+    rows = [{"id": "r1", "source": "myoffice", "identifier": "a@x.com", "status": "pending"}]
+    _patch(monkeypatch, profiles={"password_reset_requests": rows})
+    result = await admin.list_password_reset_requests("pending", current_user={"role": "admin", "user_id": "u-1"})
+    assert result == rows
+
+
+@pytest.mark.asyncio
+async def test_list_requests_rejects_bad_status(monkeypatch):
+    _patch(monkeypatch)
+    with pytest.raises(HTTPException) as exc:
+        await admin.list_password_reset_requests("bogus", current_user={"role": "admin", "user_id": "u-1"})
+    assert exc.value.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_send_reset_clears_the_pending_ask(monkeypatch):
+    state = _patch(monkeypatch, profiles={"user_profiles": [_profile(id="u-2", email="target@x.com")]})
+    await admin.send_password_reset("u-2", current_user={"role": "admin", "user_id": "u-1"})
+    assert state["last_update"][0] == "password_reset_requests"
+    assert state["last_update"][1]["status"] == "done"
+
+
+# ─── reset_mfa_factors (lost-authenticator recovery) ──────────────────────────
+
+@pytest.mark.asyncio
+async def test_reset_mfa_lists_then_deletes_each_factor(monkeypatch):
+    _patch(monkeypatch, profiles={"user_profiles": [_profile(id="u-2")]})
+    calls = []
+
+    def fake_request(method, path):
+        calls.append((method, path))
+        if method == "GET":
+            return 200, {"totp": [{"id": "f-1"}, {"id": "f-2"}], "phone": []}
+        return 200, {}
+
+    monkeypatch.setattr(admin, "_auth_admin_request", fake_request)
+    result = await admin.reset_mfa_factors("u-2", current_user={"role": "admin", "user_id": "u-1"})
+    assert result == {"ok": True, "removed": 2}
+    assert calls == [
+        ("GET", "/auth/v1/admin/users/u-2/factors"),
+        ("DELETE", "/auth/v1/admin/users/u-2/factors/f-1"),
+        ("DELETE", "/auth/v1/admin/users/u-2/factors/f-2"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_reset_mfa_with_no_factors_is_still_ok(monkeypatch):
+    _patch(monkeypatch, profiles={"user_profiles": [_profile(id="u-2")]})
+    calls = []
+    monkeypatch.setattr(admin, "_auth_admin_request", lambda m, p: (calls.append((m, p)), (200, {"totp": []}))[1])
+    result = await admin.reset_mfa_factors("u-2", current_user={"role": "admin", "user_id": "u-1"})
+    assert result == {"ok": True, "removed": 0}
+    assert calls == [("GET", "/auth/v1/admin/users/u-2/factors")]
+
+
+@pytest.mark.asyncio
+async def test_reset_mfa_blocked_for_self(monkeypatch):
+    _patch(monkeypatch, profiles={"user_profiles": [_profile(id="u-1")]})
+    monkeypatch.setattr(admin, "_auth_admin_request", lambda m, p: (_ for _ in ()).throw(AssertionError("must not call Auth")))
+    with pytest.raises(HTTPException) as exc:
+        await admin.reset_mfa_factors("u-1", current_user={"role": "admin", "user_id": "u-1"})
+    assert exc.value.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_reset_mfa_blocked_for_super_admin_target(monkeypatch):
+    _patch(monkeypatch, profiles={"user_profiles": [_profile(id="u-9", role="super_admin")]})
+    monkeypatch.setattr(admin, "_auth_admin_request", lambda m, p: (_ for _ in ()).throw(AssertionError("must not call Auth")))
+    with pytest.raises(HTTPException) as exc:
+        await admin.reset_mfa_factors("u-9", current_user={"role": "admin", "user_id": "u-1"})
+    assert exc.value.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_reset_mfa_404_when_user_missing(monkeypatch):
+    _patch(monkeypatch, profiles={})
+    with pytest.raises(HTTPException) as exc:
+        await admin.reset_mfa_factors("ghost", current_user={"role": "admin", "user_id": "u-1"})
+    assert exc.value.status_code == 404
+
+
+def test_auth_admin_request_is_service_keyed_and_key_never_leaks(monkeypatch):
+    import urllib.request as urlreq
+
+    seen = {}
+
+    class _Resp:
+        status = 200
+
+        def read(self):
+            return b'{"totp": []}'
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    def fake_urlopen(req, timeout=None):
+        seen["url"] = req.full_url
+        seen["method"] = req.get_method()
+        seen["headers"] = dict(req.header_items())
+        return _Resp()
+
+    monkeypatch.setattr(urlreq, "urlopen", fake_urlopen)
+    monkeypatch.setattr(admin, "SUPABASE_URL", "https://demo.supabase.co")
+    monkeypatch.setattr(admin, "SUPABASE_KEY", "service-key-value")
+    status, body = admin._auth_admin_request("GET", "/auth/v1/admin/users/u-2/factors")
+    assert status == 200 and body == {"totp": []}
+    assert seen["url"] == "https://demo.supabase.co/auth/v1/admin/users/u-2/factors"
+    assert seen["method"] == "GET"
+    assert seen["headers"]["Authorization"] == "Bearer service-key-value"
+    assert seen["headers"]["Apikey"] == "service-key-value"
+
+    def failing_urlopen(req, timeout=None):
+        raise ConnectionError("down")
+
+    monkeypatch.setattr(urlreq, "urlopen", failing_urlopen)
+    with pytest.raises(HTTPException) as exc:
+        admin._auth_admin_request("GET", "/auth/v1/admin/users/u-2/factors")
+    assert exc.value.status_code == 502
+    assert "service-key-value" not in str(exc.value.detail)

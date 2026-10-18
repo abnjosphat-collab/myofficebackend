@@ -19,9 +19,9 @@ before the router existed), and the `require_role('manager')` delete gate.
 Model to copy: `app/routers/contractors.py` — `CrudRouter` fronts the plain
 CRUD, then a couple of hand-added routes (`get_contractor` with a joined
 `contractor_jobs` sub-resource) sit right below it for the part that isn't
-generic. `app/routers/accounting.py` shows the same pattern at larger scale —
-CrudRouter for the base, `db_helpers.get_or_404` / `apply_date_range` /
-`distinct_suggestions` reused directly for the rest.
+generic. `app/routers/tasks_events.py` shows the same pattern at larger scale —
+CrudRouter for the base, hand-added progress-comment sub-resource routes below
+it, and the router mounted behind a manager-only gate in `main.py`.
 
 Skip it only when there's a specific, named reason — e.g. the endpoint isn't
 really CRUD-shaped (an analysis/aggregation endpoint, a multi-table merge like
@@ -55,12 +55,14 @@ to add a new one — this has been found and fixed independently in at least
 6 different files across this project's history; treat every new
 `except Exception` block as a place this bug likes to hide.
 
-Also avoid `raise HTTPException(500, detail=f"Error: {str(e)}")` where it can
-be avoided — that leaks the raw internal error string to the client. Let it
-propagate to the global handler instead, which logs the detail server-side
-and returns a generic client-facing message. (`main.py` already has a
-comment flagging this as known tech debt in ~280 existing call sites — not
-something to fix everywhere at once, but don't add more of it.)
+Never `raise HTTPException(500, detail=f"Error: {str(e)}")` — that leaks the
+raw internal error string to the client. Route 500s through
+`app/errors.py`'s `server_error(exc, what)` instead: it logs the traceback
+server-side with a short ref id and returns a generic
+`"{what} failed. Please try again. (ref …)"` message. (The ~280 call sites
+`main.py`'s comment used to flag as tech debt were converted mechanically in
+2026-10; `tests/test_no_internal_error_leak.py` parses every router and fails
+on any 500 detail that references the caught exception.)
 
 ## 3. Tests: two sanctioned recipes, pick whichever fits
 
@@ -102,3 +104,28 @@ blocking ratchet rather than a false clean claim. It fails when the error count
 exceeds the recorded maximum and asks maintainers to lower that maximum when a
 change improves it. New type errors are therefore blocked while the existing
 debt is paid down incrementally.
+
+## Appendix: open reads — what and why
+
+Most reads require a signed-in user, and every write does. The reads below
+are deliberately open (no `get_current_user` gate) and pinned in
+`tests/test_endpoint_auth.py`'s `OPEN_READS` — a 401 on any of them is a bug,
+and so is any other data-bearing read NOT requiring auth. Owner decision,
+recorded 2026-10.
+
+| Open read | Why it stays open |
+|---|---|
+| `GET /api/availabilities` | Equipment + latest availability merged for the homepage; no PII, no per-user data |
+| `GET /api/availabilities/stats` | Aggregate counts only |
+| `GET /api/breakdowns/dashboard/overview` | Homepage KPI aggregates (counts/sums, cached 60 s); individual breakdowns stay gated |
+| `GET /api/equipment` | The equipment list isn't PII; the single-item read stays gated |
+| `GET /api/leaves/stats/summary` | Aggregate counts; individual leave records stay gated |
+| `GET /api/lookup-lists/{list_name}` | Shared pick-list values (locations, natures) needed by unsigned forms |
+| `GET /api/maintenance/work-orders/stats/summary` | Aggregate counts; work orders themselves stay gated |
+| `GET /api/timesheets/stats/summary` | Aggregate counts; individual timesheets stay gated |
+| `GET /api/health`, `/api/version`, `*/health*` | Liveness probes; status only, never exception strings or DB details |
+
+Related owner decisions from the same pass: Tools self-registration and
+first-account-is-admin are unchanged (rate-limited instead), and the
+per-username Tools failed-login counter is in-process (resets on restart,
+counted per worker).

@@ -218,8 +218,8 @@ async def get_sop(sop_id: str):
 @router.post("", dependencies=[Depends(require_role("manager"))])
 @router.post("/", dependencies=[Depends(require_role("manager"))])
 async def create_sop(body: SopCreate, current_user: dict = Depends(require_role("manager"))):
-    payload = body.dict(exclude={"change_note"})
-    payload["sections"] = body.sections.dict()
+    payload = body.model_dump(exclude={"change_note"})
+    payload["sections"] = body.sections.model_dump()
     payload["code"] = payload["code"].strip()
     now = datetime.utcnow().isoformat()
     payload["created_at"] = now
@@ -270,9 +270,9 @@ async def update_sop(
 
     get_or_404(supabase, "sop_documents", sop_id, detail="SOP not found")
 
-    payload = body.dict(exclude_unset=True, exclude={"change_note"})
+    payload = body.model_dump(exclude_unset=True, exclude={"change_note"})
     if "sections" in payload and payload["sections"] is not None:
-        payload["sections"] = body.sections.dict()
+        payload["sections"] = body.sections.model_dump()
     for date_field in ("effective_date", "next_review_date"):
         if isinstance(payload.get(date_field), date):
             payload[date_field] = payload[date_field].isoformat()

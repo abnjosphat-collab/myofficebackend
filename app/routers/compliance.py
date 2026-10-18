@@ -4,6 +4,7 @@ from typing import Optional
 from app.supabase_client import supabase
 from app.auth import get_current_user, require_role
 from app.db_helpers import get_or_404
+from app.errors import server_error
 from datetime import date
 import logging
 
@@ -19,7 +20,9 @@ def _compute_status(expiry: Optional[str]) -> str:
         if days <= 30: return "due_soon"
         return "current"
     except:
-        return "current"
+        # Unparseable date: "unknown", never a reassuring "current" that
+        # hides a data problem (or an actually-overdue item).
+        return "unknown"
 
 class ComplianceCreate(BaseModel):
     equipment_id: Optional[str] = None
@@ -60,7 +63,7 @@ async def get_compliance(status: Optional[str] = None):
             items = [i for i in items if i["status"] == status]
         return items
     except Exception as e:
-        raise HTTPException(500, str(e))
+        raise server_error(e, "Loading compliance")
 
 @router.get("/{c_id}", dependencies=[Depends(get_current_user)])
 async def get_compliance_item(c_id: int):
@@ -72,7 +75,7 @@ async def get_compliance_item(c_id: int):
 @router.post("/")
 async def create_compliance(data: ComplianceCreate, current_user: dict = Depends(get_current_user)):
     try:
-        payload = data.dict(exclude_none=True)
+        payload = data.model_dump(exclude_none=True)
         payload["status"] = _compute_status(data.expiry_date)
         r = supabase.table("compliance_register").insert(payload).execute()
         if not r.data:
@@ -81,7 +84,7 @@ async def create_compliance(data: ComplianceCreate, current_user: dict = Depends
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(500, str(e))
+        raise server_error(e, "Creating compliance")
 
 @router.patch("/{c_id}")
 async def update_compliance(c_id: int, data: ComplianceUpdate, current_user: dict = Depends(get_current_user)):

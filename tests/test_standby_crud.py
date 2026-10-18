@@ -278,4 +278,6 @@ async def test_update_assignment_unrelated_error_is_not_treated_as_missing_colum
     with pytest.raises(HTTPException) as exc_info:
         await update_assignment(1, ShiftRosterUpdate(notes="x"), current_user={"user_id": "u1"})
     assert exc_info.value.status_code == 500
-    assert "connection reset" in exc_info.value.detail
+    # 500s are generic since the server_error codemod: no internal text leaks.
+    assert "connection reset" not in exc_info.value.detail
+    assert exc_info.value.detail.startswith("Updating assignment failed. Please try again. (ref ")

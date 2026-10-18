@@ -1,10 +1,11 @@
 # tests/test_compressors_misc.py — the small standalone endpoints/helpers left
 # over after the CRUD/daily-entry/readings/stats/analytics/export groups:
-# root(), health_check(), test_endpoint(), get_supabase(), and the on_startup()
-# hook. All zero coverage before this file.
+# root(), health_check(), get_supabase(), and the on_startup() hook. All zero
+# coverage before this file. (The /test debug route was deleted; its removal
+# is pinned by test_endpoint_auth.py's REMOVED_DEBUG_ENDPOINTS.)
 
 import app.routers.compressors as compressors_mod
-from app.routers.compressors import root, health_check, test_endpoint, get_supabase, on_startup
+from app.routers.compressors import root, health_check, get_supabase, on_startup
 
 
 async def test_root_lists_the_advertised_endpoints():
@@ -17,12 +18,6 @@ async def test_root_lists_the_advertised_endpoints():
 async def test_health_check_reports_healthy_with_a_timestamp():
     result = await health_check()
     assert result["status"] == "healthy"
-    assert "timestamp" in result
-
-
-async def test_test_endpoint_smoke():
-    result = await test_endpoint()
-    assert result["message"] == "Compressors API is working"
     assert "timestamp" in result
 
 

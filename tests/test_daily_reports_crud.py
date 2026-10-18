@@ -119,14 +119,15 @@ def _report_payload(**overrides):
 async def test_health_check_local_mode_when_no_supabase(patch_supabase_none):
     result = await health_check()
     assert result["status"] == "connected"
-    assert result["report_count"] == 0
+    assert "report_count" not in result  # status only, no DB details
 
 
-async def test_health_check_healthy_reports_count(patch_supabase):
+async def test_health_check_healthy_reports_status_only(patch_supabase):
     patch_supabase({"daily_reports": {"select_return": [{"id": 1}], "count": 5}})
     result = await health_check()
     assert result["status"] == "healthy"
-    assert result["report_count"] == 5
+    assert "report_count" not in result  # status only, no DB details
+    assert "timestamp" in result
 
 
 async def test_health_check_db_error_returns_error_status_not_a_crash(patch_supabase, monkeypatch):
@@ -141,7 +142,7 @@ async def test_health_check_db_error_returns_error_status_not_a_crash(patch_supa
     monkeypatch.setattr(dr_mod, "supabase", _RaisingSupabase())
     result = await health_check()
     assert result["status"] == "error"
-    assert "connection refused" in result["message"]
+    assert "connection refused" not in str(result)
 
 
 # ─── get_reports ─────────────────────────────────────────────────────────────────

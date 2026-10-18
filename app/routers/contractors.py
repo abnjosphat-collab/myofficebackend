@@ -5,6 +5,7 @@ from app.crud_router import CrudRouter
 from app.supabase_client import supabase
 from app.auth import get_current_user, require_role
 from app.db_helpers import get_or_404
+from app.errors import server_error
 import logging
 
 logger = logging.getLogger(__name__)
@@ -98,21 +99,21 @@ async def get_all_jobs(status: Optional[str] = None):
 @router.post("/jobs")
 async def create_job(data: ContractorJobCreate, current_user: dict = Depends(get_current_user)):
     try:
-        r = supabase.table("contractor_jobs").insert(data.dict(exclude_none=True)).execute()
+        r = supabase.table("contractor_jobs").insert(data.model_dump(exclude_none=True)).execute()
         if not r.data:
             raise HTTPException(500, "Insert failed")
         return r.data[0]
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(500, str(e))
+        raise server_error(e, "Creating job")
 
 
 @router.patch("/jobs/{j_id}")
 async def update_job(j_id: int, data: ContractorJobUpdate, current_user: dict = Depends(get_current_user)):
     # exclude_unset, not a None-filter: an explicitly-sent null must clear the
     # field, not be silently dropped. See work_orders (backend edec24a).
-    payload = data.dict(exclude_unset=True)
+    payload = data.model_dump(exclude_unset=True)
     r = supabase.table("contractor_jobs").update(payload).eq("id", j_id).execute()
     if not r.data:
         raise HTTPException(404, "Job not found")

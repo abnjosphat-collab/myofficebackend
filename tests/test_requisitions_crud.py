@@ -267,4 +267,5 @@ async def test_health_check_unhealthy_on_db_error(monkeypatch):
     result = await health_check()
     assert result["status"] == "unhealthy"
     assert result["database"] == "disconnected"
-    assert "error" in result
+    assert "error" not in result  # status only, no exception text
+    assert "db is down" not in str(result)

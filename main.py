@@ -14,6 +14,7 @@ from contextlib import asynccontextmanager
 from app.supabase_client import supabase
 from app.auth import get_current_user, require_role
 from app.redis_client import ping_redis, close_redis
+from app.cache import cache_stats
 from slowapi.errors import RateLimitExceeded
 from slowapi.middleware import SlowAPIMiddleware
 from app.rate_limit import limiter
@@ -155,12 +156,14 @@ async def root():
 
 @app.get("/api/health")
 async def health_check():
+    # Status only: a coarse database/redis signal, never row counts (DB
+    # details) and never exception strings. Failures are logged server-side.
     try:
-        standby_resp = supabase.table("standby_schedules").select("*", count="exact", head=True).execute()
-        standby_count = standby_resp.count if hasattr(standby_resp, 'count') else 0
+        supabase.table("standby_schedules").select("*", count="exact", head=True).execute()
+        database = "connected"
     except Exception as e:
-        logger.error(f"Health check failed to get standby count: {e}")
-        standby_count = 0
+        logger.error(f"Health check failed to reach the database: {e}")
+        database = "unavailable"
 
     redis_ok = await ping_redis()
 
@@ -168,8 +171,9 @@ async def health_check():
         "status": "healthy",
         "message": "API is running",
         "timestamp": datetime.utcnow().isoformat(),
-        "standby_schedules": standby_count,
-        "redis": "connected" if redis_ok else "unavailable"
+        "database": database,
+        "redis": "connected" if redis_ok else "unavailable",
+        "cache": cache_stats(),
     }
 
 # When this process started, so a restart (a new deploy, or Render waking the service) is visible from outside.

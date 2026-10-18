@@ -108,3 +108,25 @@ def test_rounds_total_cost_to_two_decimals():
     spares = [SparePart(name="Widget", quantity=3, unit_price=3.333)]
     result = calculate_spare_costs(spares)
     assert result["total_spare_cost"] == 10.0  # 3 * 3.333 = 9.999 -> 10.0
+
+
+# ─── failure honesty ──────────────────────────────────────────────────────────
+
+def test_time_metrics_failure_is_none_fields_not_zeros():
+    # A failure to compute (here: no dict at all) must store NULLs, never
+    # zeros that would read back as measured "no downtime".
+    result = calculate_time_metrics(None)
+    assert result == {
+        "response_time_minutes": None, "repair_time_minutes": None,
+        "downtime_minutes": None, "net_downtime_minutes": None,
+    }
+
+
+def test_spare_costs_failure_raises_instead_of_erasing():
+    # The old zeroed fallback ({"total_spare_cost": 0.0, "spares_used": []})
+    # silently erased the spares list on every save whose costing failed.
+    # Now the error propagates so the save fails honestly as a 500.
+    import pytest
+
+    with pytest.raises(Exception):
+        calculate_spare_costs([object()])

@@ -3,6 +3,7 @@
 from fastapi import APIRouter, HTTPException, Depends
 from app.auth import get_current_user, require_role
 from app.aggregation import count_by
+from app.errors import server_error
 from pydantic import BaseModel
 from typing import Any, Optional
 from datetime import datetime, timezone, timedelta
@@ -569,4 +570,4 @@ async def analyze_safety(data: SafetyDataInput, current_user: dict = Depends(get
         return analyse(data)
     except Exception as e:
         logger.error(f"Safety analysis error: {e}")
-        raise HTTPException(500, f"Analysis failed: {e}")
+        raise server_error(e, "Analysis")

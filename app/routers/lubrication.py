@@ -3,6 +3,7 @@ from pydantic import BaseModel
 from typing import Optional
 from app.supabase_client import supabase
 from app.auth import get_current_user, require_role
+from app.errors import server_error
 from datetime import date, timedelta
 import logging
 
@@ -18,7 +19,9 @@ def _lube_status(next_due: Optional[str]) -> str:
         if days <= 7:  return "due_soon"
         return "current"
     except:
-        return "current"
+        # Unparseable date: "unknown", never a reassuring "current" that
+        # hides a data problem (or an actually-overdue item).
+        return "unknown"
 
 class LubeScheduleCreate(BaseModel):
     equipment_id: Optional[str] = None
@@ -72,13 +75,13 @@ async def get_schedules(status: Optional[str] = None, section: Optional[str] = N
             items = [i for i in items if i["status"] == status]
         return items
     except Exception as e:
-        raise HTTPException(500, str(e))
+        raise server_error(e, "Loading schedules")
 
 @router.post("")
 @router.post("/")
 async def create_schedule(data: LubeScheduleCreate, current_user: dict = Depends(get_current_user)):
     try:
-        payload = data.dict(exclude_none=True)
+        payload = data.model_dump(exclude_none=True)
         payload["status"] = _lube_status(data.next_due_date)
         r = supabase.table("lube_schedules").insert(payload).execute()
         if not r.data:
@@ -87,7 +90,7 @@ async def create_schedule(data: LubeScheduleCreate, current_user: dict = Depends
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(500, str(e))
+        raise server_error(e, "Creating schedule")
 
 @router.patch("/{s_id}")
 async def update_schedule(s_id: int, data: LubeScheduleUpdate, current_user: dict = Depends(get_current_user)):
@@ -118,7 +121,7 @@ async def get_lube_records(schedule_id: Optional[int] = None):
 @router.post("/records")
 async def create_lube_record(data: LubeRecordCreate, current_user: dict = Depends(get_current_user)):
     try:
-        r = supabase.table("lube_records").insert(data.dict(exclude_none=True)).execute()
+        r = supabase.table("lube_records").insert(data.model_dump(exclude_none=True)).execute()
         if not r.data:
             raise HTTPException(500, "Insert failed")
         # Update the parent schedule's last_done_date
@@ -131,4 +134,4 @@ async def create_lube_record(data: LubeRecordCreate, current_user: dict = Depend
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(500, str(e))
+        raise server_error(e, "Creating lube record")

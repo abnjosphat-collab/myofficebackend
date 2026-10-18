@@ -16,6 +16,7 @@ from starlette.concurrency import run_in_threadpool
 from app.auth import get_current_user
 from app.db_helpers import fetch_all_pages
 from app.supabase_client import supabase
+from app.errors import server_error
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -60,7 +61,7 @@ async def list_order_lines():
         ))
     except Exception as e:
         logger.error(f"list_order_lines error: {e}")
-        raise HTTPException(500, str(e))
+        raise server_error(e, "Loading order lines")
     return [_entry_of(row) for row in data]
 
 
@@ -76,7 +77,7 @@ async def add_order_lines(body: AddLines, current_user: dict = Depends(get_curre
         result = await run_in_threadpool(lambda: supabase.table(TABLE).upsert(payload, on_conflict="record_id", ignore_duplicates=True).execute())
     except Exception as e:
         logger.error(f"add_order_lines error: {e}")
-        raise HTTPException(500, str(e))
+        raise server_error(e, "Creating order lines")
     return {"added": len(result.data or [])}
 
 
@@ -89,7 +90,7 @@ async def remove_order_lines(body: RemoveLines, current_user: dict = Depends(get
         await run_in_threadpool(lambda: supabase.table(TABLE).delete().in_("record_id", body.record_ids).execute())
     except Exception as e:
         logger.error(f"remove_order_lines error: {e}")
-        raise HTTPException(500, str(e))
+        raise server_error(e, "Deleting order lines")
     return {"ok": True}
 
 
@@ -101,5 +102,5 @@ async def clear_order_list(current_user: dict = Depends(get_current_user)):
         await run_in_threadpool(lambda: supabase.table(TABLE).delete().neq("record_id", "").execute())
     except Exception as e:
         logger.error(f"clear_order_list error: {e}")
-        raise HTTPException(500, str(e))
+        raise server_error(e, "Clearing order list")
     return {"ok": True}

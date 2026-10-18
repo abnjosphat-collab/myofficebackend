@@ -7,6 +7,7 @@ from app.supabase_client import supabase, rows, one_row
 from app.auth import get_current_user, require_role, require_role_if_status_in
 from app.db_helpers import fetch_all_pages, get_or_404
 from app.leave_days import calculate_total_days
+from app.errors import server_error
 import logging
 import traceback
 
@@ -139,7 +140,7 @@ async def create_leave(leave: LeaveCreate, current_user: dict = Depends(get_curr
         return created
     except Exception as e:
         logger.error(f"Error creating leave: {str(e)}\n{traceback.format_exc()}")
-        raise HTTPException(status_code=500, detail=f"Error creating leave: {str(e)}")
+        raise server_error(e, "Creating leave")
 
 # ---------- GET all leaves ----------
 @router.get("", response_model=List[LeaveResponse], dependencies=[Depends(get_current_user)])
@@ -161,7 +162,7 @@ async def get_leaves(status: Optional[str] = None, leave_type: Optional[str] = N
         return fetch_all_pages(lambda start, end: _query().range(start, end).execute(), extract_rows=rows)
     except Exception as e:
         logger.error(f"Error fetching leaves: {str(e)}\n{traceback.format_exc()}")
-        raise HTTPException(status_code=500, detail=f"Error fetching leaves: {str(e)}")
+        raise server_error(e, "Loading leaves")
 
 # ---------- GET leave stats ----------
 @router.get("/stats/summary")  # deliberately open — aggregate counts, not individual records
@@ -217,7 +218,7 @@ async def bulk_update_leave_status(
         return BulkLeaveStatusResponse(succeeded=succeeded, failed=failed, updated=updated)
     except Exception as e:
         logger.error(f"Error bulk-updating leave status: {str(e)}\n{traceback.format_exc()}")
-        raise HTTPException(status_code=500, detail=f"Error bulk-updating leaves: {str(e)}")
+        raise server_error(e, "Bulk-updating leaves")
 
 
 # ---------- GET leave by id ----------
@@ -243,7 +244,7 @@ async def update_leave(leave_id: int, updated: LeaveUpdate, authorization: Optio
     try:
         existing = get_or_404(supabase, "leaves", leave_id, detail=f"Leave with ID {leave_id} not found")
 
-        data_to_update = updated.dict(exclude_unset=True)
+        data_to_update = updated.model_dump(exclude_unset=True)
 
         if (
             'start_date' in data_to_update
@@ -281,7 +282,7 @@ async def update_leave(leave_id: int, updated: LeaveUpdate, authorization: Optio
         return updated_row
     except Exception as e:
         logger.error(f"Error updating leave {leave_id}: {str(e)}\n{traceback.format_exc()}")
-        raise HTTPException(status_code=500, detail=f"Error updating leave: {str(e)}")
+        raise server_error(e, "Updating leave")
 
 # ---------- DELETE leave ----------
 @router.delete("/{leave_id}")
@@ -294,4 +295,4 @@ async def delete_leave(leave_id: int, current_user: dict = Depends(require_role(
         return {"success": True, "detail": f"Leave {leave_id} deleted"}
     except Exception as e:
         logger.error(f"Error deleting leave {leave_id}: {str(e)}\n{traceback.format_exc()}")
-        raise HTTPException(status_code=500, detail=f"Error deleting leave: {str(e)}")
+        raise server_error(e, "Deleting leave")

@@ -90,3 +90,18 @@ async def test_bulk_normalize_counts_missing_rows(patch_supabase):
     assert result.succeeded == 0
     assert result.failed == 1
     assert "not found" in result.errors[0]
+
+
+async def test_bulk_normalize_explicit_null_clears_omitted_is_untouched(patch_supabase):
+    fake = patch_supabase([
+        [{"id": 1, "section": None}],
+    ])
+    body = BulkNormalizeRequest(updates=[
+        BulkNormalizeItem(id=1, designation="Clerk", section=None),
+    ])
+    result = await bulk_normalize_employees(body)
+    assert result.succeeded == 1
+    payload = fake.calls[0]["payload"]
+    assert payload["section"] is None
+    assert payload["designation"] == "Clerk"
+    assert "phone" not in payload and "archived" not in payload and "id" not in payload

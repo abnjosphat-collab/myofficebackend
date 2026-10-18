@@ -6,20 +6,48 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Literal, Optional
 from xml.etree import ElementTree
 
-from fastapi import APIRouter, Depends, File, Form, Header, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, Form, Header, HTTPException, Request, UploadFile
 from fastapi.responses import Response
 from openpyxl import load_workbook
 from pydantic import BaseModel, Field, field_validator
 from app.supabase_client import rows, supabase
 from app.db_helpers import fetch_all_pages
+from app.rate_limit import limiter
+import time as _time
 
 router = APIRouter()
-TABLE = {"accounts":"tools_workspace_accounts","sessions":"tools_workspace_sessions","employees":"tools_workspace_employees","tools":"tools_workspace_equipment","history":"tools_workspace_history","changes":"tools_workspace_changes","evidence":"tools_workspace_evidence","source_registers":"tools_workspace_source_registers","usage":"tools_workspace_usage","errors":"tools_workspace_errors","feedback":"tools_workspace_feedback","notification_reads":"tools_workspace_notification_reads","competencies":"tools_workspace_competencies","inspections":"tools_workspace_inspections","incidents":"tools_workspace_incidents","gate_passes":"tools_workspace_gate_passes","gate_pass_items":"tools_workspace_gate_pass_items","gate_pass_approvals":"tools_workspace_gate_pass_approvals"}
+TABLE = {"accounts":"tools_workspace_accounts","sessions":"tools_workspace_sessions","employees":"tools_workspace_employees","tools":"tools_workspace_equipment","history":"tools_workspace_history","changes":"tools_workspace_changes","evidence":"tools_workspace_evidence","source_registers":"tools_workspace_source_registers","usage":"tools_workspace_usage","errors":"tools_workspace_errors","feedback":"tools_workspace_feedback","notification_reads":"tools_workspace_notification_reads","competencies":"tools_workspace_competencies","inspections":"tools_workspace_inspections","incidents":"tools_workspace_incidents","gate_passes":"tools_workspace_gate_passes","gate_pass_items":"tools_workspace_gate_pass_items","gate_pass_approvals":"tools_workspace_gate_pass_approvals","password_requests":"password_reset_requests"}
 FEEDBACK_BUCKET = "tools-workspace-feedback"
 EVIDENCE_BUCKET = "tools-workspace-evidence"
 SOURCE_REGISTERS_BUCKET = "tools-workspace-source-registers"
 _test_mode = False
 _memory: dict[str,list[dict[str,Any]]] = {key:[] for key in TABLE}
+# Failed Tools-login attempts per lowercased username (monotonic timestamps).
+# In-process only: a restart clears it, and with several workers each counts
+# its own — 5 failures/15min per worker, not globally. Deliberately separate
+# from slowapi's per-IP limits: this survives IP rotation (one attacker, many
+# proxies) and targets credential-stuffing of a single account instead.
+_LOGIN_FAIL_MAX = 5
+_LOGIN_FAIL_WINDOW_SECONDS = 15 * 60
+_login_failures: dict[str, list[float]] = {}
+
+
+def _login_allowed(username: str) -> bool:
+    now = _time.monotonic()
+    recent = [t for t in _login_failures.get(username, []) if now - t < _LOGIN_FAIL_WINDOW_SECONDS]
+    _login_failures[username] = recent
+    return len(recent) < _LOGIN_FAIL_MAX
+
+
+def _record_login_failure(username: str) -> None:
+    now = _time.monotonic()
+    recent = [t for t in _login_failures.get(username, []) if now - t < _LOGIN_FAIL_WINDOW_SECONDS]
+    recent.append(now)
+    _login_failures[username] = recent
+
+
+def _clear_login_failures(username: str) -> None:
+    _login_failures.pop(username, None)
 
 def _now(): return datetime.now(timezone.utc).isoformat()
 def _hash_password(password: str, salt: Optional[bytes]=None):
@@ -132,6 +160,12 @@ class Login(BaseModel): username:str; password:str
 ApprovalRole = Literal["hos","hod","security","finance","general_manager"]
 class AccountRoleUpdate(BaseModel):
     role:Literal["admin","issuer","viewer"]; department:Optional[str]=Field(default=None,max_length=100); approval_roles:list[ApprovalRole]=Field(default_factory=list,max_length=5)
+class AccountPasswordReset(BaseModel):
+    password:str=Field(min_length=6,max_length=128)
+class PasswordResetRequest(BaseModel):
+    username:str
+class PasswordChange(BaseModel):
+    current_password:str; new_password:str=Field(min_length=6,max_length=128)
 class EmployeeInput(BaseModel):
     employee_number:Optional[str]=Field(default=None,max_length=60); name:str=Field(min_length=2,max_length=120); department:str=Field(min_length=1,max_length=100); job_title:Optional[str]=Field(default=None,max_length=100); supervisor_name:Optional[str]=Field(default=None,max_length=120)
     @field_validator("employee_number",mode="before")
@@ -291,7 +325,8 @@ def _active_notifications():
 def _new_session(account_id):
     token=secrets.token_urlsafe(32); _insert("sessions",{"id":str(uuid.uuid4()),"token_hash":_token_hash(token),"account_id":account_id,"created_at":_now(),"expires_at":(datetime.now(timezone.utc)+timedelta(days=7)).isoformat()}); return token
 @router.post("/auth/register",status_code=201)
-def register(body:RegisterAccount):
+@limiter.limit("5/minute")
+def register(request:Request,body:RegisterAccount):
     username=body.username.strip().lower()
     if _find("accounts","username",username): raise HTTPException(409,"That username is already in use.")
     # The first account bootstraps administration. Every later self-registration is view-only;
@@ -300,11 +335,20 @@ def register(body:RegisterAccount):
     salt,digest=_hash_password(body.password); account=_insert("accounts",{"id":str(uuid.uuid4()),"name":body.name.strip(),"username":username,"salt":salt,"password_hash":digest,"role":role,"department":None,"can_issue":False,"approval_roles":[],"signing_pin_salt":None,"signing_pin_hash":None,"created_at":_now()})
     return {"token":_new_session(account["id"]),"account":_public(account)}
 @router.post("/auth/login")
-def login(body:Login):
-    account=_find("accounts","username",body.username.strip().lower())
-    if not account: raise HTTPException(401,"Username or password is incorrect.")
+@limiter.limit("10/minute")
+def login(request:Request,body:Login):
+    username=body.username.strip().lower()
+    if not _login_allowed(username):
+        raise HTTPException(429,"Too many failed sign-in attempts for this username. Try again in a few minutes.")
+    account=_find("accounts","username",username)
+    if not account:
+        _record_login_failure(username)
+        raise HTTPException(401,"Username or password is incorrect.")
     _,candidate=_hash_password(body.password,bytes.fromhex(account["salt"]))
-    if not hmac.compare_digest(candidate,account["password_hash"]): raise HTTPException(401,"Username or password is incorrect.")
+    if not hmac.compare_digest(candidate,account["password_hash"]):
+        _record_login_failure(username)
+        raise HTTPException(401,"Username or password is incorrect.")
+    _clear_login_failures(username)
     return {"token":_new_session(account["id"]),"account":_public(account)}
 @router.get("/auth/me")
 def me(account=Depends(_session)): return _public(account)
@@ -319,6 +363,32 @@ def update_account_role(account_id:str,body:AccountRoleUpdate,admin=Depends(_adm
     if account_id==admin["id"] and body.role!="admin": raise HTTPException(409,"Assign another administrator before changing your own administrator role.")
     updated=_update("accounts",account_id,{"role":body.role,"department":department if body.role!="admin" else None,"can_issue":body.role=="issuer","approval_roles":list(dict.fromkeys(body.approval_roles))})
     return _public(updated)
+@router.post("/accounts/{account_id}/reset-password")
+def reset_account_password(account_id:str,body:AccountPasswordReset,_=Depends(_admin)):
+    account=_find("accounts","id",account_id)
+    if not account: raise HTTPException(404,"Account was not found.")
+    salt,digest=_hash_password(body.password)
+    _update("accounts",account_id,{"salt":salt,"password_hash":digest})
+    for row in _all("password_requests"):
+        if row.get("source")=="tools" and (row.get("identifier") or "").lower()==(account.get("username") or "").lower() and row.get("status")=="pending":
+            _update("password_requests",row["id"],{"status":"done","resolved_at":_now()})
+    return {"ok":True}
+@router.post("/auth/request-password-reset")
+def request_password_reset(body:PasswordResetRequest):
+    username=(body.username or "").strip().lower()
+    if username and _find("accounts","username",username) and not any(row.get("source")=="tools" and (row.get("identifier") or "").lower()==username and row.get("status")=="pending" for row in _all("password_requests")):
+        _insert("password_requests",{"id":str(uuid.uuid4()),"source":"tools","identifier":username,"status":"pending","created_at":_now(),"resolved_at":None})
+    return {"ok":True}
+@router.get("/password-requests")
+def list_password_requests(_=Depends(_admin)):
+    return [row for row in _all("password_requests") if row.get("source")=="tools" and row.get("status")=="pending"]
+@router.put("/auth/password")
+def change_own_password(body:PasswordChange,account=Depends(_session)):
+    _,candidate=_hash_password(body.current_password,bytes.fromhex(account["salt"]))
+    if not hmac.compare_digest(candidate,account["password_hash"]): raise HTTPException(401,"The current password is incorrect.")
+    salt,digest=_hash_password(body.new_password)
+    _update("accounts",account["id"],{"salt":salt,"password_hash":digest})
+    return {"ok":True}
 
 @router.put("/auth/signing-pin")
 def set_signing_pin(body:SigningPinInput,account=Depends(_session)):
@@ -333,11 +403,19 @@ def notifications(account=Depends(_session)):
     read={row["alert_key"] for row in read_rows}
     department=_department_scope(account)
     alerts=[{**alert,"read":alert["key"] in read} for alert in _active_notifications() if department is None or alert.get("department")==department]
+    if _account_role(account)=="admin":
+        for row in _all("password_requests"):
+            if row.get("source")=="tools" and row.get("status")=="pending":
+                holder=_find("accounts","username",(row.get("identifier") or "").lower())
+                key=f"password-request:{row['id']}"
+                alerts.append({"key":key,"kind":"password_request","account_name":holder["name"] if holder else row.get("identifier"),"username":row.get("identifier"),"department":"all","read":key in read})
     return {"alerts":alerts,"unread_count":sum(not alert["read"] for alert in alerts)}
 
 @router.post("/notifications/read",status_code=202)
 def read_notifications(body:NotificationReadInput,account=Depends(_session)):
-    active={alert["key"] for alert in _active_notifications()}; accepted=list(dict.fromkeys(key for key in body.keys if key in active))
+    active={alert["key"] for alert in _active_notifications()}
+    if _account_role(account)=="admin": active|={f"password-request:{row['id']}" for row in _all("password_requests") if row.get("source")=="tools" and row.get("status")=="pending"}
+    accepted=list(dict.fromkeys(key for key in body.keys if key in active))
     for key in accepted:
         row={"account_id":account["id"],"alert_key":key,"read_at":_now()}
         if _test_mode:
@@ -773,3 +851,4 @@ def commit_import(body:ImportCommit,account=Depends(_operator)):
 def _reset_for_tests():
     global _test_mode; _test_mode=True
     for values in _memory.values(): values.clear()
+    _login_failures.clear()

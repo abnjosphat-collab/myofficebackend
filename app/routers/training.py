@@ -22,6 +22,7 @@ from app.auth import get_current_user, require_role
 from app.db_helpers import response_rows
 from app.supabase_client import supabase
 from app.uploads import read_and_validate_upload
+from app.errors import server_error
 
 logger = logging.getLogger(__name__)
 
@@ -101,7 +102,7 @@ async def _store_certificate(file: UploadFile) -> tuple[str, str]:
     try:
         supabase.storage.from_(BUCKET).upload(path, content, {"content-type": file.content_type or "application/octet-stream"})
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Certificate upload failed: {e}")
+        raise server_error(e, "Certificate upload")
     try:
         url = supabase.storage.from_(BUCKET).get_public_url(path)
     except Exception as e:
@@ -150,7 +151,7 @@ async def create_new_certification(
         saved = response_rows(supabase.table(TABLE).insert(row).execute())
     except Exception as e:
         _remove_file(path)
-        raise HTTPException(status_code=500, detail=f"The certification was not saved: {e}")
+        raise server_error(e, "Saving certification")
     if not saved:
         _remove_file(path)
         raise HTTPException(status_code=500, detail="The certification was not saved.")
@@ -193,7 +194,7 @@ async def update_certification(
         saved = response_rows(supabase.table(TABLE).update(patch).eq("id", record_id).execute())
     except Exception as e:
         _remove_file(new_path)
-        raise HTTPException(status_code=500, detail=f"The certification was not updated: {e}")
+        raise server_error(e, "Updating certification")
     if not saved:  # deleted by someone else since it was read: say so instead of reporting a save that did not happen
         _remove_file(new_path)
         raise HTTPException(status_code=404, detail="Certification record not found; it may have just been deleted.")
@@ -209,7 +210,7 @@ async def delete_certification(record_id: str, current_user: dict = Depends(requ
     try:
         supabase.table(TABLE).delete().eq("id", record_id).execute()
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"The certification was not deleted: {e}")
+        raise server_error(e, "Deleting certification")
     _remove_file(existing.get("certificate_path"))
     return {"message": "Certification record deleted successfully"}
 

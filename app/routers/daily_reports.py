@@ -13,6 +13,7 @@ import os
 from dotenv import load_dotenv
 import traceback
 from app.supabase_client import rows, one_row
+from app.errors import server_error
 
 # Load environment variables
 load_dotenv()
@@ -81,28 +82,26 @@ def format_supabase_response(data):
 @router.get("/health/check")
 async def health_check():
     """Check database health"""
+    # Status only — no report counts (DB details) and no exception text in
+    # the response; failures are logged server-side.
     try:
         if not supabase:
             return {
                 "status": "connected",
-                "report_count": 0,
                 "message": "Running in local mode"
             }
-        
+
         # Test connection
-        result = supabase.table("daily_reports").select("*", count="exact").limit(1).execute()
-        count = result.count if hasattr(result, 'count') else 0
-        
+        supabase.table("daily_reports").select("*", count="exact").limit(1).execute()
+
         return {
             "status": "healthy",
-            "report_count": count,
             "timestamp": datetime.now().isoformat()
         }
     except Exception as e:
         logger.error(f"Health check error: {e}")
         return {
             "status": "error",
-            "message": str(e),
             "timestamp": datetime.now().isoformat()
         }
 
@@ -152,7 +151,7 @@ async def get_reports(
     except Exception as e:
         logger.error(f"❌ Error in get_reports: {str(e)}")
         logger.error(traceback.format_exc())
-        raise HTTPException(status_code=500, detail=f"Error fetching reports: {str(e)}")
+        raise server_error(e, "Loading reports")
 
 # POST report endpoint - CRITICAL: This was being hidden by duplicate routes
 @router.post("/")
@@ -165,7 +164,7 @@ async def create_report(report: DailyReportCreate, current_user: dict = Depends(
             # Return dummy data for testing
             return {
                 "id": 1,
-                **report.dict(),
+                **report.model_dump(),
                 "created_at": datetime.now().isoformat(),
                 "updated_at": datetime.now().isoformat()
             }
@@ -178,7 +177,7 @@ async def create_report(report: DailyReportCreate, current_user: dict = Depends(
         existing_row = one_row(existing)
 
         # Prepare data
-        report_data = report.dict()
+        report_data = report.model_dump()
         report_data = encode_json_fields(report_data, ['call_outs', 'equipment'])
 
         now = datetime.now().isoformat()
@@ -209,7 +208,7 @@ async def create_report(report: DailyReportCreate, current_user: dict = Depends(
     except Exception as e:
         logger.error(f"❌ Error in create_report: {str(e)}")
         logger.error(traceback.format_exc())
-        raise HTTPException(status_code=500, detail=f"Error creating report: {str(e)}")
+        raise server_error(e, "Creating report")
 
 # Stats endpoint
 @router.get("/stats/summary", dependencies=[Depends(get_current_user)])
@@ -428,7 +427,7 @@ async def delete_all_reports(current_user: dict = Depends(require_role('manager'
         
     except Exception as e:
         logger.error(f"❌ Error deleting reports: {e}")
-        raise HTTPException(status_code=500, detail=f"Error deleting reports: {str(e)}")
+        raise server_error(e, "Deleting reports")
 
 # Export endpoints
 @router.get("/export/excel", dependencies=[Depends(get_current_user)])

@@ -175,7 +175,8 @@ async def test_health_check_reports_unhealthy_on_db_error(patch_supabase):
     patch_supabase(raise_error=True)
     result = await spares_health_check()
     assert result["status"] == "unhealthy"
-    assert "error" in result
+    assert result["database"] == "disconnected"
+    assert "error" not in result  # status only, no exception text
 
 
 # ─── export_spares ──────────────────────────────────────────────────────────────────

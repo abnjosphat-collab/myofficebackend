@@ -32,3 +32,11 @@ Thumbs.db
 data/nec_import_snapshots/*.json
 data/nec_import_jobs/
 tmp/
+
+# Untracked 2026-10-18: stray JS pandas, dev sqlite files, local upload copies.
+# Notice attachments live in Supabase Storage (ams-documents), not here.
+node_modules/
+*.db
+uploads/
+/package.json
+/package-lock.json

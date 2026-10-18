@@ -7,6 +7,7 @@ from app.supabase_client import supabase
 from app.auth import get_current_user, require_role
 from app.uploads import read_and_validate_upload, DOCUMENT_EXTS
 from app.db_helpers import fetch_all_pages
+from app.errors import server_error
 from starlette.concurrency import run_in_threadpool
 
 # Alias prevents the Pydantic field named 'date' from shadowing datetime.date in type
@@ -114,7 +115,7 @@ async def list_services():
         ))
     except Exception as e:
         logger.error(f"list_services error: {e}")
-        raise HTTPException(500, str(e))
+        raise server_error(e, "Loading services")
 
 
 @router.post("")
@@ -129,7 +130,7 @@ async def create_service(body: ServiceIn, current_user: dict = Depends(get_curre
         return r.data[0]
     except Exception as e:
         logger.error(f"create_service error: {e}")
-        raise HTTPException(500, str(e))
+        raise server_error(e, "Creating service")
 
 
 # ── OCR helpers ───────────────────────────────────────────────────────────────
@@ -274,7 +275,7 @@ async def update_service(service_id: str, body: ServiceIn, current_user: dict = 
         raise
     except Exception as e:
         logger.error(f"update_service error: {e}")
-        raise HTTPException(500, str(e))
+        raise server_error(e, "Updating service")
 
 
 @router.get("/{service_id}/signatures", dependencies=[Depends(get_current_user)])
@@ -284,7 +285,7 @@ async def get_stage_signatures(service_id: str):
         r = supabase.table("services").select("stage_signatures").eq("id", service_id).execute()
     except Exception as e:
         logger.error(f"get_stage_signatures error: {e}")
-        raise HTTPException(500, str(e))
+        raise server_error(e, "Loading stage signatures")
     rows = cast(list[dict[str, Any]], r.data)
     if not rows:
         raise HTTPException(404, "Service record not found")
@@ -310,7 +311,7 @@ async def put_stage_signature(service_id: str, stage: str, body: StageSignatureI
         raise
     except Exception as e:
         logger.error(f"put_stage_signature error: {e}")
-        raise HTTPException(500, str(e))
+        raise server_error(e, "Saving stage signature")
 
 
 @router.delete("/{service_id}")
@@ -320,7 +321,7 @@ async def delete_service(service_id: str, current_user: dict = Depends(require_r
         return {"ok": True}
     except Exception as e:
         logger.error(f"delete_service error: {e}")
-        raise HTTPException(500, str(e))
+        raise server_error(e, "Deleting service")
 
 
 # ── Attachments ────────────────────────────────────────────────────────────────
@@ -338,7 +339,7 @@ async def list_attachments(service_id: str):
              .execute())
         return r.data or []
     except Exception as e:
-        raise HTTPException(500, str(e))
+        raise server_error(e, "Loading attachments")
 
 
 @router.post("/{service_id}/attachments")
@@ -356,7 +357,7 @@ async def upload_attachment(service_id: str, file: UploadFile = File(...), curre
             {"content-type": file.content_type or "application/octet-stream"},
         )
     except Exception as e:
-        raise HTTPException(500, f"Storage upload failed: {e}")
+        raise server_error(e, "Storage upload")
 
     try:
         file_url = supabase.storage.from_(BUCKET).get_public_url(storage_path)
@@ -397,4 +398,4 @@ async def delete_attachment(service_id: str, attachment_id: str, current_user: d
         supabase.table("service_attachments").delete().eq("id", attachment_id).execute()
         return {"ok": True}
     except Exception as e:
-        raise HTTPException(500, str(e))
+        raise server_error(e, "Deleting attachment")

@@ -7,6 +7,7 @@ from app.supabase_client import supabase
 from app.auth import get_current_user, require_role
 from app.cache import cached, invalidate_namespace
 from app.db_helpers import get_or_404
+from app.errors import server_error
 import logging
 
 logger = logging.getLogger(__name__)
@@ -152,7 +153,7 @@ async def get_equipment():
         return processed_equipment
     except Exception as e:
         logger.error(f"Error fetching equipment: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Error fetching equipment: {str(e)}")
+        raise server_error(e, "Loading equipment")
 
 @router.get("/{equipment_id}", dependencies=[Depends(get_current_user)])
 async def get_equipment_item(equipment_id: int):
@@ -165,7 +166,7 @@ async def get_equipment_item(equipment_id: int):
         raise
     except Exception as e:
         logger.error(f"Error fetching equipment {equipment_id}: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Error fetching equipment: {str(e)}")
+        raise server_error(e, "Loading equipment")
 
 @router.post("")
 @router.post("/")
@@ -174,7 +175,7 @@ async def create_equipment(equipment: Equipment, current_user: dict = Depends(ge
     try:
         # display_name is a computed field (derived, not a real column) — exclude
         # it from the write payload or Supabase rejects the insert.
-        data_to_insert = equipment.dict(exclude_none=True, exclude={'display_name'})
+        data_to_insert = equipment.model_dump(exclude_none=True, exclude={'display_name'})
         
         # Auto-generate equipment_id if not provided
         if not data_to_insert.get('equipment_id'):
@@ -198,11 +199,7 @@ async def create_equipment(equipment: Equipment, current_user: dict = Depends(ge
         raise
     except Exception as e:
         logger.error(f"Error creating equipment: {str(e)}")
-        # Return more detailed error info
-        error_detail = str(e)
-        if hasattr(e, 'message'):
-            error_detail = e.message
-        raise HTTPException(status_code=500, detail=f"Error creating equipment: {error_detail}")
+        raise server_error(e, "Creating equipment")
 
 @router.put("/{equipment_id}")
 async def update_equipment(equipment_id: int, updated: Equipment, current_user: dict = Depends(get_current_user)):
@@ -217,7 +214,10 @@ async def update_equipment(equipment_id: int, updated: Equipment, current_user: 
                 detail=f"Equipment with ID {equipment_id} not found"
             )
         
-        data_to_update = updated.dict(exclude_none=True, exclude={'display_name'})
+        # exclude_unset, not exclude_none: an explicitly-sent null must clear the
+        # field, and the status default ("operational") must not clobber a stored
+        # value on an unrelated edit. See work_orders (backend edec24a).
+        data_to_update = updated.model_dump(exclude_unset=True, exclude={'display_name'})
         data_to_update = process_dates_for_db(data_to_update)
         
         # Don't update equipment_id if it already exists
@@ -238,7 +238,7 @@ async def update_equipment(equipment_id: int, updated: Equipment, current_user: 
         raise
     except Exception as e:
         logger.error(f"Error updating equipment {equipment_id}: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Error updating equipment: {str(e)}")
+        raise server_error(e, "Updating equipment")
 
 @router.delete("/{equipment_id}")
 async def delete_equipment(equipment_id: int, current_user: dict = Depends(require_role('manager'))):
@@ -268,7 +268,7 @@ async def delete_equipment(equipment_id: int, current_user: dict = Depends(requi
         raise
     except Exception as e:
         logger.error(f"Error deleting equipment {equipment_id}: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Error deleting equipment: {str(e)}")
+        raise server_error(e, "Deleting equipment")
 
 @router.get("/health/status", tags=["Health"])
 async def equipment_health():
@@ -284,7 +284,8 @@ async def equipment_health():
             "message": "Equipment service is operational"
         }
     except Exception as e:
+        logger.error(f"Equipment health check failed: {e}")
         raise HTTPException(
             status_code=503,
-            detail=f"Equipment service is unhealthy: {str(e)}"
+            detail="Equipment service is unhealthy."
         )

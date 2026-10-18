@@ -106,7 +106,10 @@ async def test_database_errors_are_500_not_an_empty_success(fake, op, call):
     fake({"raise_op": op, "raise_msg": "db down"})
     with pytest.raises(HTTPException) as exc:
         await call()
-    assert exc.value.status_code == 500 and "db down" in exc.value.detail
+    # 500s are generic since the server_error codemod: no internal text leaks.
+    assert exc.value.status_code == 500
+    assert "db down" not in exc.value.detail
+    assert "(ref " in exc.value.detail
 
 
 # ─── saved quotations ────────────────────────────────────────────────────────────────
