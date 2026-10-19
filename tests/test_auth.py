@@ -113,7 +113,7 @@ async def test_auth_service_outage_is_retryable_not_invalid_session(patch_supaba
 async def test_get_current_user_valid(patch_supabase):
     patch_supabase(user=_FakeUser("u-9", "x@y.com"), role="manager")
     result = await auth.get_current_user("Bearer good-token")
-    assert result == {"user_id": "u-9", "email": "x@y.com", "role": "manager"}
+    assert result == {"user_id": "u-9", "email": "x@y.com", "role": "manager", "name": "X"}
 
 
 async def test_slow_auth_does_not_block_other_requests(patch_supabase):
@@ -176,7 +176,7 @@ async def test_get_current_user_optional_invalid_token_returns_none(patch_supaba
 async def test_get_current_user_optional_valid_token_returns_user(patch_supabase):
     patch_supabase(user=_FakeUser("u-9", "x@y.com"), role="manager")
     result = await auth.get_current_user_optional("Bearer good-token")
-    assert result == {"user_id": "u-9", "email": "x@y.com", "role": "manager"}
+    assert result == {"user_id": "u-9", "email": "x@y.com", "role": "manager", "name": "X"}
 
 
 # ─── MFA gate (server-side aal2 enforcement) ──────────────────────────────────
@@ -213,7 +213,7 @@ async def test_mfa_enrolled_aal2_passes(patch_supabase):
         role="manager",
     )
     result = await auth.get_current_user(f"Bearer {_jwt_with_aal('aal2')}")
-    assert result == {"user_id": "u-9", "email": "x@y.com", "role": "manager"}
+    assert result == {"user_id": "u-9", "email": "x@y.com", "role": "manager", "name": "X"}
 
 
 async def test_mfa_unenrolled_aal1_passes(patch_supabase):
@@ -333,7 +333,7 @@ async def test_auth_cache_second_call_skips_supabase(patch_supabase, monkeypatch
     auth.supabase.rpc = counting_rpc
     first = await auth.get_current_user("Bearer [REDACTED]")
     second = await auth.get_current_user("Bearer [REDACTED]")
-    assert first == second == {"user_id": "u-9", "email": "x@y.com", "role": "manager"}
+    assert first == second == {"user_id": "u-9", "email": "x@y.com", "role": "manager", "name": "X"}
     assert len(get_user_calls) == 1, "2nd request must not re-verify the token"
     assert len(rpc_calls) == 1, "2nd request must not re-fetch the role"
 
@@ -426,3 +426,22 @@ async def test_cached_entry_from_flag_off_is_reverified_when_flag_on(patch_supab
     with pytest.raises(HTTPException) as exc:
         await auth.get_current_user(token)
     assert exc.value.headers == {"X-Auth-Reason": "mfa_required"}
+
+
+# ─── display_name: who a record says approved or changed it ─────────────────────────────────────────────────────────
+
+class _U:
+    def __init__(self, email="", meta=None):
+        self.email = email
+        self.user_metadata = meta
+
+
+def test_display_name_prefers_the_profile_name():
+    assert auth.display_name(_U("x@y.z", {"full_name": "  Elias   Mwazha "})) == "Elias Mwazha"
+    assert auth.display_name(_U("x@y.z", {"name": "Edson Mavhondo"})) == "Edson Mavhondo"
+
+
+def test_display_name_falls_back_to_a_readable_email():
+    assert auth.display_name(_U("tafadzwa.matangira@dallaglio.co.zw", {})) == "Tafadzwa Matangira"
+    assert auth.display_name(_U("o_neil-smith@x.com", None)) == "O Neil Smith"
+    assert auth.display_name(_U("", None)) == ""

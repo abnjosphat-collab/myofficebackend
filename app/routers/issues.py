@@ -200,4 +200,4 @@ async def get_stats():
         # genuinely quiet week. Raise instead, matching this project's standard
         # (backend/docs/ENGINEERING_STANDARDS.md).
         logger.error(f"Error fetching issue stats: {e}")
-        raise HTTPException(status_code=500, detail="Failed to load issue stats")
+        raise server_error(e, "Loading stats")

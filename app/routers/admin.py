@@ -91,8 +91,9 @@ def _auth_admin_request(method: str, path: str) -> tuple[int, Any]:
     try:
         with urllib.request.urlopen(req, timeout=15) as resp:
             return resp.status, json.loads(resp.read().decode() or "{}")
-    except urllib.error.HTTPError as e:
-        raise HTTPException(status_code=502, detail=f"Auth admin call failed (HTTP {e.code}).")
+    except urllib.error.HTTPError as http_error:
+        upstream_status = http_error.code  # a number only: nothing from the response body reaches the person
+        raise HTTPException(status_code=502, detail=f"Auth admin call failed (HTTP {upstream_status}).")
     except Exception as e:
         logger.error(f"Auth admin call {method} {path} failed: {e}")
         raise HTTPException(status_code=502, detail="Auth admin call failed.")
@@ -192,7 +193,7 @@ async def invite_user(body: InviteUserRequest, current_user: dict = Depends(requ
             # distinct warning rather than a full failure, since retrying the whole
             # invite would send a second email for what's really just a role bump.
             logger.error(f"Invited {body.email} but failed to set role={body.role}: {e}")
-            raise HTTPException(status_code=207, detail=f"Invited, but failed to set role: {e}")
+            raise HTTPException(status_code=207, detail="Invited, but the role could not be set. Set it from the Admin page.")
 
     return {"id": result.user.id, "email": body.email, "role": body.role}
 

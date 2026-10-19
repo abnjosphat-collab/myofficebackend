@@ -549,7 +549,7 @@ async def get_dashboard_overview():
         # from a genuinely healthy plant with zero breakdowns, and it reached the
         # homepage KPI tile with nothing telling anyone the DB call actually failed.
         # A real error status lets the frontend show a real error state instead.
-        raise HTTPException(status_code=500, detail="Failed to load dashboard metrics")
+        raise server_error(e, "Loading dashboard overview")
 
 @router.get("/health/check")
 async def health_check():

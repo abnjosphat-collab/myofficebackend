@@ -12,7 +12,8 @@ from pydantic import BaseModel, Field
 from app.auth import get_current_user, require_role
 from app.nec_import import job_store
 from app.nec_import.apply_runner import run_import_from_review
-from app.nec_import.extraction.registry import get_extraction_provider
+from app.errors import server_error
+from app.nec_import.extraction.registry import NOT_CONFIGURED_MESSAGE, ExtractionNotConfigured, get_extraction_provider
 from app.nec_import.pdf_render import render_page_png
 from app.nec_import.preview import build_preview
 from app.nec_import.review_schema import validate_review_payload
@@ -145,7 +146,10 @@ async def run_extract(job_id: str):
         return {"status": "review_ready", "provider": provider.name}
     except Exception as exc:
         job_store.set_job_status(job_id, "review_ready" if (job_store.job_dir(job_id) / "review.json").is_file() else "uploaded", str(exc))
-        raise HTTPException(502, detail=str(exc))
+        # Only our own "not configured" message is for the person; anything else (a provider's error, a path) stays in the log.
+        if isinstance(exc, ExtractionNotConfigured):
+            raise HTTPException(502, detail=NOT_CONFIGURED_MESSAGE)
+        raise server_error(exc, "Reading the scan", 502)
 
 
 @router.get("/jobs/{job_id}/preview", dependencies=[Depends(get_current_user)])

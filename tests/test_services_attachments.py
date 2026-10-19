@@ -330,7 +330,7 @@ async def test_ocr_document_scanned_page_hits_missing_easyocr_dependency_as_502(
     with pytest.raises(HTTPException) as exc:
         await ocr_document(file, current_user=CURRENT_USER)
     assert exc.value.status_code == 502
-    assert "OCR extraction failed" in exc.value.detail
+    assert exc.value.detail.startswith("Reading the document failed. Please try again. (ref ")
 
 
 async def test_ocr_document_image_mime_also_requires_ocr_and_hits_missing_dependency(monkeypatch):

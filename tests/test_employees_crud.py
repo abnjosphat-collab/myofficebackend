@@ -284,6 +284,7 @@ async def test_update_employee_changed_id_succeeds_when_unique(patch_supabase):
         [{"id": 5, "employee_id": "OLD_ID"}],  # existence check
         [],                                     # clash check: no collision
         [{"id": 5, "employee_id": "NEW_ID", "date_of_engagement": "2020-01-01"}],  # update
+        [], [], [],                             # the new id is carried into overtime, leaves and PPE
     ])
     result = await update_employee(5, _employee(employee_id="NEW_ID"), current_user={"user_id": "u1"})
     assert result["employee_id"] == "NEW_ID"
@@ -341,6 +342,7 @@ async def test_delete_employee_not_found_is_404(patch_supabase):
 async def test_delete_employee_success_reports_name_and_id(patch_supabase):
     calls = patch_supabase([
         [{"id": 5, "employee_id": "C1165", "first_name": "John", "last_name": "Doe"}],
+        [], [], [],  # no overtime, leave or PPE records use this person
         None,  # delete().execute() response, unused by the handler
     ])
     result = await delete_employee(5, current_user={"user_id": "u1", "role": "manager"})
@@ -351,6 +353,7 @@ async def test_delete_employee_success_reports_name_and_id(patch_supabase):
 async def test_delete_employee_blank_name_falls_back_to_unknown(patch_supabase):
     patch_supabase([
         [{"id": 5, "employee_id": "C1165", "first_name": "", "last_name": ""}],
+        [], [], [],
         None,
     ])
     result = await delete_employee(5, current_user={"user_id": "u1", "role": "manager"})
@@ -362,3 +365,39 @@ async def test_delete_employee_db_failure_is_500(patch_supabase):
     with pytest.raises(HTTPException) as exc:
         await delete_employee(5, current_user={"user_id": "u1", "role": "manager"})
     assert exc.value.status_code == 500
+
+
+# ─── history follows the person ────────────────────────────────────────────────────────────────────────────────────
+
+async def test_changing_the_employee_id_carries_overtime_leave_and_ppe_with_it(patch_supabase):
+    calls = patch_supabase([
+        [{"id": 5, "employee_id": "OLD_ID"}], [],
+        [{"id": 5, "employee_id": "NEW_ID", "date_of_engagement": "2020-01-01"}],
+        [], [], [],
+    ])
+    await update_employee(5, _employee(employee_id="NEW_ID"), current_user={"user_id": "u1"})
+    follow = [c for c in calls if c["op"] == "update" and c["payload"] == {"employee_id": "NEW_ID"}]
+    assert [c["table"] for c in follow] == ["overtime", "leaves", "ppe_records"]
+    assert all(("eq", "employee_id", "OLD_ID") in c["filters"] for c in follow)
+
+
+async def test_an_employee_with_records_cannot_be_deleted(patch_supabase):
+    calls = patch_supabase([
+        [{"id": 5, "employee_id": "C1165", "first_name": "John", "last_name": "Doe"}],
+        [{"id": 77}],   # overtime uses this person
+        [], [],
+    ])
+    with pytest.raises(HTTPException) as exc:
+        await delete_employee(5, current_user={"user_id": "u1", "role": "manager"})
+    assert exc.value.status_code == 409 and "Archive the employee instead" in exc.value.detail
+    assert not any(c["op"] == "delete" for c in calls)
+
+
+def test_names_are_trimmed_and_single_spaced():
+    e = _employee(first_name=" Tafadzwa ", last_name="Stanley   Musevenzo")
+    assert e.first_name == "Tafadzwa" and e.last_name == "Stanley Musevenzo"
+
+
+def test_a_blank_name_is_refused():
+    with pytest.raises(Exception):
+        _employee(first_name="   ")

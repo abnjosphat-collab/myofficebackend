@@ -8,6 +8,7 @@ from app.aggregation import count_by
 from app.db_helpers import apply_date_range, fetch_all_pages, get_or_404
 from app.serialization import encode_json_fields, decode_json_fields
 from app.errors import server_error
+from app.concurrency import assert_unchanged
 import logging
 
 logger = logging.getLogger(__name__)
@@ -47,6 +48,8 @@ class TimesheetEntryUpdate(BaseModel):
     overtime_periods: Optional[List[Dict[str, Any]]] = None
     callout_overtime_hours: Optional[float] = None
     callout_count: Optional[int] = None
+    # The updated_at the edit form was opened with; a save is refused if the record has changed since (app/concurrency.py).
+    expected_updated_at: Optional[str] = None
 
 # Timesheet Endpoints
 @router.get("", dependencies=[Depends(get_current_user)])
@@ -143,11 +146,12 @@ async def update_timesheet_entry(entry_id: int, updated: TimesheetEntryUpdate, c
     """Update a timesheet entry"""
     try:
         # Check if entry exists
-        get_or_404(supabase, "timesheets", entry_id, detail="Timesheet entry not found")
+        existing = get_or_404(supabase, "timesheets", entry_id, detail="Timesheet entry not found")
         
         # exclude_unset, not a None-filter: an explicitly-sent null must clear the
         # field, not be silently dropped. See work_orders (backend edec24a).
         data_to_update = updated.model_dump(exclude_unset=True)
+        assert_unchanged(existing, data_to_update.pop('expected_updated_at', None))
         
         # Handle JSON fields — only if the caller actually sent this field, matching
         # exclude_unset above (encode_json_fields would otherwise add it fresh).
@@ -162,7 +166,7 @@ async def update_timesheet_entry(entry_id: int, updated: TimesheetEntryUpdate, c
         if updated_row:
             return decode_json_fields(updated_row, ['overtime_periods'])
         else:
-            raise HTTPException(status_code=500, detail="Update failed")
+            raise server_error(RuntimeError("Supabase returned no row for the update"), "Updating timesheet entry")
             
     except Exception as e:
         logger.error(f"Error updating timesheet entry: {str(e)}")

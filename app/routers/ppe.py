@@ -9,6 +9,8 @@ from app.serialization import convert_dates_to_iso
 from app.aggregation import count_by
 from app.db_helpers import fetch_all_pages, get_or_404
 from app.errors import server_error
+from app.concurrency import assert_unchanged, touch
+from app.ppe_conflicts import duplicate_message, existing_duplicate
 import logging
 import json
 
@@ -62,6 +64,8 @@ class PPEIssueUpdate(BaseModel):
     issued_by: Optional[str] = None
     location: Optional[str] = None
     mine_section: Optional[str] = None
+    # The updated_at the edit form was opened with; a save is refused if the record has changed since (app/concurrency.py).
+    expected_updated_at: Optional[str] = None
 
     class Config:
         json_encoders = {
@@ -109,6 +113,11 @@ async def get_ppe_records(
 @router.post("")
 async def create_ppe_record(record: PPEIssueCreate, current_user: dict = Depends(get_current_user)):
     try:
+        # The same item issued to the same person on the same day twice is refused here, not just in the browser.
+        clash = existing_duplicate(supabase, record.employee_id, record.ppe_type, record.issue_date)
+        if clash:
+            raise HTTPException(status_code=409, detail=duplicate_message(clash))
+
         # Convert Pydantic model to dict and handle date serialization
         data_to_insert = record.model_dump()
         
@@ -128,7 +137,7 @@ async def create_ppe_record(record: PPEIssueCreate, current_user: dict = Depends
             convert_dates_to_iso(result)
             return result
         else:
-            raise HTTPException(status_code=500, detail="Failed to create PPE record")
+            raise server_error(RuntimeError("Supabase returned no row for the insert"), "Creating PPE record")
             
     except Exception as e:
         logger.error(f"Error creating PPE record: {str(e)}")
@@ -151,19 +160,27 @@ async def get_ppe_record(record_id: int):
 @router.patch("/{record_id}")
 async def update_ppe_record(record_id: int, updated: PPEIssueUpdate, current_user: dict = Depends(get_current_user)):
     try:
-        get_or_404(supabase, "ppe_records", record_id, detail="PPE record not found")
+        existing = get_or_404(supabase, "ppe_records", record_id, detail="PPE record not found")
         
         # exclude_unset, not a None-filter: an explicitly-sent null must clear the
         # field, not be silently dropped. See work_orders (backend edec24a).
         data_to_update = updated.model_dump(exclude_unset=True)
-        
+        assert_unchanged(existing, data_to_update.pop('expected_updated_at', None))
+
+        # Moving the item, the date or the person must not make it a duplicate of another issue.
+        if any(k in data_to_update for k in ('employee_id', 'ppe_type', 'issue_date')):
+            merged = {**existing, **data_to_update}
+            clash = existing_duplicate(supabase, merged.get('employee_id'), merged.get('ppe_type'), merged.get('issue_date'), ignore_id=record_id)
+            if clash:
+                raise HTTPException(status_code=409, detail=duplicate_message(clash))
+
         # Convert dates to ISO format for database
         if data_to_update.get('issue_date'):
             data_to_update['issue_date'] = data_to_update['issue_date'].isoformat()
         if data_to_update.get('expiry_date'):
             data_to_update['expiry_date'] = data_to_update['expiry_date'].isoformat()
             
-        data_to_update["updated_at"] = datetime.utcnow().isoformat()
+        touch(existing, data_to_update)
         
         response = supabase.table("ppe_records").update(data_to_update).eq("id", record_id).execute()
 
@@ -172,7 +189,7 @@ async def update_ppe_record(record_id: int, updated: PPEIssueUpdate, current_use
             convert_dates_to_iso(result)
             return result
         else:
-            raise HTTPException(status_code=500, detail="Update failed")
+            raise server_error(RuntimeError("Supabase returned no row for the update"), "Updating PPE record")
             
     except HTTPException:
         raise

@@ -8,6 +8,9 @@ from app.auth import get_current_user, require_role, require_role_if_status_in
 from app.db_helpers import fetch_all_pages, get_or_404
 from app.leave_days import calculate_total_days
 from app.errors import server_error
+from app.audit import decision_stamp, has_columns
+from app.concurrency import assert_unchanged, touch
+from app.leave_conflicts import INACTIVE_STATUSES as LEAVE_INACTIVE, conflict_message as leave_conflict_message, overlapping_leave
 import logging
 import traceback
 
@@ -47,6 +50,8 @@ class LeaveUpdate(BaseModel):
     status: Optional[str] = None
     notes: Optional[str] = None
     exclude_weekends_holidays: Optional[bool] = None
+    # The updated_at the edit form was opened with; a save is refused if the record has changed since (app/concurrency.py).
+    expected_updated_at: Optional[str] = None
 
     @validator('end_date')
     def end_date_after_start_date(cls, v, values):
@@ -73,6 +78,11 @@ class LeaveResponse(BaseModel):
     updated_at: Optional[datetime]
     notes: Optional[str]
     overtime_id: Optional[int] = None
+    # Who decided it and when: stamped by the server from the signed-in session (columns exist once the integrity migration has run).
+    approved_by: Optional[str] = None
+    approved_at: Optional[datetime] = None
+    rejected_by: Optional[str] = None
+    rejected_at: Optional[datetime] = None
 
     class Config:
         from_attributes = True
@@ -104,11 +114,25 @@ def get_supabase_data(response):
         return response.data
     return response
 
+_DECISION_COLUMNS = ("approved_by", "approved_at", "rejected_by", "rejected_at")
+
+
+def _decision_fields(status: Any, user: Dict[str, Any]) -> Dict[str, Any]:
+    """Approver/rejecter stamps from the session, once the columns exist (so the code is safe before and after the migration)."""
+    stamp = decision_stamp(status, user)
+    return stamp if stamp and has_columns(supabase, "leaves", _DECISION_COLUMNS) else {}
+
+
 # ---------- POST create leave ----------
 @router.post("", response_model=LeaveResponse)
 @router.post("/", response_model=LeaveResponse)
 async def create_leave(leave: LeaveCreate, current_user: dict = Depends(get_current_user)):
     try:
+        # The form only warns; this is the check that holds for a second laptop or a stale page.
+        clash = overlapping_leave(supabase, leave.employee_id, leave.start_date, leave.end_date)
+        if clash:
+            raise HTTPException(status_code=409, detail=leave_conflict_message(clash))
+
         total_days = calculate_total_days(
             leave.start_date, leave.end_date, leave.exclude_weekends_holidays,
         )
@@ -136,7 +160,7 @@ async def create_leave(leave: LeaveCreate, current_user: dict = Depends(get_curr
         result = supabase.table("leaves").insert(data_to_insert).execute()
         created = one_row(result)
         if not created:
-            raise HTTPException(status_code=500, detail="No data returned after insertion")
+            raise server_error(RuntimeError("Supabase returned no row for the insert"), "Creating leave")
         return created
     except Exception as e:
         logger.error(f"Error creating leave: {str(e)}\n{traceback.format_exc()}")
@@ -190,7 +214,7 @@ async def get_leave_stats():
         # Was returning an all-zero 200 here — currently dormant (the frontend computes
         # these stats client-side instead of calling this endpoint) but a landmine for
         # whoever wires a dashboard widget to it next.
-        raise HTTPException(status_code=500, detail="Failed to load leave stats")
+        raise server_error(e, "Loading leave stats")
 
 # POST bulk approve/reject — one round trip instead of N PATCHes from the browser.
 @router.post("/bulk-status", response_model=BulkLeaveStatusResponse)
@@ -204,7 +228,7 @@ async def bulk_update_leave_status(
     )
     try:
         ids = list(dict.fromkeys(body.ids))
-        data_to_update: Dict[str, Any] = {"status": body.status}
+        data_to_update: Dict[str, Any] = {"status": body.status, **_decision_fields(body.status, current_user)}
         response = (
             supabase.table("leaves")
             .update(data_to_update)
@@ -228,7 +252,7 @@ async def get_leave(leave_id: int):
         return get_or_404(supabase, "leaves", leave_id, detail="Leave not found")
     except Exception as e:
         logger.error(f"Error fetching leave {leave_id}: {str(e)}\n{traceback.format_exc()}")
-        raise HTTPException(status_code=500, detail="Internal server error")
+        raise server_error(e, "Loading leave")
 
 # ---------- PATCH update leave ----------
 @router.patch("/{leave_id}", response_model=LeaveResponse)
@@ -245,6 +269,7 @@ async def update_leave(leave_id: int, updated: LeaveUpdate, authorization: Optio
         existing = get_or_404(supabase, "leaves", leave_id, detail=f"Leave with ID {leave_id} not found")
 
         data_to_update = updated.model_dump(exclude_unset=True)
+        assert_unchanged(existing, data_to_update.pop('expected_updated_at', None))
 
         if (
             'start_date' in data_to_update
@@ -261,23 +286,41 @@ async def update_leave(leave_id: int, updated: LeaveUpdate, authorization: Optio
                 'exclude_weekends_holidays',
                 existing.get('exclude_weekends_holidays', False),
             )
+            # Changing only one date can leave the pair inverted (the model only compares dates sent together).
+            if end < start:
+                raise HTTPException(status_code=422, detail="The leave cannot end before it starts.")
             data_to_update['total_days'] = calculate_total_days(start, end, exclude)
+
+            # Moving the dates, or reopening a rejected request, must not land on another live request of this person.
+            becomes_status = str(data_to_update.get('status', existing.get('status')) or 'pending').lower()
+            if becomes_status not in LEAVE_INACTIVE:
+                clash = overlapping_leave(supabase, existing.get('employee_id'), start, end, ignore_id=leave_id)
+                if clash:
+                    raise HTTPException(status_code=409, detail=leave_conflict_message(clash))
 
         if 'start_date' in data_to_update and isinstance(data_to_update['start_date'], date):
             data_to_update['start_date'] = data_to_update['start_date'].isoformat()
         if 'end_date' in data_to_update and isinstance(data_to_update['end_date'], date):
             data_to_update['end_date'] = data_to_update['end_date'].isoformat()
 
+        reopened = str(existing.get('status') or 'pending').lower() in LEAVE_INACTIVE and str(data_to_update.get('status') or '').lower() not in LEAVE_INACTIVE | {''}
+        if reopened and not ('start_date' in data_to_update or 'end_date' in data_to_update):
+            clash = overlapping_leave(supabase, existing.get('employee_id'), existing.get('start_date'), existing.get('end_date'), ignore_id=leave_id)
+            if clash:
+                raise HTTPException(status_code=409, detail=leave_conflict_message(clash))
+
         if not data_to_update:
             return existing
 
+        data_to_update.update(_decision_fields(data_to_update.get('status'), current_user))
+        touch(existing, data_to_update)
         result = supabase.table("leaves").update(data_to_update).eq("id", leave_id).execute()
         updated_row = one_row(result)
         if not updated_row:
             fetch_resp = supabase.table("leaves").select("*").eq("id", leave_id).execute()
             fetched_row = one_row(fetch_resp)
             if not fetched_row:
-                raise HTTPException(status_code=500, detail="No data returned after update")
+                raise server_error(RuntimeError("Supabase returned no row for the update"), "Updating leave")
             return fetched_row
         return updated_row
     except Exception as e:
@@ -288,9 +331,12 @@ async def update_leave(leave_id: int, updated: LeaveUpdate, authorization: Optio
 @router.delete("/{leave_id}")
 async def delete_leave(leave_id: int, current_user: dict = Depends(require_role('manager'))):
     try:
-        existing_resp = supabase.table("leaves").select("id").eq("id", leave_id).execute()
-        if one_row(existing_resp) is None:
+        existing_resp = supabase.table("leaves").select("id,status").eq("id", leave_id).execute()
+        found = one_row(existing_resp)
+        if found is None:
             raise HTTPException(status_code=404, detail=f"Leave with ID {leave_id} not found")
+        if str(found.get("status") or "pending").lower() == "approved":
+            raise HTTPException(status_code=409, detail="An approved leave cannot be deleted: it may already have been counted. Reject it instead; that keeps the history.")
         supabase.table("leaves").delete().eq("id", leave_id).execute()
         return {"success": True, "detail": f"Leave {leave_id} deleted"}
     except Exception as e:

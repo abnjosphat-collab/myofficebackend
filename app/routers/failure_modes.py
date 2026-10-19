@@ -1,6 +1,7 @@
 from typing import Optional
 from pydantic import BaseModel
 from app.crud_router import CrudRouter
+from app.audit import actor_name
 
 
 class FMCreate(BaseModel):
@@ -18,7 +19,7 @@ class FMCreate(BaseModel):
     detectability: Optional[int] = None
     occurrence_count: int = 0
     last_occurred: Optional[str] = None
-    created_by: Optional[str] = None
+    # created_by is stamped by the server from the signed-in session, never taken from the browser.
 
 
 class FMUpdate(BaseModel):
@@ -38,6 +39,10 @@ class FMUpdate(BaseModel):
     last_occurred: Optional[str] = None
 
 
+def _stamp_create(payload: dict) -> dict:
+    return {**payload, "created_by": actor_name()}
+
+
 # Standard CRUD over failure_modes — see app/crud_router.py.
 router = CrudRouter(
     "failure_modes", FMCreate, FMUpdate,
@@ -45,4 +50,5 @@ router = CrudRouter(
     order_by="equipment_type",
     filters={"equipment_type": "equipment_type"},
     not_found="Failure mode not found",
+    before_create=_stamp_create,
 ).router

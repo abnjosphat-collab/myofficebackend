@@ -21,6 +21,7 @@ import logging
 from app.supabase_client import supabase, rows, one_row
 from app.auth import get_current_user, require_role
 from app.db_helpers import fetch_all_pages, get_or_404
+from app.errors import server_error
 
 logger = logging.getLogger(__name__)
 
@@ -122,7 +123,7 @@ async def list_duty_roster(current_user: dict = Depends(get_current_user)):
         return fetch_all_pages(lambda start, end: _query().range(start, end).execute(), extract_rows=rows)
     except Exception as e:
         logger.error(f"Error listing duty roster: {e}")
-        raise HTTPException(status_code=500, detail="Failed to list the duty roster")
+        raise server_error(e, "Loading duty roster")
 
 
 @router.get("/{entry_id}")
@@ -133,7 +134,7 @@ async def get_duty_entry(entry_id: int, current_user: dict = Depends(get_current
         raise
     except Exception as e:
         logger.error(f"Error fetching duty roster entry {entry_id}: {e}")
-        raise HTTPException(status_code=500, detail="Failed to fetch the duty roster entry")
+        raise server_error(e, "Loading duty entry")
 
 
 @router.post("")
@@ -158,7 +159,7 @@ async def create_duty_entry(body: DutyRosterCreate, current_user: dict = Depends
         raise
     except Exception as e:
         logger.error(f"Error creating duty roster entry: {e}")
-        raise HTTPException(status_code=500, detail="Failed to create the duty roster entry")
+        raise server_error(e, "Creating duty entry")
 
 
 @router.patch("/{entry_id}")
@@ -192,7 +193,7 @@ async def update_duty_entry(entry_id: int, body: DutyRosterUpdate, current_user:
         raise
     except Exception as e:
         logger.error(f"Error updating duty roster entry {entry_id}: {e}")
-        raise HTTPException(status_code=500, detail="Failed to update the duty roster entry")
+        raise server_error(e, "Updating duty entry")
 
 
 @router.delete("/{entry_id}")
@@ -205,4 +206,4 @@ async def delete_duty_entry(entry_id: int, current_user: dict = Depends(require_
         raise
     except Exception as e:
         logger.error(f"Error deleting duty roster entry {entry_id}: {e}")
-        raise HTTPException(status_code=500, detail="Failed to delete the duty roster entry")
+        raise server_error(e, "Deleting duty entry")

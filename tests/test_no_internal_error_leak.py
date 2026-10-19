@@ -24,15 +24,16 @@ def _detail_arg(node: ast.Call):
 
 
 def _is_500(node: ast.Call) -> bool:
-    if node.args and isinstance(node.args[0], ast.Constant) and node.args[0].value == 500:
+    """Any server-side status (500, 502, 503, 207 partial failures): all of them reach the person, so none may carry the exception."""
+    def server_side(value) -> bool:
+        return isinstance(value, ast.Constant) and isinstance(value.value, int) and (value.value >= 500 or value.value == 207)
+
+    if node.args and server_side(node.args[0]):
         return True
-    return any(
-        k.arg == "status_code" and isinstance(k.value, ast.Constant) and k.value.value == 500
-        for k in node.keywords
-    )
+    return any(k.arg == "status_code" and server_side(k.value) for k in node.keywords)
 
 
-def test_no_500_detail_includes_the_exception():
+def test_no_5xx_detail_includes_the_exception():
     offenders = []
     for path in sorted(APP.rglob("*.py")):
         tree = ast.parse(path.read_text(encoding="utf-8"))

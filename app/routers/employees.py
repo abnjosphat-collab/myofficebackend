@@ -57,6 +57,15 @@ class Employee(BaseModel):
             return None
         return v
 
+    @validator('first_name', 'last_name')
+    def clean_name(cls, v: str) -> str:
+        # One space between words, none at the ends: "Tafadzwa " and "Stanley  Musevenzo" were found in live data,
+        # and names that differ by a space are treated as different people by every search and every match.
+        cleaned = ' '.join((v or '').split())
+        if not cleaned:
+            raise ValueError('Name cannot be empty')
+        return cleaned
+
     @validator('employee_id')
     def clean_employee_id(cls, v: str) -> str:
         if not v or not v.strip():
@@ -90,6 +99,27 @@ class BulkNormalizeResponse(BaseModel):
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
+
+# Records that refer to a person by their employee_id text. Changing the id must carry their history with it, or the
+# overtime, leave and PPE entered under the old id are left pointing at nobody. (Once the database has the foreign keys
+# from supabase_migration_integrity_constraints.sql it does this itself with ON UPDATE CASCADE; this keeps it true before.)
+_RECORDS_BY_EMPLOYEE_ID = ("overtime", "leaves", "ppe_records")
+
+
+def _follow_renamed_employee_id(old_id: str, new_id: str) -> None:
+    for table in _RECORDS_BY_EMPLOYEE_ID:
+        supabase.table(table).update({"employee_id": new_id}).eq("employee_id", old_id).execute()
+
+
+def _records_that_use(employee_id: str) -> list:
+    """The tables that still hold records for this person (empty when none)."""
+    used = []
+    for table in _RECORDS_BY_EMPLOYEE_ID:
+        found = _data(supabase.table(table).select("id").eq("employee_id", employee_id).limit(1).execute())
+        if found:
+            used.append(table)
+    return used
+
 
 def _dates_to_db(data: dict) -> dict:
     """Convert date objects → ISO strings for Supabase."""
@@ -266,7 +296,7 @@ async def create_employee(employee: Employee, current_user: dict = Depends(get_c
         payload = _prepare_employee_write(employee.model_dump())
         rows = _data(supabase.table("employees").insert(payload).execute())
         if not rows:
-            raise HTTPException(500, detail="No data returned after insertion")
+            raise server_error(RuntimeError("Supabase returned no row for the insert"), "Creating employee")
         await invalidate_namespace("employees")
         return _dates_from_db(rows[0])
 
@@ -323,7 +353,9 @@ async def update_employee(id: int, updated: Employee, current_user: dict = Depen
             supabase.table("employees").update(payload).eq("id", id).execute()
         )
         if not rows:
-            raise HTTPException(500, detail="No data returned after update")
+            raise server_error(RuntimeError("Supabase returned no row for the update"), "Updating employee")
+        if new_emp_id != old_emp_id:
+            _follow_renamed_employee_id(old_emp_id, new_emp_id)
         await invalidate_namespace("employees")
         return _dates_from_db(rows[0])
 
@@ -348,6 +380,9 @@ async def delete_employee(id: int, current_user: dict = Depends(require_role('ma
 
         emp = existing_rows[0]
         name = f"{emp.get('first_name', '')} {emp.get('last_name', '')}".strip() or "Unknown"
+
+        if _records_that_use(emp['employee_id']):
+            raise HTTPException(409, detail=f"{name} has overtime, leave or PPE records, so the record cannot be deleted. Archive the employee instead; that keeps the history.")
 
         supabase.table("employees").delete().eq("id", id).execute()
         await invalidate_namespace("employees")

@@ -30,6 +30,7 @@ from pydantic import BaseModel, Field, validator
 from app.supabase_client import supabase, rows as db_rows, one_row
 from app.auth import get_current_user, require_role, require_role_if_status_in
 from app.db_helpers import or_ilike, get_or_404
+from app.errors import server_error
 import logging
 
 logger = logging.getLogger(__name__)
@@ -178,7 +179,7 @@ async def list_sops(
         return [_serialize(row) for row in db_rows(r)]
     except Exception as e:
         logger.error("list_sops error: %s", e)
-        raise HTTPException(500, "Could not load the SOP library right now.")
+        raise server_error(e, "Loading sops")
 
 
 @router.get("/archived", dependencies=[Depends(require_role("manager"))])
@@ -192,7 +193,7 @@ async def list_archived_sops():
         return [_serialize(row) for row in db_rows(r)]
     except Exception as e:
         logger.error("list_archived_sops error: %s", e)
-        raise HTTPException(500, "Could not load archived SOPs right now.")
+        raise server_error(e, "Loading archived sops")
 
 
 # ── Get one (+ revision history) ─────────────────────────────────────────────
@@ -248,7 +249,7 @@ async def create_sop(body: SopCreate, current_user: dict = Depends(require_role(
         raise
     except Exception as e:
         logger.error("create_sop error: %s", e)
-        raise HTTPException(500, "Could not create the SOP right now.")
+        raise server_error(e, "Creating sop")
 
 
 # ── Update ────────────────────────────────────────────────────────────────────
@@ -290,7 +291,7 @@ async def update_sop(
         raise
     except Exception as e:
         logger.error("update_sop error: %s", e)
-        raise HTTPException(500, "Could not save the SOP right now.")
+        raise server_error(e, "Updating sop")
 
 
 # ── Archive / Restore (soft-delete — no hard delete endpoint exists) ────────
@@ -313,7 +314,7 @@ async def archive_sop(sop_id: str, current_user: dict = Depends(require_role("ma
         raise
     except Exception as e:
         logger.error("archive_sop error: %s", e)
-        raise HTTPException(500, "Could not archive the SOP right now.")
+        raise server_error(e, "Archiving sop")
 
 
 @router.post("/{sop_id}/restore", dependencies=[Depends(require_role("manager"))])
@@ -334,4 +335,4 @@ async def restore_sop(sop_id: str, current_user: dict = Depends(require_role("ma
         raise
     except Exception as e:
         logger.error("restore_sop error: %s", e)
-        raise HTTPException(500, "Could not restore the SOP right now.")
+        raise server_error(e, "Restoring sop")

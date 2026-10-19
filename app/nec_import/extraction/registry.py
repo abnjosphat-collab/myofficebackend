@@ -24,17 +24,24 @@ class ReviewJsonUploadProvider:
         return load_review_json(job_id)
 
 
+NOT_CONFIGURED_MESSAGE = (
+    "Scan extraction is not configured. Upload a validated review JSON for this period "
+    "(schema from NEC import preparation) or set NEC_IMPORT_EXTRACTION_PROVIDER when a "
+    "vision provider is available."
+)
+
+
+class ExtractionNotConfigured(RuntimeError):
+    """No scan-reading provider is set up. The message is written for the person using the page, so the router may show it."""
+
+
 class ManualPendingProvider:
     """PDF stored; operator attaches validated review JSON (Sep 2026 workflow in-app)."""
 
     name = "manual_review_json"
 
     def extract(self, job_id: str, period_start: str, period_end: str) -> dict:
-        raise RuntimeError(
-            "Scan extraction is not configured. Upload a validated review JSON for this period "
-            "(schema from NEC import preparation) or set NEC_IMPORT_EXTRACTION_PROVIDER when a "
-            "vision provider is available."
-        )
+        raise ExtractionNotConfigured(NOT_CONFIGURED_MESSAGE)
 
 
 def get_extraction_provider() -> ExtractionProvider:

@@ -11,6 +11,7 @@ from typing import List, Optional
 from datetime import datetime, timedelta, timezone
 from app.supabase_client import supabase
 from app.auth import get_current_user_optional, require_role
+from app.errors import server_error
 import logging
 
 logger = logging.getLogger(__name__)
@@ -64,7 +65,7 @@ async def ingest_events(batch: UsageEventBatch, current_user: Optional[dict] = D
         supabase.table("usage_events").insert(rows).execute()
     except Exception as e:
         logger.error(f"Failed inserting usage events: {e}")
-        raise HTTPException(status_code=500, detail="Failed to record usage events")
+        raise server_error(e, "Recording events")
     return {"inserted": len(rows)}
 
 
@@ -85,4 +86,4 @@ async def list_events(since_days: int = 100, limit: int = 20000):
         return response.data or []
     except Exception as e:
         logger.error(f"Failed fetching usage events: {e}")
-        raise HTTPException(status_code=500, detail="Failed to fetch usage events")
+        raise server_error(e, "Loading events")

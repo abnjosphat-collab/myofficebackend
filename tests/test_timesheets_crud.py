@@ -178,7 +178,7 @@ async def test_get_timesheet_entry_404_when_missing(patch_supabase):
     patch_supabase({"timesheets": {"select_return": []}})
     with pytest.raises(HTTPException) as exc_info:
         await get_timesheet_entry(999)
-    assert exc_info.value.status_code == 500  # 404 raised internally, re-wrapped by outer except
+    assert exc_info.value.status_code == 404
 
 
 # ─── update_timesheet_entry ──────────────────────────────────────────────────────
@@ -218,7 +218,7 @@ async def test_update_timesheet_entry_404_when_missing(patch_supabase):
     patch_supabase({"timesheets": {"select_return": []}})
     with pytest.raises(HTTPException) as exc_info:
         await update_timesheet_entry(999, TimesheetEntryUpdate(notes="x"), current_user={"user_id": "u1"})
-    assert exc_info.value.status_code == 500
+    assert exc_info.value.status_code == 404
 
 
 # ─── delete_timesheet_entry ──────────────────────────────────────────────────────
@@ -234,4 +234,14 @@ async def test_delete_timesheet_entry_404_when_missing(patch_supabase):
     patch_supabase({"timesheets": {"select_return": []}})
     with pytest.raises(HTTPException) as exc_info:
         await delete_timesheet_entry(999, current_user={"user_id": "u1", "role": "manager"})
-    assert exc_info.value.status_code == 500
+    assert exc_info.value.status_code == 404
+
+
+# ─── two people editing the same entry ─────────────────────────────────────────────────────────────────────────────
+
+async def test_update_timesheet_entry_refuses_a_stale_copy(patch_supabase):
+    state = patch_supabase({"timesheets": {"select_return": [{"id": 3, "updated_at": "2026-10-19T08:00:00+00:00"}]}})
+    with pytest.raises(HTTPException) as exc_info:
+        await update_timesheet_entry(3, TimesheetEntryUpdate(notes="mine", expected_updated_at="2026-10-19T07:00:00+00:00"), current_user={"user_id": "u1"})
+    assert exc_info.value.status_code == 409 and "Someone else changed" in exc_info.value.detail
+    assert not any(c["op"] == "update" for c in state["calls"])

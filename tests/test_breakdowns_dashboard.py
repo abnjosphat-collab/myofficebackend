@@ -87,7 +87,7 @@ async def test_dashboard_raises_500_on_db_failure_not_a_fake_200(monkeypatch):
     with pytest.raises(HTTPException) as exc:
         await get_dashboard_overview()
     assert exc.value.status_code == 500
-    assert "Failed to load dashboard metrics" in exc.value.detail
+    assert exc.value.detail.startswith("Loading dashboard overview failed. Please try again. (ref ")
 
 
 async def test_dashboard_no_supabase_client_raises_500(monkeypatch):

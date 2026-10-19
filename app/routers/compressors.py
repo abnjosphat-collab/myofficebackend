@@ -334,7 +334,7 @@ async def get_compressors(
     except Exception as e:
         logger.error(f"Error fetching compressors: {str(e)}")
         # Was returning [] here — indistinguishable from "no compressors registered."
-        raise HTTPException(status_code=500, detail="Failed to load compressors")
+        raise server_error(e, "Loading compressors")
 
 @router.get("/compressors/{compressor_id}", response_model=Dict[str, Any], dependencies=[Depends(get_current_user)])
 async def get_compressor_by_id(
@@ -741,7 +741,7 @@ async def get_compressor_readings(
         logger.error(f"Error fetching readings: {str(e)}")
         # Was returning 200 with success:False — a real status code is a guarantee
         # every caller gets, not just the ones that remember to check the body.
-        raise HTTPException(status_code=500, detail="Failed to load readings")
+        raise server_error(e, "Loading compressor readings")
 
 @router.get("/readings/{compressor_id}/detailed", dependencies=[Depends(get_current_user)])
 async def get_detailed_readings(
@@ -809,7 +809,7 @@ async def get_detailed_readings(
         }
     except Exception as e:
         logger.error(f"Error fetching detailed readings: {str(e)}")
-        raise HTTPException(status_code=500, detail="Failed to load detailed readings")
+        raise server_error(e, "Loading detailed readings")
 
 @router.get("/readings/date/{date}", dependencies=[Depends(get_current_user)])
 async def get_readings_by_date(
@@ -1110,7 +1110,7 @@ async def get_performance_metrics(
         return metrics
     except Exception as e:
         logger.error(f"Error getting performance metrics: {str(e)}")
-        raise HTTPException(status_code=500, detail="Failed to load performance metrics")
+        raise server_error(e, "Loading performance metrics")
 
 @router.get("/analytics/trends", dependencies=[Depends(get_current_user)])
 async def get_trend_analysis(
@@ -1190,7 +1190,7 @@ async def get_trend_analysis(
         # exact "never fake a 200 on failure" anti-pattern named in
         # ENGINEERING_STANDARDS.md #2. Re-raise instead (2026-08-31).
         logger.error(f"Error getting trend analysis: {str(e)}")
-        raise HTTPException(status_code=500, detail="Failed to load trend analysis")
+        raise server_error(e, "Loading trend analysis")
 
 @router.get("/analytics/comparison", dependencies=[Depends(get_current_user)])
 async def get_comparison_analytics(
@@ -1260,7 +1260,7 @@ async def get_comparison_analytics(
         # Same anti-pattern as get_trend_analysis above — was a fake 200 on failure.
         # Re-raise instead (2026-08-31).
         logger.error(f"Error getting comparison analytics: {str(e)}")
-        raise HTTPException(status_code=500, detail="Failed to load comparison analytics")
+        raise server_error(e, "Loading comparison analytics")
 
 @router.get("/management/summary", dependencies=[Depends(get_current_user)])
 async def get_management_summary(supabase_client = Depends(get_supabase)):
@@ -1294,7 +1294,7 @@ async def get_management_summary(supabase_client = Depends(get_supabase)):
         # Same anti-pattern as get_trend_analysis above — was a fake 200 on failure.
         # Re-raise instead (2026-08-31).
         logger.error(f"Error getting management summary: {str(e)}")
-        raise HTTPException(status_code=500, detail="Failed to load management summary")
+        raise server_error(e, "Loading management summary")
 
 # Export/Import endpoints
 @router.post("/export")
@@ -1435,7 +1435,7 @@ async def ensure_routine_schedules_endpoint(
         return {"success": True, **ensure_weekly_routine_schedules(supabase_client)}
     except Exception as e:
         logger.error(f"Error ensuring routine schedules: {str(e)}")
-        raise HTTPException(status_code=500, detail="Could not ensure routine schedules.")
+        raise server_error(e, "Preparing routine schedules")
 
 
 # Function to initialize data on startup

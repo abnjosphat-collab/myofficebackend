@@ -15,6 +15,7 @@ from typing import Any, Optional, cast
 from supabase import create_client
 from app.supabase_client import supabase
 from app.auth import get_current_user
+from app.errors import server_error
 import logging
 
 logger = logging.getLogger(__name__)
@@ -75,7 +76,7 @@ async def get_my_signature(user: dict = Depends(get_current_user)):
         return {"has_signature": True, "source": row["source"], "updated_at": row["updated_at"]}
     except Exception as e:
         logger.error(f"get_my_signature failed for {user['user_id']}: {e}")
-        raise HTTPException(status_code=500, detail="Could not load signature.")
+        raise server_error(e, "Loading my signature")
 
 
 @router.put("/me")
@@ -100,7 +101,7 @@ async def save_my_signature(payload: SignatureSave, user: dict = Depends(get_cur
         return {"ok": True}
     except Exception as e:
         logger.error(f"save_my_signature failed for {user['user_id']}: {e}")
-        raise HTTPException(status_code=500, detail="Could not save signature.")
+        raise server_error(e, "Saving my signature")
 
 
 @router.delete("/me")
@@ -110,7 +111,7 @@ async def delete_my_signature(user: dict = Depends(get_current_user)):
         return {"ok": True}
     except Exception as e:
         logger.error(f"delete_my_signature failed for {user['user_id']}: {e}")
-        raise HTTPException(status_code=500, detail="Could not delete signature.")
+        raise server_error(e, "Deleting my signature")
 
 
 @router.post("/unlock")
@@ -129,7 +130,7 @@ async def unlock_my_signature(payload: UnlockRequest, user: dict = Depends(get_c
         row = cast("dict[str, Any] | None", res.data[0] if res.data else None)
     except Exception as e:
         logger.error(f"unlock_my_signature lookup failed for {user['user_id']}: {e}")
-        raise HTTPException(status_code=500, detail="Could not load signature.")
+        raise server_error(e, "Unlocking my signature")
 
     if not row:
         raise HTTPException(status_code=404, detail="No saved signature. Draw one and save it first.")

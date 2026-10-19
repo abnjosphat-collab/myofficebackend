@@ -1,6 +1,7 @@
 # backend/app/supabase_client.py
 
 from supabase import create_client, Client
+from app.audit import AuditedClient
 from typing import Any, Optional, cast
 import os
 import logging
@@ -22,10 +23,14 @@ if not SUPABASE_URL or not SUPABASE_KEY:
 # Newer supabase-py versions reject empty configuration at construction time. Keep
 # imports and mocked tests usable without granting CI production credentials; any
 # unmocked database call still fails loudly against this non-existent host.
-supabase: Client = create_client(
+_real_client: Client = create_client(
     SUPABASE_URL or "https://unconfigured.supabase.invalid",
     SUPABASE_KEY or "unconfigured-service-key",
 )
+
+# The shared client every router uses. Writes to the payroll and people tables are recorded in audit_log as they
+# succeed (see app/audit.py); everything else behaves exactly as the real client does.
+supabase: Client = cast(Client, AuditedClient(_real_client))
 
 
 # postgrest types `.execute().data` as a recursive JSON union (str | int | float |

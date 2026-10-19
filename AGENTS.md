@@ -4,6 +4,7 @@
 - Read [`docs/README.md`](./docs/README.md) before changing public APIs or domain behavior.
 - Follow [`docs/ENGINEERING_STANDARDS.md`](./docs/ENGINEERING_STANDARDS.md) for routing, error, test, and typing rules.
 - Public Python contracts use PEP 257 Google-style docstrings. Validate generated documentation with `python -m sphinx -W --keep-going -b html docs docs/_build/html` after installing `requirements-docs.txt`.
+- **Data integrity:** follow [`docs/DATA_INTEGRITY_STANDARD.md`](./docs/DATA_INTEGRITY_STANDARD.md) for any write endpoint: rules are enforced on the server, who/when come from the session, writes to payroll and people tables are audited, errors go through `server_error`. `tests/test_data_integrity_rules.py` fails when these are broken.
 - Preserve the real HTTP status on failure; never turn an unavailable dependency into an empty successful result.
 - Do not run migrations, change live Supabase data, deploy, commit, or push unless the user explicitly asks.
 - The whole project's status, decisions and open items are in the frontend repository's `docs/CURRENT_HANDOFF.md` (`myofficefrontend`); this repo is the FastAPI backend it talks to.

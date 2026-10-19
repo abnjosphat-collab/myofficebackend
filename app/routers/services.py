@@ -224,7 +224,8 @@ async def ocr_document(file: UploadFile = File(...), current_user: dict = Depend
         from PIL import Image  # Pillow
         import numpy as np
     except ImportError as exc:
-        raise HTTPException(503, f"OCR library not available: {exc}. Run: pip install pymupdf easyocr Pillow")
+        logger.error("OCR library not available: %s", exc)
+        raise server_error(exc, "Reading the document", 503)
 
     try:
         text_parts: list[str] = []
@@ -257,7 +258,7 @@ async def ocr_document(file: UploadFile = File(...), current_user: dict = Depend
         raise
     except Exception as exc:
         logger.error("OCR error: %s", exc)
-        raise HTTPException(502, f"OCR extraction failed: {exc}")
+        raise server_error(exc, "Reading the document", 502)
 
 
 # ── Single-record operations ───────────────────────────────────────────────────

@@ -48,6 +48,14 @@ class _FakeQuery:
     def in_(self, col, vals):
         self._filters.append((col, "in", vals))
         return self
+    def lte(self, col, val):
+        self._filters.append((col, "lte", val))
+        return self
+    def gte(self, col, val):
+        self._filters.append((col, "gte", val))
+        return self
+    def limit(self, n):
+        return self
     def order(self, col, desc=False):
         self._order = (col, desc)
         return self
@@ -199,7 +207,7 @@ async def test_get_leave_404_when_missing(patch_supabase):
     patch_supabase({"leaves": {"select_return": []}})
     with pytest.raises(HTTPException) as exc_info:
         await get_leave(999)
-    assert exc_info.value.status_code == 500  # get_or_404's own 404 is re-wrapped by the outer except
+    assert exc_info.value.status_code == 404
 
 
 # ─── update_leave ────────────────────────────────────────────────────────────────
@@ -243,7 +251,8 @@ async def test_update_leave_falls_back_to_fetch_when_update_returns_no_row(patch
 async def test_update_leave_500_when_update_and_fallback_fetch_both_return_nothing(patch_supabase):
     existing = {"id": 1, "start_date": "2024-06-10", "end_date": "2024-06-12"}
     patch_supabase({
-        "leaves": {"select_returns": [[existing], []], "update_return": []},
+        # 1st select: the decided-status check; 2nd: get_or_404 (the record exists); 3rd: the fallback fetch (nothing)
+        "leaves": {"select_returns": [[existing], [existing], []], "update_return": []},
     })
     with pytest.raises(HTTPException) as exc_info:
         await update_leave(1, LeaveUpdate(notes="new"), authorization=None, current_user={"user_id": "u1"})
@@ -295,7 +304,7 @@ async def test_update_leave_404_when_missing(patch_supabase):
     patch_supabase({"leaves": {"select_return": []}})
     with pytest.raises(HTTPException) as exc_info:
         await update_leave(999, LeaveUpdate(notes="x"), authorization=None, current_user={"user_id": "u1"})
-    assert exc_info.value.status_code == 500  # wrapped by the outer except like get_leave
+    assert exc_info.value.status_code == 404
 
 
 async def test_update_leave_approving_without_manager_role_is_rejected(patch_supabase, monkeypatch):
@@ -419,7 +428,7 @@ async def test_delete_leave_404_when_missing(patch_supabase):
     patch_supabase({"leaves": {"select_return": []}})
     with pytest.raises(HTTPException) as exc_info:
         await delete_leave(999, current_user={"user_id": "u1"})
-    assert exc_info.value.status_code == 500  # 404 raised internally, re-wrapped by outer except
+    assert exc_info.value.status_code == 404
 
 # --- overtime_id link (take-as-leave) ---
 

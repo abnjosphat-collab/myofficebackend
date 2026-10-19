@@ -37,6 +37,7 @@ import os
 import time
 from typing import Optional
 from app.supabase_client import supabase, SUPABASE_URL, SUPABASE_KEY
+from app.audit import set_actor
 import logging
 
 logger = logging.getLogger(__name__)
@@ -226,11 +227,23 @@ async def user_has_verified_factor(user_id: str, user) -> bool:
     return has_factor
 
 
+def display_name(user) -> str:
+    """The person's name as it should appear on a record they approved or changed: the name on their profile, else
+    their email's local part made readable ("elias.mwazha@x" becomes "Elias Mwazha"). Always from the verified
+    session, never from anything the browser sends."""
+    meta = getattr(user, 'user_metadata', None) or {}
+    name = str(meta.get('full_name') or meta.get('name') or '').strip()
+    if name:
+        return ' '.join(name.split())
+    local = (getattr(user, 'email', '') or '').split('@')[0]
+    return ' '.join(part.capitalize() for part in local.replace('_', '.').replace('-', '.').split('.') if part)
+
+
 async def get_current_user(authorization: Optional[str] = Header(None)) -> dict:
     """
     Verify the Bearer [REDACTED] and fetch the caller's role.
     Raises 401 if unauthenticated or the token is invalid/expired.
-    Returns {'user_id': str, 'email': str, 'role': str}.
+    Returns {'user_id': str, 'email': str, 'role': str, 'name': str}.
     """
     if not authorization or not authorization.startswith('Bearer '):
         raise HTTPException(status_code=401, detail='Sign in required.')
@@ -242,6 +255,7 @@ async def get_current_user(authorization: Optional[str] = Header(None)) -> dict:
     if hit is not None:
         cached_user, mfa_ok = hit
         if not REQUIRE_MFA_AAL2 or mfa_ok:
+            set_actor(cached_user)
             return cached_user
         # The gate was off (or bypassed) when this was cached and is on now:
         # fall through and re-verify instead of honouring a stale entry.
@@ -300,10 +314,11 @@ async def get_current_user(authorization: Optional[str] = Header(None)) -> dict:
             detail='Could not verify your permissions right now. Please try again in a moment.',
         )
 
-    result = {'user_id': str(user.id), 'email': user.email or '', 'role': role}
+    result = {'user_id': str(user.id), 'email': user.email or '', 'role': role, 'name': display_name(user)}
     # Only verified successes are cached — 401s, 503s and the MFA 401 above
     # raise before reaching here, so failures are never served from cache.
     _store_auth_cache(cache_key, result, mfa_ok)
+    set_actor(result)
     return result
 
 

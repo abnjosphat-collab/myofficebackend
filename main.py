@@ -15,6 +15,7 @@ from app.supabase_client import supabase
 from app.auth import get_current_user, require_role
 from app.redis_client import ping_redis, close_redis
 from app.cache import cache_stats
+from app.audit import audit_status
 from slowapi.errors import RateLimitExceeded
 from slowapi.middleware import SlowAPIMiddleware
 from app.rate_limit import limiter
@@ -174,6 +175,7 @@ async def health_check():
         "database": database,
         "redis": "connected" if redis_ok else "unavailable",
         "cache": cache_stats(),
+        "audit": audit_status()["status"],
     }
 
 # When this process started, so a restart (a new deploy, or Render waking the service) is visible from outside.
@@ -303,6 +305,8 @@ for _name in [
     "job_cards", "handover", "compliance", "lubrication",
     "condition_monitoring", "contractors", "production",
     "failure_modes", "competency",
+    # Who changed what
+    "audit",
 ]:
     # These routers already declare their full /api/<name> prefix internally.
     # Adding it again here made their public endpoints /api/name/api/name/*.

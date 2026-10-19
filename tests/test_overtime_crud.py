@@ -53,6 +53,17 @@ class _Query:
         self._filters.append((col, "in", vals))
         return self
 
+    def lte(self, col, val):
+        self._filters.append((col, "lte", val))
+        return self
+
+    def gte(self, col, val):
+        self._filters.append((col, "gte", val))
+        return self
+
+    def limit(self, n):
+        return self
+
     def order(self, *a, **k):
         return self
 
@@ -496,7 +507,7 @@ async def test_update_overtime_update_failed_is_500(patch_supabase):
     with pytest.raises(HTTPException) as exc:
         await update_overtime(7, OvertimeUpdate(reason="x"), authorization=None, current_user=CURRENT_USER)
     assert exc.value.status_code == 500
-    assert "Update failed" in exc.value.detail
+    assert exc.value.detail.startswith("Updating overtime failed. Please try again. (ref ")
 
 
 async def test_update_overtime_approve_without_authorization_is_401(patch_supabase):
@@ -630,7 +641,9 @@ async def test_bulk_update_overtime_status_approve_happy_path(patch_supabase, pa
     assert len(result.updated) == 2
     update_call = next(c for c in fake.state["calls"] if c["op"] == "update")
     assert update_call["payload"]["status"] == "approved"
-    assert update_call["payload"]["approved_by"] == "Mgr"
+    # The approver is the signed-in person, whatever the browser claims ("Mgr" was sent and is ignored).
+    assert update_call["payload"]["approved_by"] == CURRENT_USER["email"]
+    assert update_call["payload"]["approved_at"]
     assert ("id", "in", [1, 2, 3]) in update_call["filters"]
     assert ("status", "pending") in update_call["filters"]
 
@@ -838,3 +851,47 @@ async def test_take_as_leave_needs_a_manager(monkeypatch, patch_auth):
     assert exc.value.status_code == 403
     assert [c for c in fake.state["calls"] if c["op"] == "insert"] == []
 
+
+
+# ─── who approved is the session, a stale edit is refused, approved overtime is not deleted ────────────────────────
+
+async def test_update_overtime_approval_is_stamped_from_the_session_not_the_browser(patch_supabase, patch_auth):
+    fake = patch_supabase({"select_return": [{"id": 7, "status": "pending"}], "update_return": [{"id": 7, "status": "approved", "spares_used": None}]})
+    patch_auth(role="manager")
+    user = {**CURRENT_USER, "name": "Edson Mavhondo"}
+    await update_overtime(7, OvertimeUpdate(status="approved", approved_by="Someone Else", approved_at="1999-01-01"), authorization="Bearer t", current_user=user)
+    payload = next(c for c in fake.state["calls"] if c["op"] == "update")["payload"]
+    assert payload["approved_by"] == "Edson Mavhondo" and payload["approved_at"] != "1999-01-01"
+
+
+async def test_update_overtime_rejection_is_stamped_from_the_session(patch_supabase, patch_auth):
+    fake = patch_supabase({"select_return": [{"id": 7, "status": "pending"}], "update_return": [{"id": 7, "status": "rejected", "spares_used": None}]})
+    patch_auth(role="manager")
+    await update_overtime(7, OvertimeUpdate(status="rejected"), authorization="Bearer t", current_user={**CURRENT_USER, "name": "Elias Mwazha"})
+    payload = next(c for c in fake.state["calls"] if c["op"] == "update")["payload"]
+    assert payload["rejected_by"] == "Elias Mwazha" and "approved_by" not in payload
+
+
+async def test_update_overtime_refuses_a_save_made_from_a_stale_copy(patch_supabase):
+    fake = patch_supabase({"select_return": [{"id": 7, "status": "pending", "updated_at": "2026-10-19T08:00:00+00:00"}], "update_return": [{"id": 7}]})
+    with pytest.raises(HTTPException) as exc:
+        await update_overtime(7, OvertimeUpdate(reason="mine", expected_updated_at="2026-10-19T07:00:00+00:00"), authorization=None, current_user=CURRENT_USER)
+    assert exc.value.status_code == 409 and "Someone else changed" in exc.value.detail
+    assert [c for c in fake.state["calls"] if c["op"] == "update"] == []
+
+
+async def test_update_overtime_accepts_a_save_from_the_current_copy_and_moves_updated_at(patch_supabase):
+    fake = patch_supabase({"select_return": [{"id": 7, "status": "pending", "updated_at": "2026-10-19T08:00:00+00:00"}], "update_return": [{"id": 7, "spares_used": None}]})
+    await update_overtime(7, OvertimeUpdate(reason="mine", expected_updated_at="2026-10-19T08:00:00Z"), authorization=None, current_user=CURRENT_USER)
+    payload = next(c for c in fake.state["calls"] if c["op"] == "update")["payload"]
+    assert "expected_updated_at" not in payload and payload["updated_at"] > "2026-10-19T08:00:00+00:00"
+
+
+@pytest.mark.parametrize("status", ["approved", "paid"])
+async def test_delete_overtime_refuses_approved_or_paid(patch_supabase, patch_auth, status):
+    fake = patch_supabase({"select_return": [{"id": 3, "status": status}]})
+    patch_auth(role="manager")
+    with pytest.raises(HTTPException) as exc:
+        await delete_overtime(3, authorization="Bearer t", current_user=CURRENT_USER)
+    assert exc.value.status_code == 409 and "Cancel it instead" in exc.value.detail
+    assert [c for c in fake.state["calls"] if c["op"] == "delete"] == []

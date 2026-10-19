@@ -20,6 +20,7 @@ import logging
 from app.supabase_client import supabase, rows, one_row
 from app.auth import get_current_user, require_role
 from app.db_helpers import fetch_all_pages, get_or_404
+from app.errors import server_error
 
 logger = logging.getLogger(__name__)
 
@@ -164,7 +165,7 @@ async def list_covers(
         return fetch_all_pages(lambda start, end: _query().range(start, end).execute(), extract_rows=rows)
     except Exception as e:
         logger.error(f"Error listing rotation covers: {e}")
-        raise HTTPException(status_code=500, detail="Failed to list the rotation covers")
+        raise server_error(e, "Loading covers")
 
 
 @router.get("/{cover_id}")
@@ -175,7 +176,7 @@ async def get_cover(cover_id: int, current_user: dict = Depends(get_current_user
         raise
     except Exception as e:
         logger.error(f"Error fetching rotation cover {cover_id}: {e}")
-        raise HTTPException(status_code=500, detail="Failed to fetch the rotation cover")
+        raise server_error(e, "Loading cover")
 
 
 @router.post("")
@@ -202,7 +203,7 @@ async def create_cover(body: RotationCoverCreate, current_user: dict = Depends(g
         raise
     except Exception as e:
         logger.error(f"Error creating rotation cover: {e}")
-        raise HTTPException(status_code=500, detail="Failed to create the rotation cover")
+        raise server_error(e, "Creating cover")
 
 
 @router.patch("/{cover_id}")
@@ -239,7 +240,7 @@ async def update_cover(cover_id: int, body: RotationCoverUpdate, current_user: d
         raise
     except Exception as e:
         logger.error(f"Error updating rotation cover {cover_id}: {e}")
-        raise HTTPException(status_code=500, detail="Failed to update the rotation cover")
+        raise server_error(e, "Updating cover")
 
 
 @router.delete("/{cover_id}")
@@ -252,4 +253,4 @@ async def delete_cover(cover_id: int, current_user: dict = Depends(require_role(
         raise
     except Exception as e:
         logger.error(f"Error deleting rotation cover {cover_id}: {e}")
-        raise HTTPException(status_code=500, detail="Failed to delete the rotation cover")
+        raise server_error(e, "Deleting cover")

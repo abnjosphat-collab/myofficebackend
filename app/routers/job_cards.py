@@ -4,6 +4,8 @@ from pydantic import BaseModel
 from app.crud_router import CrudRouter
 from app.supabase_client import supabase
 from app.auth import get_current_user
+from app.audit import actor_name
+from datetime import datetime, timezone
 from app.db_helpers import get_or_404
 
 
@@ -24,7 +26,7 @@ class JobCardCreate(BaseModel):
     section: Optional[str] = None
     scheduled_date: Optional[str] = None
     notes: Optional[str] = None
-    created_by: Optional[str] = None
+    # created_by is stamped by the server from the signed-in session (see _stamp_create below), never taken from the browser.
 
 
 class JobCardUpdate(BaseModel):
@@ -44,9 +46,19 @@ class JobCardUpdate(BaseModel):
     scheduled_date: Optional[str] = None
     started_at: Optional[str] = None
     completed_at: Optional[str] = None
-    sign_off_by: Optional[str] = None
-    sign_off_at: Optional[str] = None
+    # sign_off_by / sign_off_at are stamped by the server when the card is completed (see _stamp_update below).
     notes: Optional[str] = None
+
+
+def _stamp_create(payload: dict) -> dict:
+    return {**payload, "created_by": actor_name()}
+
+
+def _stamp_update(payload: dict) -> dict:
+    # Completing a job card is a signed act: who and when come from the session, not from what the browser sends.
+    if payload.get("status") == "completed":
+        return {**payload, "sign_off_by": actor_name(), "sign_off_at": datetime.now(timezone.utc).isoformat()}
+    return payload
 
 
 # Standard CRUD over job_cards (newest first) + a detail-view endpoint. reject_empty_update
@@ -58,6 +70,8 @@ router = CrudRouter(
     filters={"status": "status", "priority": "priority", "section": "section"},
     not_found="Job card not found",
     reject_empty_update=True,
+    before_create=_stamp_create,
+    before_update=_stamp_update,
 ).router
 
 

@@ -18,6 +18,7 @@ from pydantic import BaseModel, Field, field_validator
 from app.supabase_client import supabase
 from app.auth import get_current_user, require_role
 from app.routers.compressors import ensure_weekly_routine_schedules
+from app.errors import server_error
 import logging
 
 logger = logging.getLogger(__name__)
@@ -192,7 +193,7 @@ async def list_schedules(user: dict = Depends(get_current_user)):
         return _rows(resp)
     except Exception as e:
         logger.error(f"list_schedules failed: {e}")
-        raise HTTPException(status_code=500, detail="Could not load schedules.")
+        raise server_error(e, "Loading schedules")
 
 
 @router.post("")
@@ -206,7 +207,7 @@ async def create_schedule(payload: ScheduleCreate, user: dict = Depends(require_
         return _rows(resp)[0]
     except Exception as e:
         logger.error(f"create_schedule failed: {e}")
-        raise HTTPException(status_code=500, detail="Could not create schedule.")
+        raise server_error(e, "Creating schedule")
 
 
 @router.patch("/{schedule_id}")
@@ -226,7 +227,7 @@ async def update_schedule(schedule_id: int, payload: ScheduleUpdate, user: dict 
         raise
     except Exception as e:
         logger.error(f"update_schedule failed: {e}")
-        raise HTTPException(status_code=500, detail="Could not update schedule.")
+        raise server_error(e, "Updating schedule")
 
 
 @router.delete("/{schedule_id}")
@@ -236,7 +237,7 @@ async def delete_schedule(schedule_id: int, user: dict = Depends(require_role('m
         return {"ok": True}
     except Exception as e:
         logger.error(f"delete_schedule failed: {e}")
-        raise HTTPException(status_code=500, detail="Could not delete schedule.")
+        raise server_error(e, "Deleting schedule")
 
 
 @router.get("/{schedule_id}/runs")
@@ -251,7 +252,7 @@ async def schedule_runs(schedule_id: int, user: dict = Depends(get_current_user)
         return _rows(resp)
     except Exception as e:
         logger.error(f"schedule_runs failed: {e}")
-        raise HTTPException(status_code=500, detail="Could not load schedule history.")
+        raise server_error(e, "Loading runs")
 
 
 # ---------- Generation ----------
@@ -342,7 +343,7 @@ async def generate_due_work_orders(
         schedules = _rows(resp)
     except Exception as e:
         logger.error(f"generate: could not load schedules: {e}")
-        raise HTTPException(status_code=500, detail="Could not load schedules.")
+        raise server_error(e, "Generating due work orders")
 
     # Compressor weekly routines: a register compressor without an active weekly schedule gets one first,
     # or the loop below has nothing to raise its routine work order from. A failure here is reported in the

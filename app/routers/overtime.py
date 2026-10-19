@@ -5,6 +5,9 @@ from typing import Optional, List, Dict, Any, cast
 from app.supabase_client import supabase, rows
 from app.auth import get_current_user, require_role, require_role_if_status_in
 from app.overtime_conflicts import INACTIVE_STATUSES, conflict_message, find_conflict, neighbour_dates
+from app.audit import decision_stamp, has_columns
+from app.leave_conflicts import conflict_message as leave_conflict_message, overlapping_leave
+from app.concurrency import assert_unchanged, touch
 from app.db_helpers import get_or_404
 from app.serialization import encode_json_fields, decode_json_fields
 from app.errors import server_error
@@ -67,13 +70,11 @@ class OvertimeCreate(BaseModel):
         return (v or '').strip() or 'Engineering'
 
 class BulkStatusUpdate(BaseModel):
+    # Who approved or rejected, and when, is stamped by the server from the signed-in session: the browser may send
+    # the drawn signature, never an approver name or a time (tests/test_data_integrity_rules.py enforces this).
     ids: List[int] = Field(..., min_items=1)
     status: str
-    approved_by: Optional[str] = None
-    approved_at: Optional[str] = None
     approval_signature: Optional[str] = None
-    rejected_by: Optional[str] = None
-    rejected_at: Optional[str] = None
 
     @validator('status')
     def status_must_be_approval(cls, v):
@@ -142,11 +143,9 @@ class OvertimeUpdate(BaseModel):
     notes: Optional[str] = None
     spares_used: Optional[List[Dict[str, Any]]] = None
     status: Optional[str] = None
-    approved_by: Optional[str] = None
-    approved_at: Optional[str] = None
     approval_signature: Optional[str] = None
-    rejected_by: Optional[str] = None
-    rejected_at: Optional[str] = None
+    # The updated_at the edit form was opened with; a save is refused if the record has changed since (app/concurrency.py).
+    expected_updated_at: Optional[str] = None
 
     @validator('cost_centre')
     def normalize_cost_centre(cls, v):
@@ -273,19 +272,9 @@ async def bulk_update_overtime_status(
     )
     try:
         ids = list(dict.fromkeys(body.ids))
-        data_to_update: Dict[str, Any] = {"status": body.status}
-        if body.status == 'approved':
-            if body.approved_by is not None:
-                data_to_update['approved_by'] = body.approved_by
-            if body.approved_at is not None:
-                data_to_update['approved_at'] = body.approved_at
-            if body.approval_signature is not None:
-                data_to_update['approval_signature'] = body.approval_signature
-        else:
-            if body.rejected_by is not None:
-                data_to_update['rejected_by'] = body.rejected_by
-            if body.rejected_at is not None:
-                data_to_update['rejected_at'] = body.rejected_at
+        data_to_update: Dict[str, Any] = {"status": body.status, **decision_stamp(body.status, current_user)}
+        if body.status == 'approved' and body.approval_signature is not None:
+            data_to_update['approval_signature'] = body.approval_signature
 
         response = (
             supabase.table("overtime")
@@ -370,20 +359,22 @@ async def update_overtime(overtime_id: int, updated: OvertimeUpdate, authorizati
         # exclude_unset, not a None-filter: an explicitly-sent null must clear the
         # field, not be silently dropped. See work_orders (backend edec24a).
         data_to_update = updated.model_dump(exclude_unset=True)
+        assert_unchanged(existing_row, data_to_update.pop('expected_updated_at', None))
 
         existing_status = (existing_row.get("status") or "pending").lower()
         if existing_status in _OT_LOCKED_STATUSES and data_to_update:
             await require_role("manager")(authorization)
 
-        _OT_LIFECYCLE_FIELDS = frozenset({
-            'status', 'approved_by', 'approved_at', 'approval_signature', 'rejected_by', 'rejected_at',
-        })
+        # The approver and the time are the server's to set (from the session); only the status and the drawn signature
+        # come from the browser, and both need a manager.
+        _OT_LIFECYCLE_FIELDS = frozenset({'status', 'approval_signature'})
         if _OT_LIFECYCLE_FIELDS.intersection(data_to_update):
             status_val = data_to_update.get('status')
             if status_val is not None and status_val not in ('approved', 'rejected'):
                 await require_role('manager')(authorization)
-            elif any(k in data_to_update for k in _OT_LIFECYCLE_FIELDS if k != 'status'):
+            elif 'approval_signature' in data_to_update:
                 await require_role('manager')(authorization)
+        data_to_update.update(decision_stamp(data_to_update.get('status'), current_user))
         if 'spares_used' in data_to_update:
             data_to_update = encode_json_fields(data_to_update, ['spares_used'])
 
@@ -397,12 +388,13 @@ async def update_overtime(overtime_id: int, updated: OvertimeUpdate, authorizati
             if clash:
                 raise HTTPException(status_code=409, detail=conflict_message(clash))
 
+        touch(existing_row, data_to_update)
         response = supabase.table("overtime").update(data_to_update).eq("id", overtime_id).execute()
 
         if hasattr(response, 'data') and response.data:
             return decode_json_fields(response.data[0], ['spares_used'])
         else:
-            raise HTTPException(status_code=500, detail="Update failed")
+            raise server_error(RuntimeError("Supabase returned no row for the update"), "Updating overtime")
             
     except HTTPException:
         raise
@@ -422,7 +414,9 @@ async def delete_overtime(
         logger.info(f"Deleting overtime {overtime_id}")
         
         # Check if exists
-        get_or_404(supabase, "overtime", overtime_id, detail="Overtime not found")
+        existing = get_or_404(supabase, "overtime", overtime_id, detail="Overtime not found")
+        if str(existing.get("status") or "pending").lower() in ("approved", "paid"):
+            raise HTTPException(status_code=409, detail="Approved or paid overtime cannot be deleted: it may already have been counted in payroll. Cancel it instead; that keeps the history.")
         
         supabase.table("overtime").delete().eq("id", overtime_id).execute()
         
@@ -457,6 +451,10 @@ async def take_as_leave(
         existing = (supabase.table("leaves").select("*").eq("overtime_id", overtime_id).execute()).data or []
         if existing:
             return {"created": False, "leave": existing[0]}
+        # The lieu leave is real leave: it must not land on days the person already has leave.
+        leave_clash = overlapping_leave(supabase, ot.get("employee_id"), body.start_date, body.end_date)
+        if leave_clash:
+            raise HTTPException(status_code=409, detail=leave_conflict_message(leave_clash))
         leave_data = {
             "employee_id": ot.get("employee_id"),
             "employee_name": ot.get("employee_name"),
@@ -471,9 +469,11 @@ async def take_as_leave(
             "applied_date": datetime.utcnow().isoformat(),
             "overtime_id": overtime_id,
         }
+        if has_columns(supabase, "leaves", ("approved_by", "approved_at")):
+            leave_data.update(decision_stamp("approved", current_user))
         created = (supabase.table("leaves").insert(leave_data).execute()).data or []
         if not created:
-            raise HTTPException(status_code=500, detail="No data returned after insertion")
+            raise server_error(RuntimeError("Supabase returned no row for the leave insert"), "Taking lieu leave")
         return {"created": True, "leave": created[0]}
     except HTTPException:
         raise

@@ -847,7 +847,7 @@ async def get_stats():
         # indistinguishable from a genuinely empty spares register. Re-raise instead
         # (2026-08-30, found via the 90%+ coverage push).
         logger.error(f"Error fetching stats: {str(e)}")
-        raise HTTPException(status_code=500, detail="Failed to load spares stats")
+        raise server_error(e, "Loading stats")
 
 # Health check endpoint
 @router.get("/health/check")
@@ -925,7 +925,7 @@ async def get_saved_spare_requisitions():
         return rows(response)
     except Exception as e:
         logger.error(f"Failed to load spare requisitions: {e}")
-        raise HTTPException(status_code=500, detail="Failed to load saved requisitions")
+        raise server_error(e, "Loading saved spare requisitions")
 
 @router.post("/saved-requisitions", status_code=201)
 async def create_saved_spare_requisition(data: SavedSpareReqCreate, current_user: dict = Depends(get_current_user)):
