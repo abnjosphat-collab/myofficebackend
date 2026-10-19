@@ -248,6 +248,7 @@ for _name, _prefix, _tags in [
     ("safety_complaints", None, None),
     ("services", None, None),
     ("documents", None, None),
+    ("document_folders", None, None),
     ("sops", None, None),
     ("photos", "/api", ["Photos"]),
     ("ai_safety", "/api", ["AI Safety"]),

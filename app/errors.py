@@ -31,6 +31,9 @@ _KNOWN_CONSTRAINTS = {
     "leaves_one_live_request_per_range": "This person already has a leave request for exactly these dates. Edit that request instead.",
     "ppe_one_record_per_issue": "This item was already recorded as issued to this person on this date.",
     "work_order_number": "That work order number is already in use.",
+    "documents_one_copy_per_folder": "This exact file is already in that folder.",
+    "document_folders_one_name_per_parent": "A folder with this name already exists here.",
+    "document_folders_seed_key_idx": "That folder of the AMS structure already exists.",
 }
 
 

@@ -3,9 +3,12 @@
 -- Run in Supabase SQL Editor
 -- ============================================================
 
-drop table if exists public.documents cascade;
+-- HISTORICAL: this was the first version of the table and is already applied. Do not run it again. It used to begin with
+-- "drop table public.documents cascade", which would have deleted every document row; that line is removed. The
+-- current structure is supabase_migration_documents_v2.sql, and the permissive policies below were removed again by
+-- supabase_migration_close_permissive_access.sql (only the backend reads or writes these tables).
 
-create table public.documents (
+create table if not exists public.documents (
   id            uuid primary key default gen_random_uuid(),
   created_at    timestamptz not null default now(),
   updated_at    timestamptz not null default now(),
