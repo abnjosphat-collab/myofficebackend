@@ -2,8 +2,9 @@ from fastapi import APIRouter, HTTPException, Header, Depends
 from starlette.concurrency import run_in_threadpool
 from pydantic import BaseModel, Field, validator
 from typing import Optional, List, Dict, Any, cast
-from app.supabase_client import supabase
+from app.supabase_client import supabase, rows
 from app.auth import get_current_user, require_role, require_role_if_status_in
+from app.overtime_conflicts import INACTIVE_STATUSES, conflict_message, find_conflict, neighbour_dates
 from app.db_helpers import get_or_404
 from app.serialization import encode_json_fields, decode_json_fields
 from app.errors import server_error
@@ -194,13 +195,29 @@ async def get_overtime(status: Optional[str] = None, overtime_type: Optional[str
         logger.error(f"Error fetching overtime: {str(e)}")
         raise server_error(e, "Loading overtime")
 
+def _overlapping_request(employee_id: Optional[str], day: Optional[str], start: Optional[str], end: Optional[str], ignore_id: Any = None) -> Optional[Dict[str, Any]]:
+    """Another live request of this person whose time overlaps the window, or None (also None when there is no window to compare)."""
+    if not (employee_id and day and start and end):
+        return None
+    dates = neighbour_dates(day)
+    if not dates:
+        return None
+    response = supabase.table("overtime").select("id,employee_name,date,start_time,end_time,status").eq("employee_id", employee_id).in_("date", dates).execute()
+    return find_conflict(rows(response), day, start, end, ignore_id)
+
+
 # POST create overtime
 @router.post("")
 @router.post("/")
 async def create_overtime(overtime: OvertimeCreate, current_user: dict = Depends(get_current_user)):
     try:
         logger.info(f"Creating overtime for: {overtime.employee_name}")
-        
+
+        # The browser only warns; this is the check that holds when a second laptop or a stale page submits the same time again.
+        clash = _overlapping_request(overtime.employee_id, overtime.date, overtime.start_time, overtime.end_time)
+        if clash:
+            raise HTTPException(status_code=409, detail=conflict_message(clash))
+
         data_to_insert = {
             "employee_name": overtime.employee_name,
             "employee_id": overtime.employee_id,
@@ -236,8 +253,10 @@ async def create_overtime(overtime: OvertimeCreate, current_user: dict = Depends
             return created_data
         else:
             logger.error("No data returned from Supabase")
-            raise HTTPException(status_code=500, detail="Failed to create overtime - no data returned")
-            
+            raise server_error(RuntimeError("Supabase returned no row for the insert"), "Creating overtime")
+
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Error creating overtime: {str(e)}")
         raise server_error(e, "Creating overtime")
@@ -298,7 +317,7 @@ async def bulk_edit_overtime(
     if not patch:
         raise HTTPException(status_code=422, detail="Nothing to change: unlock at least one field.")
     try:
-        existing = cast(List[Dict[str, Any]], (supabase.table("overtime").select("id,status").in_("id", ids).execute()).data or [])
+        existing = cast(List[Dict[str, Any]], (supabase.table("overtime").select("id,status,employee_id,date,start_time,end_time").in_("id", ids).execute()).data or [])
         status_of = {row.get("id"): (row.get("status") or "pending").lower() for row in existing}
         locked = [i for i in ids if status_of.get(i) in _OT_LOCKED_STATUSES]
         editable = [i for i in ids if i not in locked]
@@ -306,10 +325,21 @@ async def bulk_edit_overtime(
         if locked:
             try:
                 await require_role("manager")(authorization)
-                editable = ids
+                editable = list(ids)
                 locked = []
             except HTTPException:
                 errors.extend(f"Request #{i} is {status_of.get(i)} — only a manager can change it." for i in locked)
+        if "date" in patch and patch["date"]:
+            # Moving requests to another date must not land them on top of the person's other live requests.
+            by_id = {row.get("id"): row for row in existing}
+            for i in list(editable):
+                row = by_id.get(i)
+                if not row or str(row.get("status") or "pending").lower() in INACTIVE_STATUSES:
+                    continue
+                clash = _overlapping_request(row.get("employee_id"), patch["date"], row.get("start_time"), row.get("end_time"), ignore_id=i)
+                if clash:
+                    editable.remove(i)
+                    errors.append(f"Request #{i} was not moved: {conflict_message(clash)}")
         updated = []
         if editable:
             response = supabase.table("overtime").update(patch).in_("id", editable).execute()
@@ -356,6 +386,16 @@ async def update_overtime(overtime_id: int, updated: OvertimeUpdate, authorizati
                 await require_role('manager')(authorization)
         if 'spares_used' in data_to_update:
             data_to_update = encode_json_fields(data_to_update, ['spares_used'])
+
+        # Moving a request onto another time, person or date, or reopening a rejected one, must not land on top of
+        # another live request. Approving or rejecting leaves the time alone, so it is never blocked by this.
+        merged = {**existing_row, **data_to_update}
+        moved = any(key in data_to_update and data_to_update[key] != existing_row.get(key) for key in ('employee_id', 'date', 'start_time', 'end_time'))
+        reopened = existing_status in INACTIVE_STATUSES and str(merged.get('status') or 'pending').lower() not in INACTIVE_STATUSES
+        if (moved or reopened) and str(merged.get('status') or 'pending').lower() not in INACTIVE_STATUSES:
+            clash = _overlapping_request(merged.get('employee_id'), merged.get('date'), merged.get('start_time'), merged.get('end_time'), ignore_id=overtime_id)
+            if clash:
+                raise HTTPException(status_code=409, detail=conflict_message(clash))
 
         response = supabase.table("overtime").update(data_to_update).eq("id", overtime_id).execute()
 
