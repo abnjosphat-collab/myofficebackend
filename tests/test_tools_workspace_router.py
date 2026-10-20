@@ -308,6 +308,32 @@ def test_employee_without_a_number_is_created_and_real_numbers_stay_unique():
     assert dup.status_code == 409
 
 
+def test_creating_the_same_numberless_employee_twice_is_refused():
+    admin, _ = admin_and_issuer()
+    auth = {"Authorization": f"Bearer {admin}"}
+    first = client.post("/api/tools-workspace/employees", headers=auth, json={"name": "No Number Repeat", "department": "Engineering"})
+    assert first.status_code == 201
+    again = client.post("/api/tools-workspace/employees", headers=auth, json={"name": "no number repeat", "department": "engineering"})
+    assert again.status_code == 409 and "without a mine number" in again.json()["detail"]
+    elsewhere = client.post("/api/tools-workspace/employees", headers=auth, json={"name": "No Number Repeat", "department": "Mining"})
+    assert elsewhere.status_code == 201  # the same name in another department is a different person
+    numbered = client.post("/api/tools-workspace/employees", headers=auth, json={"employee_number": "E-999", "name": "No Number Repeat", "department": "Engineering"})
+    assert numbered.status_code == 201  # a mine number distinguishes them
+
+
+def test_import_commit_rejects_a_numberless_repeat_on_its_own_row():
+    admin, _ = admin_and_issuer()
+    auth = {"Authorization": f"Bearer {admin}"}
+    committed = client.post("/api/tools-workspace/imports/commit", headers=auth, json={"target": "employees", "rows": [
+        {"name": "Import Repeat", "department": "Engineering"},
+        {"name": "Import Repeat", "department": "Engineering"},
+    ]})
+    assert committed.status_code == 200
+    body = committed.json()
+    assert body["accepted_count"] == 1 and body["rejected_count"] == 1
+    assert "without a mine number" in body["rejected"][0]["error"]
+
+
 def test_employee_number_can_be_added_later_changed_and_cleared():
     admin, _ = admin_and_issuer()
     auth = {"Authorization": f"Bearer {admin}"}

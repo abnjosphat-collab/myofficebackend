@@ -6,6 +6,7 @@ from app.supabase_client import supabase, rows, one_row
 from app.auth import get_current_user, require_role
 from app.aggregation import count_by
 from app.db_helpers import apply_date_range, get_or_404
+from app.concurrency import assert_unchanged
 from app.errors import server_error
 import logging
 
@@ -41,6 +42,8 @@ class RequisitionUpdate(BaseModel):
     requisition_number: Optional[str] = None
     notes: Optional[str] = None
     items: Optional[List[RequisitionItemCreate]] = None
+    # Optimistic concurrency: the updated_at the editor opened (popped before every write).
+    expected_updated_at: Optional[str] = None
 
 # ============= HEALTH CHECK =============
 @router.get("/health")
@@ -187,7 +190,7 @@ async def get_requisition(requisition_id: int):
 @router.patch("/{requisition_id}")
 async def update_requisition(requisition_id: int, update: RequisitionUpdate, current_user: dict = Depends(get_current_user)):
     try:
-        get_or_404(supabase, "requisitions", requisition_id, detail="Requisition not found")
+        existing = get_or_404(supabase, "requisitions", requisition_id, detail="Requisition not found")
 
         if update.requisition_number:
             conflict = supabase.table("requisitions").select("id").eq("requisition_number", update.requisition_number).neq("id", requisition_id).execute()
@@ -199,6 +202,7 @@ async def update_requisition(requisition_id: int, update: RequisitionUpdate, cur
         # per-field `is not None` checks here did. See work_orders (backend edec24a).
         update_data = update.model_dump(exclude_unset=True)
         update_data.pop('items', None)  # items is a separate table, handled below
+        assert_unchanged(existing, update_data.pop('expected_updated_at', None))
         if update_data.get('date') is not None:
             update_data['date'] = update_data['date'].isoformat()
 

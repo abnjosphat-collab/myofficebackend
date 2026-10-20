@@ -31,6 +31,7 @@ from app.crud_router import CrudRouter
 from app.supabase_client import supabase, one_row
 from app.auth import get_current_user, require_role
 from app.db_helpers import fetch_all_pages
+from app.concurrency import assert_unchanged, touch
 from app.stock_levels import adjust_stock, item_deltas
 from app.errors import server_error
 
@@ -74,6 +75,8 @@ class StockIssueUpdate(BaseModel):
     issued_by: Optional[str] = None
     items: Optional[List[IssueItem]] = None
     notes: Optional[str] = None
+    # Optimistic concurrency: the updated_at the editor opened (popped before every write).
+    expected_updated_at: Optional[str] = None
 
 
 def _clean_issue_write(data: dict) -> dict:
@@ -132,12 +135,15 @@ async def _create_issue(data: StockIssueCreate):
 
 async def _update_issue(item_id: int, data: StockIssueUpdate):
     payload = _clean_issue_write(data.model_dump(exclude_unset=True))
+    expectation = payload.pop('expected_updated_at', None)
     if not payload:
         raise HTTPException(status_code=400, detail="No fields to update")
     try:
         before = one_row(await run_in_threadpool(lambda: supabase.table("stock_issues").select("*").eq("id", item_id).execute()))
         if before is None:
             raise HTTPException(status_code=404, detail="Issue record not found")
+        assert_unchanged(before, expectation)
+        touch(before, payload)
         updated = one_row(await run_in_threadpool(lambda: supabase.table("stock_issues").update(payload).eq("id", item_id).execute()))
         if updated is None:
             raise HTTPException(status_code=404, detail="Issue record not found")

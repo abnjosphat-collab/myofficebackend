@@ -184,6 +184,27 @@ async def test_update_spare_explicit_none_clears_the_field(patch_supabase):
     assert result["notes"] is None
 
 
+async def test_update_spare_stale_expectation_is_409_and_saves_nothing(patch_supabase):
+    state = patch_supabase([
+        [{"id": 1, "stock_code": "SC-1", "updated_at": "2026-10-01T00:00:00+00:00"}],
+    ])
+    with pytest.raises(HTTPException) as exc_info:
+        await update_spare(1, SpareUpdate(description="New", expected_updated_at="2020-01-01T00:00:00+00:00"), current_user={"user_id": "u1"})
+    assert exc_info.value.status_code == 409
+    assert "Someone else changed" in exc_info.value.detail
+    assert state["calls"] == ["select"]
+
+
+async def test_update_spare_matching_expectation_saves_and_restamps(patch_supabase):
+    state = patch_supabase([
+        [{"id": 1, "stock_code": "SC-1", "updated_at": "2026-10-01T00:00:00+00:00"}],
+        [{"id": 1, "stock_code": "SC-1", "description": "New"}],
+    ])
+    await update_spare(1, SpareUpdate(description="New", expected_updated_at="2026-10-01T00:00:00+00:00"), current_user={"user_id": "u1"})
+    assert "expected_updated_at" not in state["update_payload"]
+    assert state["update_payload"]["updated_at"] != "2026-10-01T00:00:00+00:00"
+
+
 async def test_update_spare_returning_no_row_is_500(patch_supabase):
     patch_supabase([
         [{"id": 1, "stock_code": "SC-1"}],

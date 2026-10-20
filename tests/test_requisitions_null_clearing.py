@@ -6,6 +6,7 @@
 # the correct behaviour in. Pure/mocked; no network.
 
 import pytest
+from fastapi import HTTPException
 
 import app.routers.requisitions as requisitions_mod
 from app.routers.requisitions import RequisitionUpdate, update_requisition
@@ -53,7 +54,7 @@ class _FakeTable:
             return _Resp([{"id": 1, **self.state["update_payload"]}])
         # select() covers: existing-row check, requisition_number conflict check, and
         # the final "return the updated row" refetch — all fine with one fixed row.
-        return _Resp([{"id": 1, "requisition_items": []}])
+        return _Resp([self.state["existing"]])
 
 
 class _FakeSupabase:
@@ -66,7 +67,7 @@ class _FakeSupabase:
 
 @pytest.fixture
 def patch_supabase(monkeypatch):
-    state = {"update_payload": None}
+    state = {"update_payload": None, "existing": {"id": 1, "requisition_items": []}}
     monkeypatch.setattr(requisitions_mod, "supabase", _FakeSupabase(state))
     return state
 
@@ -98,3 +99,19 @@ async def test_items_key_never_reaches_the_requisitions_table_update(patch_supab
     await update_requisition(1, update, current_user={"user_id": "u1"})
     payload = patch_supabase["update_payload"]
     assert "items" not in payload
+
+
+async def test_stale_expectation_is_409_and_saves_nothing(patch_supabase):
+    patch_supabase["existing"] = {"id": 1, "requisition_items": [], "updated_at": "2026-10-01T00:00:00+00:00"}
+    update = RequisitionUpdate(priority="high", expected_updated_at="2020-01-01T00:00:00+00:00")
+    with pytest.raises(HTTPException) as exc:
+        await update_requisition(1, update, current_user={"user_id": "u1"})
+    assert exc.value.status_code == 409
+    assert "Someone else changed" in exc.value.detail
+    assert patch_supabase["update_payload"] is None
+
+
+async def test_expectation_never_reaches_the_table_update(patch_supabase):
+    update = RequisitionUpdate(priority="medium", expected_updated_at="2026-10-01T00:00:00+00:00")
+    await update_requisition(1, update, current_user={"user_id": "u1"})
+    assert "expected_updated_at" not in patch_supabase["update_payload"]

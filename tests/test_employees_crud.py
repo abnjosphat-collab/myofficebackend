@@ -120,6 +120,22 @@ def test_employee_id_validator_strips_and_uppercases():
     assert e.employee_id == "C1165"
 
 
+def test_email_validator_allows_missing_and_blank():
+    assert _employee().email is None
+    assert _employee(email="").email is None
+    assert _employee(email="   ").email is None
+
+
+def test_email_validator_trims_a_plain_address():
+    assert _employee(email="  Ann@Example.com ").email == "Ann@Example.com"
+
+
+def test_email_validator_rejects_non_addresses():
+    for bad in ("not-an-email", "a@b", "@x.com", "a b@c.com"):
+        with pytest.raises(Exception):
+            _employee(email=bad)
+
+
 def _employee(**overrides):
     base = dict(
         employee_id="C1165",
@@ -328,6 +344,38 @@ async def test_update_employee_persists_section_and_invalidates_cache(patch_supa
     assert update_call["payload"]["section"] == "Management"
     assert invalidated == ["employees"]
     assert result["section"] == "Management"
+
+
+async def test_update_employee_stale_expectation_is_409_and_saves_nothing(patch_supabase):
+    calls = patch_supabase([
+        [{"id": 5, "employee_id": "C1165", "archived": False, "updated_at": "2026-10-01T00:00:00+00:00"}],
+    ])
+    with pytest.raises(HTTPException) as exc:
+        await update_employee(5, _employee(expected_updated_at="2020-01-01T00:00:00+00:00"), current_user={"user_id": "u1"})
+    assert exc.value.status_code == 409
+    assert "Someone else changed" in exc.value.detail
+    assert [c["op"] for c in calls] == ["select"]
+
+
+async def test_update_employee_matching_expectation_saves_and_restamps(patch_supabase):
+    calls = patch_supabase([
+        [{"id": 5, "employee_id": "C1165", "archived": False, "updated_at": "2026-10-01T00:00:00+00:00"}],
+        [{"id": 5, "employee_id": "C1165", "date_of_engagement": "2020-01-01"}],
+    ])
+    await update_employee(5, _employee(expected_updated_at="2026-10-01T00:00:00+00:00"), current_user={"user_id": "u1"})
+    update_call = next(c for c in calls if c["op"] == "update")
+    assert "expected_updated_at" not in update_call["payload"]
+    assert update_call["payload"]["updated_at"] != "2026-10-01T00:00:00+00:00"
+
+
+async def test_create_employee_ignores_an_expectation(patch_supabase):
+    calls = patch_supabase([
+        [],
+        [{"id": 10, "employee_id": "C1165", "date_of_engagement": "2020-01-01"}],
+    ])
+    await create_employee(_employee(expected_updated_at="t0"), current_user={"user_id": "u1"})
+    insert_call = next(c for c in calls if c["op"] == "insert")
+    assert "expected_updated_at" not in insert_call["payload"]
 
 
 # ─── delete_employee ─────────────────────────────────────────────────────────────────
