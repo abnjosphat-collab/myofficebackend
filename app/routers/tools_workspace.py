@@ -65,6 +65,11 @@ def _all(kind: str, newest=False):
 def _find(kind: str, field: str, value: Any):
     if _test_mode: return next((dict(row) for row in _memory[kind] if row.get(field)==value),None)
     data=rows(supabase.table(TABLE[kind]).select("*").eq(field,value).limit(1).execute()); return data[0] if data else None
+def _numberless_duplicate(name:Optional[str],department:Optional[str]):
+    """A numberless employee row with the same name in the same department, or None. Names compare case-insensitively like numbers; numbered rows never clash here — the number already distinguishes them."""
+    want=((name or "").strip().lower(),(department or "").strip().lower())
+    if not all(want): return None
+    return next((dict(row) for row in _all("employees") if row.get("employee_number") in (None,"") and ((row.get("name") or "").strip().lower(),(row.get("department") or "").strip().lower())==want),None)
 def _insert(kind: str, row: dict[str,Any]):
     if _test_mode: _memory[kind].append(dict(row)); return dict(row)
     data=rows(supabase.table(TABLE[kind]).insert(row).execute())
@@ -453,6 +458,7 @@ def create_employee(body:EmployeeInput,account=Depends(_operator)):
     _ensure_managed_department(account,body.department)
     number=(body.employee_number or "").strip() or None
     if number and any((row.get("employee_number") or "").lower()==number.lower() for row in _all("employees")): raise HTTPException(409,"That employee number already exists.")
+    if not number and _numberless_duplicate(body.name,body.department): raise HTTPException(409,f"{body.name.strip()} is already recorded in {body.department.strip()} without a mine number.")
     return _insert("employees",{"id":str(uuid.uuid4()),**body.model_dump(),"employee_number":number,"active":True,"created_at":_now(),"created_by":account["name"]})
 @router.get("/tools")
 def list_tools(account=Depends(_session)):
@@ -838,6 +844,7 @@ def commit_import(body:ImportCommit,account=Depends(_operator)):
                 model=EmployeeInput.model_validate(item)
                 _ensure_managed_department(account,model.department)
                 if model.employee_number and _find("employees","employee_number",model.employee_number): raise ValueError("Employee number already exists")
+                if not model.employee_number and _numberless_duplicate(model.name,model.department): raise ValueError(f"{model.name.strip()} is already recorded in {model.department.strip()} without a mine number.")
                 accepted.append(_insert("employees",{"id":str(uuid.uuid4()),**model.model_dump(),"active":True,"created_by":account["name"],"created_at":_now()}))
             else:
                 model=ToolInput.model_validate(item)

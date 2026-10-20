@@ -8,8 +8,10 @@ from app.supabase_client import supabase
 from app.auth import get_current_user, require_role
 from app.cache import cached, invalidate_namespace
 from app.db_helpers import fetch_all_pages, get_or_404
+from app.concurrency import assert_unchanged, touch
 from app.errors import server_error
 import logging
+import re
 
 logger = logging.getLogger(__name__)
 
@@ -47,6 +49,8 @@ class Employee(BaseModel):
     other_positions: Optional[List[str]] = Field(default_factory=list)
     previous_employer: Optional[str] = None
     archived: Optional[bool] = False
+    # Optimistic concurrency: the updated_at the editor opened (popped before every write).
+    expected_updated_at: Optional[str] = None
 
     class Config:
         json_encoders = {date: lambda v: v.isoformat()}
@@ -72,6 +76,19 @@ class Employee(BaseModel):
             raise ValueError('Employee ID cannot be empty')
         # Allow any alphanumeric ID: C1165, PM365, EMP-042, etc.
         return v.strip().upper()
+
+    @validator('email')
+    def clean_email(cls, v):
+        # Optional, but a filled address must look like one — the same rule
+        # as the employee form (frontend lib/email.ts isEmailLike).
+        if v is None:
+            return None
+        text = v.strip() if isinstance(v, str) else v
+        if not text:
+            return None
+        if not re.match(r'^\S+@\S+\.\S+$', text):
+            raise ValueError('Enter a valid email address.')
+        return text
 
     @validator('qualifications', 'offences', 'awards_recognition', 'other_positions',
                pre=True, always=True)
@@ -293,7 +310,9 @@ async def create_employee(employee: Employee, current_user: dict = Depends(get_c
                        "Choose a different ID."
             )
 
-        payload = _prepare_employee_write(employee.model_dump())
+        data = employee.model_dump()
+        data.pop('expected_updated_at', None)  # creates cannot conflict; never stored
+        payload = _prepare_employee_write(data)
         rows = _data(supabase.table("employees").insert(payload).execute())
         if not rows:
             raise server_error(RuntimeError("Supabase returned no row for the insert"), "Creating employee")
@@ -318,7 +337,7 @@ async def update_employee(id: int, updated: Employee, current_user: dict = Depen
         # Confirm the employee exists
         try:
             existing_rows = _data(
-                supabase.table("employees").select("id,employee_id,archived").eq("id", id).execute()
+                supabase.table("employees").select("id,employee_id,archived,updated_at").eq("id", id).execute()
             )
         except Exception:
             existing_rows = _data(
@@ -330,6 +349,8 @@ async def update_employee(id: int, updated: Employee, current_user: dict = Depen
             raise HTTPException(404, detail=f"Employee #{id} not found")
 
         existing = existing_rows[0]
+        data = updated.model_dump()
+        assert_unchanged(existing, data.pop('expected_updated_at', None))
         old_emp_id = existing['employee_id']
         new_emp_id = updated.employee_id
 
@@ -348,7 +369,8 @@ async def update_employee(id: int, updated: Employee, current_user: dict = Depen
                     detail=f"Employee ID '{new_emp_id}' is already used by another employee."
                 )
 
-        payload = _prepare_employee_write(updated.model_dump(), existing)
+        payload = _prepare_employee_write(data, existing)
+        touch(existing, payload)
         rows = _data(
             supabase.table("employees").update(payload).eq("id", id).execute()
         )

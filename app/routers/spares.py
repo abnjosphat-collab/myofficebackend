@@ -11,6 +11,7 @@ from app.auth import get_current_user, require_role
 from app.uploads import read_and_validate_upload, SPREADSHEET_EXTS
 from app.serialization import convert_dates_to_iso
 from app.db_helpers import get_or_404
+from app.concurrency import assert_unchanged, touch
 from app.errors import server_error
 import logging
 import io
@@ -68,6 +69,8 @@ class SpareUpdate(BaseModel):
     notes: Optional[str] = None
     lead_time_days: Optional[int] = Field(None, ge=0)
     last_ordered_date: Optional[str] = None
+    # Optimistic concurrency: the updated_at the editor opened (popped before every write).
+    expected_updated_at: Optional[str] = None
 
     class Config:
         json_encoders = {
@@ -88,6 +91,7 @@ _DB_COLUMNS = {
     'current_quantity', 'min_quantity', 'max_quantity', 'unit_price',
     'priority', 'storage_location', 'supplier', 'safety_stock',
     'notes', 'unit_of_measure', 'lead_time_days', 'last_ordered_date',
+    'updated_at',
 }
 
 # Helper function to clean data
@@ -660,12 +664,16 @@ async def update_spare(spare_id: int, spare_update: SpareUpdate, current_user: d
             if one_row(conflict) is not None:
                 raise HTTPException(status_code=400, detail=f"Stock code '{spare_update.stock_code}' already exists")
         
+        sent = spare_update.model_dump(exclude_unset=True)
+        assert_unchanged(existing_spare, sent.pop('expected_updated_at', None))
+
         # Clean and filter update data to known DB columns only
-        update_data = filter_for_db(clean_data(spare_update.model_dump(exclude_unset=True)))
-        
+        update_data = filter_for_db(clean_data(sent))
+
         if not update_data:
             raise HTTPException(status_code=400, detail="No data provided for update")
-        
+
+        touch(existing_spare, update_data)
         # Update in database
         response = supabase.table("spares").update(update_data).eq("id", spare_id).execute()
 
