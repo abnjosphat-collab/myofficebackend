@@ -1,5 +1,7 @@
 -- PPE: align the stored person copies (name, position, department, section) to the employee register.
--- NOT RUN — one-shot for the owner to run in Supabase when ready. Record the run here afterwards.
+-- RUN 2026-10-22 via scripts/apply_migration.py (HTTP 201): 359 rows aligned,
+-- drift preview 359 -> 0, backup table ppe_records_backup_2026_10_21 holds 359 rows.
+-- Recorded in schema_migrations the same day. Do not re-run (fails loudly by design).
 --
 -- Why: issues used to stamp whatever the form held (and every save forced department 'MAINTENANCE'), so the copies
 -- drifted from the register. From U4.2 the server stamps them on create and on a move; this aligns the existing rows
