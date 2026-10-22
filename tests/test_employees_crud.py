@@ -14,6 +14,7 @@ from datetime import date
 
 import pytest
 from fastapi import HTTPException
+from pydantic import ValidationError
 
 import app.routers.employees as emp_mod
 from app.routers.employees import (
@@ -118,6 +119,15 @@ def test_employee_id_validator_rejects_blank_id():
 def test_employee_id_validator_strips_and_uppercases():
     e = _employee(employee_id=" c1165 ")
     assert e.employee_id == "C1165"
+
+
+def test_employee_id_validator_rejects_ids_without_letters_or_digits():
+    for bad in [".............", "...", "---", "   ...   "]:
+        with pytest.raises(ValidationError):
+            _employee(employee_id=bad)
+    assert _employee(employee_id="TBA03").employee_id == "TBA03"
+    assert _employee(employee_id="PM365").employee_id == "PM365"
+    assert _employee(employee_id="EMP-042").employee_id == "EMP-042"
 
 
 def test_email_validator_allows_missing_and_blank():
@@ -275,7 +285,9 @@ async def test_update_employee_not_found_is_404(patch_supabase):
 
 async def test_update_employee_same_employee_id_skips_clash_check(patch_supabase):
     calls = patch_supabase([
-        [{"id": 5, "employee_id": "C1165"}],  # existence check: same employee_id
+        # existence check: same employee_id and an unchanged person, so nothing follows either
+        [{"id": 5, "employee_id": "C1165", "first_name": "John", "last_name": "Doe",
+          "designation": "Technician", "department": None, "section": None}],
         [{"id": 5, "employee_id": "C1165", "date_of_engagement": "2020-01-01"}],  # update
     ])
     result = await update_employee(5, _employee(employee_id="C1165"), current_user={"user_id": "u1"})
@@ -297,7 +309,8 @@ async def test_update_employee_changed_id_rejects_collision(patch_supabase):
 
 async def test_update_employee_changed_id_succeeds_when_unique(patch_supabase):
     patch_supabase([
-        [{"id": 5, "employee_id": "OLD_ID"}],  # existence check
+        [{"id": 5, "employee_id": "OLD_ID", "first_name": "John", "last_name": "Doe",
+          "designation": "Technician", "department": None, "section": None}],  # existence check
         [],                                     # clash check: no collision
         [{"id": 5, "employee_id": "NEW_ID", "date_of_engagement": "2020-01-01"}],  # update
         [], [], [],                             # the new id is carried into overtime, leaves and PPE
@@ -327,8 +340,10 @@ async def test_update_employee_persists_section_and_invalidates_cache(patch_supa
     # The Personnel round-trip behind the Matangira report: a section edit must reach the
     # update payload, and the 60 s employees cache must be dropped so the next list is fresh.
     calls = patch_supabase([
-        [{"id": 38839, "employee_id": "TBA34", "archived": False}],
+        [{"id": 38839, "employee_id": "TBA34", "archived": False, "first_name": "John", "last_name": "Doe",
+          "designation": "Clerk", "department": None, "section": "Underground"}],
         [{"id": 38839, "employee_id": "TBA34", "section": "Management", "date_of_engagement": "2020-01-01"}],
+        [],  # the new section follows into the PPE copies
     ])
     invalidated = []
 
@@ -359,7 +374,8 @@ async def test_update_employee_stale_expectation_is_409_and_saves_nothing(patch_
 
 async def test_update_employee_matching_expectation_saves_and_restamps(patch_supabase):
     calls = patch_supabase([
-        [{"id": 5, "employee_id": "C1165", "archived": False, "updated_at": "2026-10-01T00:00:00+00:00"}],
+        [{"id": 5, "employee_id": "C1165", "archived": False, "updated_at": "2026-10-01T00:00:00+00:00",
+          "first_name": "John", "last_name": "Doe", "designation": "Technician", "department": None, "section": None}],
         [{"id": 5, "employee_id": "C1165", "date_of_engagement": "2020-01-01"}],
     ])
     await update_employee(5, _employee(expected_updated_at="2026-10-01T00:00:00+00:00"), current_user={"user_id": "u1"})
@@ -419,7 +435,8 @@ async def test_delete_employee_db_failure_is_500(patch_supabase):
 
 async def test_changing_the_employee_id_carries_overtime_leave_and_ppe_with_it(patch_supabase):
     calls = patch_supabase([
-        [{"id": 5, "employee_id": "OLD_ID"}], [],
+        [{"id": 5, "employee_id": "OLD_ID", "first_name": "John", "last_name": "Doe",
+          "designation": "Technician", "department": None, "section": None}], [],
         [{"id": 5, "employee_id": "NEW_ID", "date_of_engagement": "2020-01-01"}],
         [], [], [],
     ])
@@ -427,6 +444,80 @@ async def test_changing_the_employee_id_carries_overtime_leave_and_ppe_with_it(p
     follow = [c for c in calls if c["op"] == "update" and c["payload"] == {"employee_id": "NEW_ID"}]
     assert [c["table"] for c in follow] == ["overtime", "leaves", "ppe_records"]
     assert all(("eq", "employee_id", "OLD_ID") in c["filters"] for c in follow)
+
+
+async def test_a_name_or_designation_change_rewrites_the_copies_everywhere(patch_supabase):
+    calls = patch_supabase([
+        [{"id": 5, "employee_id": "C1165", "first_name": "John", "last_name": "Doe",
+          "designation": "Technician", "department": None, "section": None}],
+        [{"id": 5, "employee_id": "C1165", "date_of_engagement": "2020-01-01"}],
+        [], [], [],
+    ])
+    await update_employee(
+        5, _employee(first_name="Jonathan", designation="Senior Technician"), current_user={"user_id": "u1"})
+    follow = [c for c in calls if c["op"] == "update" and c["table"] != "employees"]
+    assert [(c["table"], c["payload"]) for c in follow] == [
+        ("overtime", {"employee_name": "Jonathan Doe", "position": "Senior Technician"}),
+        ("leaves", {"employee_name": "Jonathan Doe", "position": "Senior Technician"}),
+        ("ppe_records", {"employee_name": "Jonathan Doe", "position": "Senior Technician"}),
+    ]
+    assert all(("eq", "employee_id", "C1165") in c["filters"] for c in follow)
+
+
+async def test_a_department_change_reaches_overtime_and_ppe_but_not_leaves(patch_supabase):
+    calls = patch_supabase([
+        [{"id": 5, "employee_id": "C1165", "first_name": "John", "last_name": "Doe",
+          "designation": "Technician", "department": "Ops", "section": None}],
+        [{"id": 5, "employee_id": "C1165", "date_of_engagement": "2020-01-01"}],
+        [], [],
+    ])
+    await update_employee(5, _employee(department="Engineering"), current_user={"user_id": "u1"})
+    follow = [c for c in calls if c["op"] == "update" and c["table"] != "employees"]
+    assert [(c["table"], c["payload"]) for c in follow] == [
+        ("overtime", {"department": "Engineering"}),
+        ("ppe_records", {"department": "Engineering"}),
+    ]
+
+
+async def test_a_section_change_reaches_only_the_ppe_copies(patch_supabase):
+    calls = patch_supabase([
+        [{"id": 5, "employee_id": "C1165", "first_name": "John", "last_name": "Doe",
+          "designation": "Technician", "department": None, "section": "Mechanical"}],
+        [{"id": 5, "employee_id": "C1165", "date_of_engagement": "2020-01-01"}],
+        [],
+    ])
+    await update_employee(5, _employee(section="Electrical"), current_user={"user_id": "u1"})
+    follow = [c for c in calls if c["op"] == "update" and c["table"] != "employees"]
+    assert [(c["table"], c["payload"]) for c in follow] == [("ppe_records", {"mine_section": "Electrical"})]
+
+
+async def test_a_rename_and_a_name_change_follow_together(patch_supabase):
+    calls = patch_supabase([
+        [{"id": 5, "employee_id": "OLD_ID", "first_name": "John", "last_name": "Doe",
+          "designation": "Technician", "department": None, "section": None}],
+        [],
+        [{"id": 5, "employee_id": "NEW_ID", "date_of_engagement": "2020-01-01"}],
+        [], [], [], [], [], [],
+    ])
+    await update_employee(5, _employee(employee_id="NEW_ID", last_name="Doe-Smith"), current_user={"user_id": "u1"})
+    follow = [c for c in calls if c["op"] == "update" and c["table"] != "employees"]
+    moved = [c for c in follow if c["payload"] == {"employee_id": "NEW_ID"}]
+    assert [c["table"] for c in moved] == ["overtime", "leaves", "ppe_records"]
+    assert all(("eq", "employee_id", "OLD_ID") in c["filters"] for c in moved)
+    renamed = [c for c in follow if "employee_name" in c["payload"]]
+    assert [c["table"] for c in renamed] == ["overtime", "leaves", "ppe_records"]
+    assert all(c["payload"]["employee_name"] == "John Doe-Smith" for c in renamed)
+    assert all(("eq", "employee_id", "NEW_ID") in c["filters"] for c in renamed)
+
+
+async def test_whitespace_only_edits_follow_nothing(patch_supabase):
+    calls = patch_supabase([
+        [{"id": 5, "employee_id": "C1165", "first_name": "John", "last_name": "Doe",
+          "designation": "Technician", "department": "Ops", "section": None}],
+        [{"id": 5, "employee_id": "C1165", "date_of_engagement": "2020-01-01"}],
+    ])
+    await update_employee(5, _employee(designation="  Technician ", department="Ops "), current_user={"user_id": "u1"})
+    assert [c for c in calls if c["table"] != "employees"] == []
 
 
 async def test_an_employee_with_records_cannot_be_deleted(patch_supabase):

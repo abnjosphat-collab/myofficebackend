@@ -37,13 +37,17 @@ class Resp:
 
 
 class Q:
-    def __init__(self, fake):
-        self.fake, self.op, self.payload, self.filters = fake, "select", None, []
+    def __init__(self, fake, table):
+        self.fake, self.table, self.op, self.payload, self.filters = fake, table, "select", None, []
 
     def select(self, *a, **k):
         return self
 
     def eq(self, c, v):
+        self.filters.append((c, v))
+        return self
+
+    def ilike(self, c, v):
         self.filters.append((c, v))
         return self
 
@@ -61,17 +65,23 @@ class Q:
             return Resp([{"id": 99, **self.payload}])
         if self.op == "update":
             return Resp([{"id": 1, **self.payload}])
+        if self.table == "employees":
+            return Resp(self.fake.register)
         if any(c == "id" for c, _ in self.filters):
             return Resp(self.fake.existing)
         return Resp(self.fake.others)
 
 
 class Fake:
-    def __init__(self, others=None, existing=None):
+    def __init__(self, others=None, existing=None, register=None):
         self.others, self.existing, self.calls = others or [], existing or [], []
+        self.register = register if register is not None else [
+            {"employee_id": "PM486", "first_name": "Reason", "last_name": "Muzondo",
+             "designation": "Fitter", "department": "Engineering", "section": "Mechanical"},
+        ]
 
     def table(self, name):
-        return Q(self)
+        return Q(self, name)
 
     def writes(self, op):
         return [c for c in self.calls if c[0] == op]
@@ -112,8 +122,8 @@ async def test_a_different_item_the_same_day_is_saved(fake):
 async def test_the_lookup_is_for_this_person_and_this_day(fake):
     f = fake()
     await create_ppe_record(_issue(), current_user=USER)
-    lookup = f.writes("select")[0]
-    assert ("employee_id", "PM486") in lookup[2] and ("issue_date", "2026-03-04") in lookup[2]
+    lookup = [c for c in f.writes("select") if ("issue_date", "2026-03-04") in c[2]][0]
+    assert ("employee_id", "PM486") in lookup[2]
 
 
 async def test_moving_a_record_onto_another_issue_is_refused(fake):
