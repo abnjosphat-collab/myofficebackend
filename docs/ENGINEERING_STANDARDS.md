@@ -115,10 +115,8 @@ recorded 2026-10.
 
 | Open read | Why it stays open |
 |---|---|
-| `GET /api/availabilities` | Equipment + latest availability merged for the homepage; no PII, no per-user data |
 | `GET /api/availabilities/stats` | Aggregate counts only |
 | `GET /api/breakdowns/dashboard/overview` | Homepage KPI aggregates (counts/sums, cached 60 s); individual breakdowns stay gated |
-| `GET /api/equipment` | The equipment list isn't PII; the single-item read stays gated |
 | `GET /api/leaves/stats/summary` | Aggregate counts; individual leave records stay gated |
 | `GET /api/lookup-lists/{list_name}` | Shared pick-list values (locations, natures) needed by unsigned forms |
 | `GET /api/maintenance/work-orders/stats/summary` | Aggregate counts; work orders themselves stay gated |

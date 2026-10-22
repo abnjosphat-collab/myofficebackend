@@ -23,7 +23,7 @@ class AvailRecordIn(BaseModel):
 
 # ─── Existing read endpoints ──────────────────────────────────────────────────
 
-@router.get("/availabilities")
+@router.get("/availabilities", dependencies=[Depends(get_current_user)])
 async def get_availabilities():
     """Get equipment list with their latest availability data merged in.
 

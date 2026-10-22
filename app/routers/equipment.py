@@ -137,8 +137,8 @@ def generate_equipment_id():
 
 # --- Routes ---
 
-@router.get("")
-@router.get("/")
+@router.get("", dependencies=[Depends(get_current_user)])
+@router.get("/", dependencies=[Depends(get_current_user)])
 @cached("equipment", ttl=60)
 async def get_equipment():
     """Retrieve all equipment from the database."""
