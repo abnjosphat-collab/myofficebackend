@@ -32,7 +32,12 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 
 
 def migration_files() -> list[str]:
-    return sorted(p.name for p in REPO_ROOT.glob("supabase_migration_*.sql"))
+    # supabase_rollback_* is deliberately excluded: emergency-only scripts must
+    # never show up as pending-to-apply.
+    files: set[str] = set()
+    for pattern in ("supabase_migration_*.sql", "supabase_fix_*.sql", "supabase_cleanup_*.sql"):
+        files.update(p.name for p in REPO_ROOT.glob(pattern))
+    return sorted(files)
 
 
 def applied_map() -> dict:
