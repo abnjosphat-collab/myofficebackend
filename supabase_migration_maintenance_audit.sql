@@ -3,8 +3,9 @@
 -- Maintenance workflow, slice 1: audit trail, row version, comments.
 -- Plan: docs/plans/maintenance-workflow.md (myofficefrontend), sections M.2.1, M.2.4, M.2.5 and slice 1.
 --
--- NOT APPLIED. Run by the owner in the Supabase SQL editor, then:
---   python scripts/track_migration.py --mark-applied supabase_migration_maintenance_audit.sql
+-- RAN 2026-10-22 via scripts/apply_migration.py (HTTP 201) on the owner's
+-- instruction, then recorded with scripts/track_migration.py --mark-applied.
+-- Post-checks: version+client_token present, events/comments empty, 169 work orders intact.
 --
 -- Properties: additive (two new columns on work_orders, three new objects), safe to run twice, existing
 -- readers and writers keep working. Rehearsed on a throwaway local PostgreSQL 16 with
