@@ -34,13 +34,19 @@ def fetch_timesheets_map(start: str, end: str) -> Dict[str, dict]:
 
 def load_employees() -> List[dict]:
     """The Employees register. It records departures with ``archived``; there is no ``is_active`` column."""
-    return supabase.table("employees").select(
-        "id,employee_id,first_name,last_name,employment_type,archived"
-    ).execute().data or []
+    def _base():
+        return supabase.table("employees").select(
+            "id,employee_id,first_name,last_name,employment_type,archived"
+        )
+
+    return fetch_all_pages(lambda s, e: _base().range(s, e).execute())
 
 
 def fetch_leaves() -> List[dict]:
-    return supabase.table("leaves").select("*").execute().data or []
+    def _base():
+        return supabase.table("leaves").select("*")
+
+    return fetch_all_pages(lambda s, e: _base().range(s, e).execute())
 
 
 def apply_patch(db_emp_id: int, ds: str, patch: dict, existing: Optional[dict], apply: bool) -> str:

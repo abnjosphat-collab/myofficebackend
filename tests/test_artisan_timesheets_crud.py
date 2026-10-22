@@ -385,3 +385,17 @@ async def test_update_without_daily_rows_skips_the_leave_check(patch_supabase):
     )
     assert result["adjustment"] == 1.5
     assert all(c["table"] == "artisan_timesheets" for c in fake.state["calls"])
+
+
+async def test_update_artisan_timesheet_stale_expected_updated_at_is_409(patch_supabase):
+    patch_supabase({
+        "select_return": [{"id": 2, "updated_at": "2024-03-10T12:00:00"}],
+        "update_return": [{"id": 2}],
+    })
+    with pytest.raises(HTTPException) as exc:
+        await update_artisan_timesheet(
+            2,
+            ArtisanTimesheetUpdate(compiled_by="Clerk", expected_updated_at="2024-03-01T00:00:00"),
+            current_user=CURRENT_USER,
+        )
+    assert exc.value.status_code == 409

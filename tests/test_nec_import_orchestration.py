@@ -140,6 +140,9 @@ def test_load_employees_selects_only_real_register_columns(monkeypatch):
             seen["columns"] = columns
             return self
 
+        def range(self, start, end):
+            return self
+
         def execute(self):
             return type("R", (), {"data": [_employee(1, "C0001")]})()
 
@@ -163,3 +166,51 @@ def test_build_preview_does_not_report_archived_nec_staff_as_missing(monkeypatch
     result = build_preview(review, "2026-08-13", "2026-09-12")
 
     assert [m["human_code"] for m in result["missing_sheets"]] == ["C0003"]
+
+
+def _paged_tables(monkeypatch, tables):
+    """Fake supabase that slices by .range() like PostgREST and counts calls."""
+    calls = []
+
+    class _Query:
+        def __init__(self, rows):
+            self._rows = rows
+            self._range = None
+
+        def select(self, *a, **k):
+            return self
+
+        def range(self, start, end):
+            self._range = (start, end)
+            return self
+
+        def execute(self):
+            calls.append(1)
+            r = self._range
+            data = self._rows[r[0]:r[1] + 1] if r else self._rows
+            return type("R", (), {"data": data})()
+
+    class _DB:
+        def table(self, name):
+            return _Query(tables.get(name, []))
+
+    monkeypatch.setattr(apply_runner, "supabase", _DB())
+    return calls
+
+
+def test_load_employees_reads_beyond_first_database_page(monkeypatch):
+    """F-04: past 1,000 register rows the import must page, not silently drop staff."""
+    rows = [_employee(i, f"C{i:04d}") for i in range(1001)]
+    calls = _paged_tables(monkeypatch, {"employees": rows})
+    out = apply_runner.load_employees()
+    assert len(out) == 1001
+    assert len(calls) == 2
+
+
+def test_fetch_leaves_reads_beyond_first_database_page(monkeypatch):
+    """F-04: past 1,000 leave rows the import must page, not import leave days as worked."""
+    rows = [{"id": i} for i in range(1001)]
+    calls = _paged_tables(monkeypatch, {"leaves": rows})
+    out = apply_runner.fetch_leaves()
+    assert len(out) == 1001
+    assert len(calls) == 2

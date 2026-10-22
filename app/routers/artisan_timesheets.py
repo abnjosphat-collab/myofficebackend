@@ -11,6 +11,7 @@ import logging
 from app.supabase_client import supabase, rows, one_row
 from app.auth import get_current_user
 from app.db_helpers import fetch_all_pages, get_or_404
+from app.concurrency import assert_unchanged
 from app.serialization import encode_json_fields, decode_json_fields
 from app.errors import server_error
 
@@ -94,6 +95,8 @@ class ArtisanTimesheetUpdate(BaseModel):
     approved_mechanical_foreman_signature: Optional[str] = None
     authorized_by: Optional[str] = None
     authorized_by_signature: Optional[str] = None
+    # Optimistic concurrency: the updated_at the editor opened (popped before every write).
+    expected_updated_at: Optional[str] = None
 
 
 def _decode(row: Dict[str, Any]) -> Dict[str, Any]:
@@ -263,6 +266,7 @@ async def update_artisan_timesheet(
     try:
         existing = get_or_404(supabase, TABLE, timesheet_id, detail="Artisan timesheet not found")
         data = body.model_dump(exclude_unset=True)
+        assert_unchanged(existing, data.pop("expected_updated_at", None))
         if not data:
             return _decode(existing)
 
