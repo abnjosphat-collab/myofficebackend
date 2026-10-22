@@ -26,10 +26,12 @@ class DateTimeEncoder(json.JSONEncoder):
 
 # Pydantic Models
 class PPEIssueCreate(BaseModel):
-    employee_name: str = Field(..., min_length=1)
+    # The person copies are optional because the server stamps them from the employee register on every create
+    # (client copies are ignored); only the mine number reference is required.
+    employee_name: Optional[str] = None
     employee_id: str = Field(..., min_length=1)
-    department: str = Field(..., min_length=1)
-    position: str = Field(..., min_length=1)
+    department: Optional[str] = None
+    position: Optional[str] = None
     ppe_type: str = Field(..., min_length=1)
     item_name: str = Field(..., min_length=1)
     size: Optional[str] = None
@@ -73,6 +75,45 @@ class PPEIssueUpdate(BaseModel):
             datetime: lambda v: v.isoformat()
         }
 
+# The register stamps the person. PPE rows copy the holder's number, name, position, department and section so lists
+# read without a join, but the employee register owns those values: every create and every move to another person
+# overwrites the copies from the register row and ignores what the client sent. An unknown mine number is refused
+# with a plain sentence, not a 500.
+def _like_literal(value: str) -> str:
+    """Escape the LIKE pattern characters so an ilike filter matches literally."""
+    return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
+def _register_employee(employee_id: str):
+    """The register row for this mine number (case-insensitive exact), or None."""
+    want = (employee_id or "").strip().upper()
+    if not want:
+        return None
+    found = supabase.table("employees").select(
+        "employee_id,first_name,last_name,designation,department,section"
+    ).ilike("employee_id", _like_literal(employee_id.strip())).execute()
+    for row in rows(found):
+        if (row.get("employee_id") or "").strip().upper() == want:
+            return row
+    return None
+
+
+def _stamp_person(data: dict, person: dict) -> dict:
+    """Overwrite the person copies (and the id's spelling) from the register row."""
+    data["employee_id"] = person.get("employee_id")
+    data["employee_name"] = " ".join(f"{person.get('first_name') or ''} {person.get('last_name') or ''}".split())
+    data["position"] = person.get("designation") or ""
+    data["department"] = person.get("department") or ""
+    data["mine_section"] = person.get("section") or ""
+    return data
+
+
+def _resolve_person_or_422(employee_id: str) -> dict:
+    person = _register_employee(employee_id)
+    if person is None:
+        raise HTTPException(status_code=422, detail="That mine number is not on the employee register.")
+    return person
+
 # Helper function to convert dates in records
 # PPE Records Endpoints
 @router.get("", dependencies=[Depends(get_current_user)])
@@ -113,13 +154,16 @@ async def get_ppe_records(
 @router.post("")
 async def create_ppe_record(record: PPEIssueCreate, current_user: dict = Depends(get_current_user)):
     try:
-        # The same item issued to the same person on the same day twice is refused here, not just in the browser.
-        clash = existing_duplicate(supabase, record.employee_id, record.ppe_type, record.issue_date)
-        if clash:
-            raise HTTPException(status_code=409, detail=duplicate_message(clash))
+        # The person must be on the register; the row keeps the register's copies and spelling, not the client's.
+        person = _resolve_person_or_422(record.employee_id)
 
         # Convert Pydantic model to dict and handle date serialization
-        data_to_insert = record.model_dump()
+        data_to_insert = _stamp_person(record.model_dump(), person)
+
+        # The same item issued to the same person on the same day twice is refused here, not just in the browser.
+        clash = existing_duplicate(supabase, data_to_insert["employee_id"], record.ppe_type, record.issue_date)
+        if clash:
+            raise HTTPException(status_code=409, detail=duplicate_message(clash))
         
         # Ensure dates are properly formatted for database
         if data_to_insert.get('issue_date'):
@@ -166,6 +210,15 @@ async def update_ppe_record(record_id: int, updated: PPEIssueUpdate, current_use
         # field, not be silently dropped. See work_orders (backend edec24a).
         data_to_update = updated.model_dump(exclude_unset=True)
         assert_unchanged(existing, data_to_update.pop('expected_updated_at', None))
+
+        # Moving the record to another person re-stamps the copies from the register; anything else leaves them alone.
+        if "employee_id" in data_to_update:
+            sent = data_to_update["employee_id"]
+            if sent is not None and (sent or "").strip().upper() == (existing.get("employee_id") or "").strip().upper():
+                # The same person (a re-pick that changed nothing, or only the id's case): keep the stored spelling.
+                data_to_update.pop("employee_id")
+            else:
+                _stamp_person(data_to_update, _resolve_person_or_422(sent or ""))
 
         # Moving the item, the date or the person must not make it a duplicate of another issue.
         if any(k in data_to_update for k in ('employee_id', 'ppe_type', 'issue_date')):

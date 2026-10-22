@@ -21,7 +21,7 @@ from pydantic import ValidationError
 
 from app.routers.overtime import (
     OvertimeCreate, OvertimeUpdate, BulkStatusUpdate, BulkEditUpdate, TakeAsLeaveInput,
-    get_overtime, create_overtime, update_overtime, delete_overtime,
+    get_overtime, get_overtime_by_id, create_overtime, update_overtime, delete_overtime,
     bulk_update_overtime_status, bulk_edit_overtime, take_as_leave,
 )
 
@@ -895,3 +895,26 @@ async def test_delete_overtime_refuses_approved_or_paid(patch_supabase, patch_au
         await delete_overtime(3, authorization="Bearer t", current_user=CURRENT_USER)
     assert exc.value.status_code == 409 and "Cancel it instead" in exc.value.detail
     assert [c for c in fake.state["calls"] if c["op"] == "delete"] == []
+
+
+async def test_get_overtime_by_id_returns_the_decoded_row(patch_supabase):
+    fake = patch_supabase({"select_return": [{"id": 7, "employee_name": "Ann", "spares_used": json.dumps([{"name": "Bolt"}])}]})
+    row = await get_overtime_by_id(7)
+    assert row == {"id": 7, "employee_name": "Ann", "spares_used": [{"name": "Bolt"}]}
+    assert ("id", 7) in fake.state["calls"][0]["filters"]
+
+
+async def test_get_overtime_by_id_missing_is_404(patch_supabase):
+    patch_supabase({"select_return": None})
+    with pytest.raises(HTTPException) as exc:
+        await get_overtime_by_id(999)
+    assert exc.value.status_code == 404
+    assert exc.value.detail == "Overtime not found"
+
+
+async def test_get_overtime_by_id_db_error_is_500(patch_supabase):
+    patch_supabase({"select_return": [{"id": 7}], "raise_op": "select"})
+    with pytest.raises(HTTPException) as exc:
+        await get_overtime_by_id(7)
+    assert exc.value.status_code == 500
+    assert exc.value.detail.startswith("Loading overtime failed. Please try again. (ref ")

@@ -194,6 +194,18 @@ async def get_overtime(status: Optional[str] = None, overtime_type: Optional[str
         logger.error(f"Error fetching overtime: {str(e)}")
         raise server_error(e, "Loading overtime")
 
+
+# ---------- GET overtime by id (deep-link fetch for the notifications bell) ----------
+@router.get("/{overtime_id}", dependencies=[Depends(get_current_user)])
+async def get_overtime_by_id(overtime_id: int):
+    try:
+        row = get_or_404(supabase, "overtime", overtime_id, detail="Overtime not found")
+        return decode_json_fields(row, ['spares_used'])
+    except Exception as e:
+        logger.error(f"Error fetching overtime {overtime_id}: {str(e)}")
+        raise server_error(e, "Loading overtime")
+
+
 def _overlapping_request(employee_id: Optional[str], day: Optional[str], start: Optional[str], end: Optional[str], ignore_id: Any = None) -> Optional[Dict[str, Any]]:
     """Another live request of this person whose time overlaps the window, or None (also None when there is no window to compare)."""
     if not (employee_id and day and start and end):

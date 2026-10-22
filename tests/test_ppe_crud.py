@@ -38,6 +38,11 @@ class _FakeQuery:
         self._filters.append((col, val))
         return self
 
+    def ilike(self, col, val):
+        # The register stamp matches case-insensitively, verified exactly in Python; the fake emulates the composed result.
+        self._filters.append((col, val, "ilike"))
+        return self
+
     def order(self, col, desc=False):
         self._order = (col, desc)
         return self
@@ -73,7 +78,14 @@ class _FakeQuery:
             table.append(row)
             return _Resp([row])
 
-        matches = [r for r in table if all(r.get(c) == v for c, v in self._filters)]
+        def _hit(row, f):
+            if len(f) == 2:
+                col, val = f
+                return row.get(col) == val
+            col, val, _op = f
+            return str(row.get(col) or "").upper() == str(val or "").upper()
+
+        matches = [r for r in table if all(_hit(r, f) for f in self._filters)]
 
         if self._mode == "select":
             if self._order:
@@ -106,8 +118,12 @@ class _FakeSupabase:
 def patch_supabase(monkeypatch):
     state = {}
 
-    def _patch(ppe_records=None):
+    def _patch(ppe_records=None, employees=None):
         state["ppe_records"] = list(ppe_records or [])
+        state["employees"] = list(employees) if employees is not None else [
+            {"employee_id": "E1", "first_name": "J.", "last_name": "Doe",
+             "designation": "Fitter", "department": "Ops", "section": "Mechanical"},
+        ]
         monkeypatch.setattr(ppe_mod, "supabase", _FakeSupabase(state))
         return state
 
@@ -225,6 +241,7 @@ async def test_create_happy_path(patch_supabase):
     assert result["issue_date"] == "2026-08-01"
     assert result["condition"] == "good"   # model default
     assert result["status"] == "active"    # model default
+    assert result["mine_section"] == "Mechanical"   # stamped from the register, never posted
     assert "created_at" in result
 
 
@@ -236,6 +253,48 @@ async def test_create_isoformats_expiry_date(patch_supabase):
     )
     result = await create_ppe_record(record, current_user=_user())
     assert result["expiry_date"] == "2027-02-01"
+
+
+async def test_create_stamps_person_from_register_ignoring_client_copies(patch_supabase):
+    patch_supabase()
+    record = PPEIssueCreate(
+        employee_name="Wrong Name", employee_id="E1", department="Wrong", position="Wrong",
+        ppe_type="helmet", item_name="Hard Hat", issue_date="2026-08-01", mine_section="Wrong",
+    )
+    result = await create_ppe_record(record, current_user=_user())
+    assert result["employee_name"] == "J. Doe"
+    assert result["position"] == "Fitter"
+    assert result["department"] == "Ops"
+    assert result["mine_section"] == "Mechanical"
+
+
+async def test_create_unknown_mine_number_is_422(patch_supabase):
+    patch_supabase()
+    record = PPEIssueCreate(employee_id="E999", ppe_type="helmet", item_name="Hard Hat", issue_date="2026-08-01")
+    with pytest.raises(HTTPException) as exc:
+        await create_ppe_record(record, current_user=_user())
+    assert exc.value.status_code == 422
+    assert "not on the employee register" in exc.value.detail
+
+
+async def test_create_lowercase_id_stores_register_spelling(patch_supabase):
+    patch_supabase()
+    record = PPEIssueCreate(employee_id="e1", ppe_type="helmet", item_name="Hard Hat", issue_date="2026-08-01")
+    result = await create_ppe_record(record, current_user=_user())
+    assert result["employee_id"] == "E1"
+
+
+async def test_create_register_lookup_failure_is_500_not_422(patch_supabase, monkeypatch):
+    patch_supabase()
+
+    def _boom(_id):
+        raise RuntimeError("db down")
+
+    monkeypatch.setattr(ppe_mod, "_register_employee", _boom)
+    record = PPEIssueCreate(employee_id="E1", ppe_type="helmet", item_name="Hard Hat", issue_date="2026-08-01")
+    with pytest.raises(HTTPException) as exc:
+        await create_ppe_record(record, current_user=_user())
+    assert exc.value.status_code == 500
 
 
 # ─── get_ppe_record ──────────────────────────────────────────────────────────────────
@@ -283,6 +342,48 @@ async def test_update_not_found_404(patch_supabase):
     with pytest.raises(HTTPException) as exc:
         await update_ppe_record(404, PPEIssueUpdate(status="replaced"), current_user=_user())
     assert exc.value.status_code == 404
+
+
+async def test_update_move_to_another_person_restamps_from_register(patch_supabase):
+    patch_supabase(
+        [{"id": 7, "employee_id": "E1", "employee_name": "J. Doe", "status": "active"}],
+        employees=[
+            {"employee_id": "E1", "first_name": "J.", "last_name": "Doe",
+             "designation": "Fitter", "department": "Ops", "section": "Mechanical"},
+            {"employee_id": "E2", "first_name": "A.", "last_name": "Nother",
+             "designation": "Welder", "department": "Eng", "section": "Electrical"},
+        ],
+    )
+    result = await update_ppe_record(7, PPEIssueUpdate(employee_id="E2"), current_user=_user())
+    assert result["employee_id"] == "E2"
+    assert result["employee_name"] == "A. Nother"
+    assert result["position"] == "Welder"
+    assert result["department"] == "Eng"
+    assert result["mine_section"] == "Electrical"
+
+
+async def test_update_move_to_unknown_person_is_422(patch_supabase):
+    patch_supabase([{"id": 7, "employee_id": "E1", "status": "active"}])
+    with pytest.raises(HTTPException) as exc:
+        await update_ppe_record(7, PPEIssueUpdate(employee_id="E999"), current_user=_user())
+    assert exc.value.status_code == 422
+    assert "not on the employee register" in exc.value.detail
+
+
+async def test_update_same_person_keeps_stored_spelling_and_skips_lookup(patch_supabase):
+    state = patch_supabase([{"id": 7, "employee_id": "E1", "status": "active"}])
+    result = await update_ppe_record(7, PPEIssueUpdate(employee_id="e1", notes="x"), current_user=_user())
+    assert result["employee_id"] == "E1"
+    update_calls = [c for c in state["calls"] if c["mode"] == "update"]
+    assert "employee_id" not in update_calls[0]["payload"]
+    assert [c for c in state["calls"] if c["table"] == "employees"] == []
+
+
+async def test_update_without_person_skips_lookup(patch_supabase):
+    state = patch_supabase([{"id": 7, "employee_id": "E1", "status": "active", "department": "Ops"}])
+    result = await update_ppe_record(7, PPEIssueUpdate(status="returned"), current_user=_user())
+    assert result["status"] == "returned"
+    assert [c for c in state["calls"] if c["table"] == "employees"] == []
 
 
 # ─── delete_ppe_record ───────────────────────────────────────────────────────────────

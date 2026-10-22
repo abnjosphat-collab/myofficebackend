@@ -74,8 +74,13 @@ class Employee(BaseModel):
     def clean_employee_id(cls, v: str) -> str:
         if not v or not v.strip():
             raise ValueError('Employee ID cannot be empty')
-        # Allow any alphanumeric ID: C1165, PM365, EMP-042, etc.
-        return v.strip().upper()
+        # Allow any alphanumeric ID: C1165, PM365, EMP-042, etc. — but it must
+        # contain at least one letter or digit, so dot-only placeholders
+        # (".............") typed on the register are rejected, not stored.
+        cleaned = v.strip().upper()
+        if not re.search(r'[A-Z0-9]', cleaned):
+            raise ValueError('Employee ID must contain at least one letter or digit')
+        return cleaned
 
     @validator('email')
     def clean_email(cls, v):
@@ -123,9 +128,31 @@ class BulkNormalizeResponse(BaseModel):
 _RECORDS_BY_EMPLOYEE_ID = ("overtime", "leaves", "ppe_records")
 
 
-def _follow_renamed_employee_id(old_id: str, new_id: str) -> None:
-    for table in _RECORDS_BY_EMPLOYEE_ID:
-        supabase.table(table).update({"employee_id": new_id}).eq("employee_id", old_id).execute()
+def _follow_changed_employee(old: dict, new: dict) -> None:
+    """Carry a personnel edit into the copies overtime, leaves and PPE keep beside the id: a new number re-points the
+    rows, and a changed name, designation, department or section rewrites that table's copied columns under the (new)
+    number. Values compare stripped (a whitespace tidy-up alone follows nothing) but write exactly as stored."""
+    old_id, new_id = old.get("employee_id"), new.get("employee_id")
+    if new_id != old_id:
+        for table in _RECORDS_BY_EMPLOYEE_ID:
+            supabase.table(table).update({"employee_id": new_id}).eq("employee_id", old_id).execute()
+    old_name = " ".join(f"{old.get('first_name') or ''} {old.get('last_name') or ''}".split())
+    new_name = " ".join(f"{new.get('first_name') or ''} {new.get('last_name') or ''}".split())
+    copies: dict = {"overtime": {}, "leaves": {}, "ppe_records": {}}
+    if new_name != old_name:
+        for table in copies:
+            copies[table]["employee_name"] = new_name
+    if (new.get("designation") or "").strip() != (old.get("designation") or "").strip():
+        for table in copies:
+            copies[table]["position"] = new.get("designation")
+    if (new.get("department") or "").strip() != (old.get("department") or "").strip():
+        copies["overtime"]["department"] = new.get("department")
+        copies["ppe_records"]["department"] = new.get("department")
+    if (new.get("section") or "").strip() != (old.get("section") or "").strip():
+        copies["ppe_records"]["mine_section"] = new.get("section")
+    for table, payload in copies.items():
+        if payload:
+            supabase.table(table).update(payload).eq("employee_id", new_id).execute()
 
 
 def _records_that_use(employee_id: str) -> list:
@@ -334,14 +361,15 @@ async def update_employee(id: int, updated: Employee, current_user: dict = Depen
     a *different* employee.
     """
     try:
-        # Confirm the employee exists
+        # Confirm the employee exists (the person columns ride along so a rename or re-designation can be carried
+        # into the overtime, leave and PPE copies by _follow_changed_employee below).
         try:
             existing_rows = _data(
-                supabase.table("employees").select("id,employee_id,archived,updated_at").eq("id", id).execute()
+                supabase.table("employees").select("id,employee_id,first_name,last_name,designation,department,section,archived,updated_at").eq("id", id).execute()
             )
         except Exception:
             existing_rows = _data(
-                supabase.table("employees").select("id,employee_id").eq("id", id).execute()
+                supabase.table("employees").select("id,employee_id,first_name,last_name,designation,department,section").eq("id", id).execute()
             )
             for row in existing_rows:
                 row.setdefault("archived", False)
@@ -376,8 +404,10 @@ async def update_employee(id: int, updated: Employee, current_user: dict = Depen
         )
         if not rows:
             raise server_error(RuntimeError("Supabase returned no row for the update"), "Updating employee")
-        if new_emp_id != old_emp_id:
-            _follow_renamed_employee_id(old_emp_id, new_emp_id)
+        _follow_changed_employee(existing, {
+            "employee_id": new_emp_id, "first_name": updated.first_name, "last_name": updated.last_name,
+            "designation": updated.designation, "department": updated.department, "section": updated.section,
+        })
         await invalidate_namespace("employees")
         return _dates_from_db(rows[0])
 
