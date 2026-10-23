@@ -22,6 +22,7 @@
 # module entirely.
 from __future__ import annotations
 
+import json
 from typing import Any, Optional
 
 from fastapi import HTTPException
@@ -54,9 +55,10 @@ TABLES: dict[str, dict[str, Any]] = {
     "leaves": {"rule": "person", "column": "employee_id", "id_kind": "register"},
     "overtime": {"rule": "person", "column": "employee_id", "id_kind": "register"},
     "timesheets": {"rule": "person", "column": "employee_id", "id_kind": "db"},
-    "artisan_timesheets": {"rule": "person", "column": "employee_db_id", "id_kind": "db"},
+    "artisan_timesheets": {"rule": "person", "column": "employee_db_id", "id_kind": "db",
+                              "column2": "employee_id", "id_kind2": "register"},
     "ppe_records": {"rule": "person", "column": "employee_id", "id_kind": "register"},
-    "ppe_order_list": {"rule": "person", "column": "employee_id", "id_kind": "register"},
+    "ppe_order_list": {"rule": "person", "column": "employee_id", "id_kind": "register", "json": "entry"},
     "training_certifications": {"rule": "person", "column": "employee_id", "id_kind": "register"},
     "competency_matrix": {"rule": "person", "column": "employee_id", "id_kind": "register"},
     "standby_schedules": {"rule": "person", "column": "employee_id", "id_kind": "register"},
@@ -89,26 +91,41 @@ TABLES: dict[str, dict[str, Any]] = {
 
 def viewer_scope(user: Optional[dict]) -> Optional[str]:
     """The section a signed-in viewer is limited to, or None for a full view.
-    Tolerates sessions minted before permissions existed (no key → unscoped).
+    Reads the top-level `scope` get_current_user sets; falls back to
+    `permissions.scope` for raw profile rows. Tolerates sessions minted
+    before scoping existed (no key → unscoped).
     """
     if not isinstance(user, dict):
         return None
-    perms = user.get("permissions") or {}
-    scope = perms.get("scope") if isinstance(perms, dict) else None
+    scope = user.get("scope")
+    if not scope:
+        perms = user.get("permissions") or {}
+        scope = perms.get("scope") if isinstance(perms, dict) else None
     return scope if scope else None
 
 
 def scope_person_ids(db: Any, scope: str) -> dict[str, set]:
-    """Everyone in `scope`: register ids (text) and db ids (ints). One query;
-    routers call it once per request and pass the result down."""
-    resp = db.table("employees").select("id,employee_id").eq("section", scope).execute()
-    register, db_ids = set(), set()
+    """Everyone in `scope`: register ids (text), db ids (ints) and normalized
+    full names (for the stock-issues name fallback). One query; routers call
+    it once per request and pass the result down."""
+    resp = db.table("employees").select("id,employee_id,first_name,last_name").eq("section", scope).execute()
+    register, db_ids, names = set(), set(), set()
     for row in resp.data or []:
         if row.get("employee_id"):
             register.add(str(row["employee_id"]))
         if row.get("id") is not None:
             db_ids.add(row["id"])
-    return {"register": register, "db": db_ids}
+        full = f"{row.get('first_name') or ''} {row.get('last_name') or ''}".strip()
+        if full:
+            names.add(" ".join(full.split()).lower())
+    return {"register": register, "db": db_ids, "names": names}
+
+
+def person_ids_for(db: Any, user: Optional[dict]) -> Optional[dict]:
+    """scope_person_ids() for a scoped viewer, else None (every helper
+    short-circuits on None). Routers call this once per request."""
+    scope = viewer_scope(user)
+    return scope_person_ids(db, scope) if scope is not None else None
 
 
 def _rule(table: str, scope: str) -> dict:
@@ -119,6 +136,59 @@ def _rule(table: str, scope: str) -> dict:
         return TABLES[table]
     except KeyError:
         raise RuntimeError(f"Table {table!r} has no scope rule — refusing to serve it to a scoped viewer")
+
+
+def _person_ref_match(column: str, db_kind: bool, row: dict, bank: dict) -> bool:
+    ids = bank["db" if db_kind else "register"]
+    ref = row.get(column)
+    ref = str(ref) if not db_kind and ref is not None else ref
+    return ref in ids
+
+
+def _person_row(rule: dict, row: dict) -> dict:
+    """The dict carrying the person link — the row itself, or its nested JSON
+    object for tables that keep the link inside a payload column."""
+    if "json" not in rule:
+        return row
+    nested = row.get(rule["json"])
+    return nested if isinstance(nested, dict) else {}
+
+
+def _person_match(rule: dict, row: dict, bank: dict) -> bool:
+    """Either link in scope (a table with one link column just checks that)."""
+    if _person_ref_match(rule["column"], rule.get("id_kind") == "db", row, bank):
+        return True
+    return "column2" in rule and _person_ref_match(
+        rule["column2"], rule.get("id_kind2") == "db", row, bank)
+
+
+def _in_or_empty_2(query: Any, rule: dict, bank: dict) -> Any:
+    """Dual-link person predicate: one or_() with two in-lists. An empty side
+    is dropped (it could match nothing anyway); both empty spells
+    match-nothing."""
+    col1, db1 = rule["column"], rule.get("id_kind") == "db"
+    col2, db2 = rule["column2"], rule.get("id_kind2") == "db"
+    o1 = sorted(bank["db" if db1 else "register"], key=str)
+    o2 = sorted(bank["db" if db2 else "register"], key=str)
+    if o1 and o2:
+        q1 = ",".join(str(v) if db1 else json.dumps(str(v)) for v in o1)
+        q2 = ",".join(str(v) if db2 else json.dumps(str(v)) for v in o2)
+        return query.or_(f"{col1}.in.({q1}),{col2}.in.({q2})")
+    if o1:
+        return query.in_(col1, o1)
+    if o2:
+        return query.in_(col2, o2)
+    return query.eq(col1, -1 if db1 else "__scope_empty__")
+
+
+def _in_or_empty(query: Any, column: str, values: Any, int_column: bool) -> Any:
+    """IN-predicate that stays valid when the set is empty: PostgREST rejects
+    an empty in.() list, so spell "match nothing" as an impossible equality
+    instead (ids are positive SERIALs / mine numbers, never these)."""
+    ordered = sorted(values, key=str)
+    if ordered:
+        return query.in_(column, ordered)
+    return query.eq(column, -1 if int_column else "__scope_empty__")
 
 
 def apply_list_scope(query: Any, user: Optional[dict], table: str, db: Any = None,
@@ -134,15 +204,19 @@ def apply_list_scope(query: Any, user: Optional[dict], table: str, db: Any = Non
     if kind == "section":
         return query.eq(rule["column"], scope)
     if kind == "person":
-        ids = (person_ids or scope_person_ids(db, scope))[
-            "db" if rule.get("id_kind") == "db" else "register"]
-        return query.in_(rule["column"], sorted(ids, key=str))
+        if "json" in rule:
+            raise RuntimeError(f"Table {table!r} keeps its person link in JSON — filters in Python (filter_rows), not in the query")
+        bank = person_ids or scope_person_ids(db, scope)
+        if "column2" not in rule:
+            ids = bank["db" if rule.get("id_kind") == "db" else "register"]
+            return _in_or_empty(query, rule["column"], ids, rule.get("id_kind") == "db")
+        return _in_or_empty_2(query, rule, bank)
     if kind == "inherits":
         parent = rule["parent"]
         parent_rule = TABLES[parent]
         assert parent_rule["rule"] == "section", f"inherits parent {parent} is not section-ruled"
         resp = db.table(parent).select("id").eq(parent_rule["column"], scope).execute()
-        return query.in_(rule["via"], [r["id"] for r in (resp.data or [])])
+        return _in_or_empty(query, rule["via"], [r["id"] for r in (resp.data or [])], True)
     if kind == "members":
         raise RuntimeError(f"Table {table!r} filters in Python (filter_rows), not in the query")
     raise RuntimeError(f"Table {table!r} uses rule {kind!r}, which has no list predicate")
@@ -165,11 +239,7 @@ def row_visible(user: Optional[dict], table: str, row: dict, db: Any = None,
         # a blank or shared row; everywhere else NULL/"" never matches.
         return value in (rule.get("open_values") or [])
     if kind == "person":
-        ids = (person_ids or scope_person_ids(db, scope))[
-            "db" if rule.get("id_kind") == "db" else "register"]
-        ref = row.get(rule["column"])
-        ref = str(ref) if rule.get("id_kind") != "db" and ref is not None else ref
-        return ref in ids
+        return _person_match(rule, _person_row(rule, row), person_ids or scope_person_ids(db, scope))
     if kind == "members":
         ids = (person_ids or scope_person_ids(db, scope))["register"]
         spec = rule["members"]
@@ -235,13 +305,9 @@ def stamp_create(user: Optional[dict], table: str, payload: dict, db: Any = None
         out[rule["column"]] = scope
         return out
     if kind == "person":
-        ids = (person_ids or scope_person_ids(db, scope))[
-            "db" if rule.get("id_kind") == "db" else "register"]
-        ref = out.get(rule["column"])
-        ref = str(ref) if rule.get("id_kind") != "db" and ref is not None else ref
-        if ref not in ids:
-            raise HTTPException(status_code=404, detail="Not found")
-        return out
+        if _person_match(rule, _person_row(rule, out), person_ids or scope_person_ids(db, scope)):
+            return out
+        raise HTTPException(status_code=404, detail="Not found")
     if kind == "inherits":
         parent = rule["parent"]
         parent_rule = TABLES[parent]
@@ -251,6 +317,12 @@ def stamp_create(user: Optional[dict], table: str, payload: dict, db: Any = None
             "id", out.get(rule["via"])).execute()
         rows = resp.data or []
         if not rows or rows[0].get(parent_rule["column"]) != scope:
+            raise HTTPException(status_code=404, detail="Not found")
+        return out
+    if kind == "members":
+        # Symmetric with reads: the creator must be able to SEE the row they
+        # are creating (their section on it, or any member in scope).
+        if not row_visible(user, table, out, db, person_ids):
             raise HTTPException(status_code=404, detail="Not found")
         return out
     raise RuntimeError(f"Table {table!r} uses rule {kind!r}, which cannot stamp creates")

@@ -24,6 +24,7 @@ from app.db_helpers import response_rows
 from app.supabase_client import supabase
 from app.uploads import read_and_validate_upload
 from app.errors import server_error
+from app.scope import apply_list_scope, assert_row_visible, person_ids_for, stamp_create, viewer_scope
 
 logger = logging.getLogger(__name__)
 
@@ -74,9 +75,11 @@ def _record(row: dict[str, Any]) -> CertificateRecord:
     )
 
 
-def _all_records() -> List[CertificateRecord]:
+def _all_records(user=None, person_ids=None) -> List[CertificateRecord]:
     try:
-        rows = response_rows(supabase.table(TABLE).select("*").order("expiry_date").execute())
+        q = apply_list_scope(supabase.table(TABLE).select("*").order("expiry_date"),
+                             user, TABLE, supabase, person_ids)
+        rows = response_rows(q.execute())
     except Exception as e:
         logger.error("training list failed: %s", e)
         raise HTTPException(status_code=502, detail="Training records could not be read from the database.")
@@ -123,10 +126,10 @@ def _remove_file(path: Optional[str]) -> None:
 
 # --- Records ---
 
-@router.get("/", response_model=List[CertificateRecord], dependencies=[Depends(get_current_user)])
-async def get_all_certifications():
+@router.get("/", response_model=List[CertificateRecord])
+async def get_all_certifications(current_user: dict = Depends(get_current_user)):
     """All certification records, soonest expiry first."""
-    return _all_records()
+    return _all_records(current_user, person_ids_for(supabase, current_user))
 
 
 @router.post("/", response_model=CertificateRecord)
@@ -141,6 +144,9 @@ async def create_new_certification(
     current_user: dict = Depends(get_current_user),
 ):
     """Adds a certification, storing its certificate file when one is attached."""
+    if viewer_scope(current_user) is not None:
+        stamp_create(current_user, TABLE, {"employee_id": employee_id.strip()},
+                     supabase, person_ids_for(supabase, current_user))
     path, url = (await _store_certificate(certificate_file)) if certificate_file else (None, None)
     row = {
         "employee_id": employee_id.strip(), "employee_name": employee_name.strip(), "department": department.strip(),
@@ -159,10 +165,13 @@ async def create_new_certification(
     return _record(saved[0])
 
 
-@router.get("/{record_id}", response_model=CertificateRecord, dependencies=[Depends(get_current_user)])
-async def get_certification(record_id: str):
+@router.get("/{record_id}", response_model=CertificateRecord)
+async def get_certification(record_id: str, current_user: dict = Depends(get_current_user)):
     """One certification record."""
-    return _record(_one_row(record_id))
+    row = _one_row(record_id)
+    assert_row_visible(current_user, TABLE, row, supabase,
+                       person_ids_for(supabase, current_user), detail="Certification record not found")
+    return _record(row)
 
 
 @router.put("/{record_id}", response_model=CertificateRecord)
@@ -179,6 +188,13 @@ async def update_certification(
 ):
     """Changes the fields sent; a new certificate file replaces the old one."""
     existing = _one_row(record_id)
+    if viewer_scope(current_user) is not None:
+        person_ids = person_ids_for(supabase, current_user)
+        assert_row_visible(current_user, TABLE, existing, supabase, person_ids,
+                           detail="Certification record not found")
+        assert person_ids is not None  # person_ids_for never returns None for a scoped viewer
+        if employee_id is not None and str(employee_id).strip() not in person_ids["register"]:
+            raise HTTPException(status_code=404, detail="Certification record not found")
     patch: dict[str, Any] = {}
     for key, value in (("employee_id", employee_id), ("employee_name", employee_name), ("department", department),
                        ("certification_name", certification_name), ("required_refresher", required_refresher)):
@@ -208,6 +224,9 @@ async def update_certification(
 async def delete_certification(record_id: str, current_user: dict = Depends(require_role("manager"))):
     """Deletes a certification and its stored certificate file."""
     existing = _one_row(record_id)
+    if viewer_scope(current_user) is not None:
+        assert_row_visible(current_user, TABLE, existing, supabase,
+                           person_ids_for(supabase, current_user), detail="Certification record not found")
     try:
         supabase.table(TABLE).delete().eq("id", record_id).execute()
     except Exception as e:
@@ -218,10 +237,10 @@ async def delete_certification(record_id: str, current_user: dict = Depends(requ
 
 # --- Compliance reporting ---
 
-@router.get("/reports/compliance_rate", dependencies=[Depends(get_current_user)])
-async def get_compliance_rate():
+@router.get("/reports/compliance_rate")
+async def get_compliance_rate(current_user: dict = Depends(get_current_user)):
     """Share of tracked certifications that have not expired."""
-    records = _all_records()
+    records = _all_records(current_user, person_ids_for(supabase, current_user))
     total = len(records)
     if total == 0:
         return {"compliance_rate": 100.0, "total_tracked": 0, "non_compliant": 0}
@@ -229,26 +248,26 @@ async def get_compliance_rate():
     return {"compliance_rate": round((total - expired) / total * 100, 2), "total_tracked": total, "non_compliant": expired}
 
 
-@router.get("/reports/due_refreshers", dependencies=[Depends(get_current_user)])
-async def get_due_refreshers():
+@router.get("/reports/due_refreshers")
+async def get_due_refreshers(current_user: dict = Depends(get_current_user)):
     """The three refresher courses most people need next (expired certificates excluded)."""
-    due = [r.required_refresher for r in _all_records() if r.status != "Expired" and r.required_refresher not in ("N/A", "", None)]
+    due = [r.required_refresher for r in _all_records(current_user, person_ids_for(supabase, current_user)) if r.status != "Expired" and r.required_refresher not in ("N/A", "", None)]
     result = [{"refresher": k, "employees_due": v} for k, v in count_by(due, lambda x: x).items()]
     return sorted(result, key=lambda x: x["employees_due"], reverse=True)[:3]
 
 
-@router.get("/employee/{employee_id}", response_model=List[CertificateRecord], dependencies=[Depends(get_current_user)])
-async def get_employee_certifications(employee_id: str):
+@router.get("/employee/{employee_id}", response_model=List[CertificateRecord])
+async def get_employee_certifications(employee_id: str, current_user: dict = Depends(get_current_user)):
     """One employee's certifications."""
-    return [r for r in _all_records() if r.employee_id == employee_id]
+    return [r for r in _all_records(current_user, person_ids_for(supabase, current_user)) if r.employee_id == employee_id]
 
 
-@router.get("/alerts/expiring", dependencies=[Depends(get_current_user)])
-async def get_expiring_certifications(days: int = 90):
+@router.get("/alerts/expiring")
+async def get_expiring_certifications(days: int = 90, current_user: dict = Depends(get_current_user)):
     """Certifications expiring within `days`, soonest first."""
     today = today_harare()
     expiring = []
-    for r in _all_records():
+    for r in _all_records(current_user, person_ids_for(supabase, current_user)):
         left = (r.expiry_date - today).days
         if 0 <= left <= days:
             expiring.append({**r.model_dump(), "days_until_expiry": left})
@@ -256,10 +275,10 @@ async def get_expiring_certifications(days: int = 90):
     return {"days_threshold": days, "count": len(expiring), "certifications": expiring}
 
 
-@router.get("/stats/summary", dependencies=[Depends(get_current_user)])
-async def get_training_stats():
+@router.get("/stats/summary")
+async def get_training_stats(current_user: dict = Depends(get_current_user)):
     """Counts by status and department, and the compliance rate."""
-    records = _all_records()
+    records = _all_records(current_user, person_ids_for(supabase, current_user))
     total = len(records)
     status_counts = count_by(records, lambda c: c.status)
     return {

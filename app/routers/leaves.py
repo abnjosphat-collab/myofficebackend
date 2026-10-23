@@ -11,6 +11,7 @@ from app.leave_days import calculate_total_days
 from app.errors import server_error
 from app.audit import decision_stamp, has_columns
 from app.concurrency import assert_unchanged, touch
+from app.scope import apply_list_scope, assert_row_visible, person_ids_for, row_visible, stamp_create, viewer_scope
 from app.leave_conflicts import INACTIVE_STATUSES as LEAVE_INACTIVE, conflict_message as leave_conflict_message, overlapping_leave
 import logging
 import traceback
@@ -128,6 +129,9 @@ def _decision_fields(status: Any, user: Dict[str, Any]) -> Dict[str, Any]:
 @router.post("", response_model=LeaveResponse)
 @router.post("/", response_model=LeaveResponse)
 async def create_leave(leave: LeaveCreate, current_user: dict = Depends(get_current_user)):
+    if viewer_scope(current_user) is not None:
+        stamp_create(current_user, "leaves", {"employee_id": leave.employee_id},
+                     supabase, person_ids_for(supabase, current_user))
     try:
         # The form only warns; this is the check that holds for a second laptop or a stale page.
         clash = overlapping_leave(supabase, leave.employee_id, leave.start_date, leave.end_date)
@@ -168,9 +172,10 @@ async def create_leave(leave: LeaveCreate, current_user: dict = Depends(get_curr
         raise server_error(e, "Creating leave")
 
 # ---------- GET all leaves ----------
-@router.get("", response_model=List[LeaveResponse], dependencies=[Depends(get_current_user)])
-@router.get("/", response_model=List[LeaveResponse], dependencies=[Depends(get_current_user)])
-async def get_leaves(status: Optional[str] = None, leave_type: Optional[str] = None, overtime_id: Optional[int] = None):
+@router.get("", response_model=List[LeaveResponse])
+@router.get("/", response_model=List[LeaveResponse])
+async def get_leaves(status: Optional[str] = None, leave_type: Optional[str] = None, overtime_id: Optional[int] = None, current_user: dict = Depends(get_current_user)):
+    person_ids = person_ids_for(supabase, current_user)
     try:
         def _query():
             query = supabase.table("leaves").select("*")
@@ -180,6 +185,7 @@ async def get_leaves(status: Optional[str] = None, leave_type: Optional[str] = N
                 query = query.eq("leave_type", leave_type)
             if overtime_id is not None:
                 query = query.eq("overtime_id", overtime_id)
+            query = apply_list_scope(query, current_user, "leaves", supabase, person_ids)
             # Stable ordering prevents records with the same application date
             # from drifting between pages while the register is read.
             return query.order("applied_date", desc=True).order("id", desc=True)
@@ -229,17 +235,25 @@ async def bulk_update_leave_status(
     )
     try:
         ids = list(dict.fromkeys(body.ids))
+        requested = len(ids)
+        if viewer_scope(current_user) is not None:
+            person_ids = person_ids_for(supabase, current_user)
+            targets = rows(supabase.table("leaves").select("id,employee_id,status").in_("id", ids).execute())
+            ids = [t["id"] for t in targets if row_visible(current_user, "leaves", t, supabase, person_ids)]
         data_to_update: Dict[str, Any] = {"status": body.status, **_decision_fields(body.status, current_user)}
-        response = (
-            supabase.table("leaves")
-            .update(data_to_update)
-            .in_("id", ids)
-            .eq("status", "pending")
-            .execute()
-        )
-        updated = response.data or []
+        if ids:
+            response = (
+                supabase.table("leaves")
+                .update(data_to_update)
+                .in_("id", ids)
+                .eq("status", "pending")
+                .execute()
+            )
+            updated = response.data or []
+        else:
+            updated = []
         succeeded = len(updated)
-        failed = max(0, len(ids) - succeeded)
+        failed = max(0, requested - succeeded)
         return BulkLeaveStatusResponse(succeeded=succeeded, failed=failed, updated=updated)
     except Exception as e:
         logger.error(f"Error bulk-updating leave status: {str(e)}\n{traceback.format_exc()}")
@@ -247,10 +261,12 @@ async def bulk_update_leave_status(
 
 
 # ---------- GET leave by id ----------
-@router.get("/{leave_id}", response_model=LeaveResponse, dependencies=[Depends(get_current_user)])
-async def get_leave(leave_id: int):
+@router.get("/{leave_id}", response_model=LeaveResponse)
+async def get_leave(leave_id: int, current_user: dict = Depends(get_current_user)):
     try:
-        return get_or_404(supabase, "leaves", leave_id, detail="Leave not found")
+        row = get_or_404(supabase, "leaves", leave_id, detail="Leave not found")
+        return assert_row_visible(current_user, "leaves", row, supabase,
+                                  person_ids_for(supabase, current_user), detail="Leave not found")
     except Exception as e:
         logger.error(f"Error fetching leave {leave_id}: {str(e)}\n{traceback.format_exc()}")
         raise server_error(e, "Loading leave")
@@ -263,7 +279,11 @@ async def update_leave(leave_id: int, updated: LeaveUpdate, authorization: Optio
     await require_role_if_status_in(updated.status, {'approved', 'rejected'}, 'manager', authorization, context="Leave approval")
     # Once a request has been decided, changing it in any way (editing it, or reopening it to pending) is a manager's call;
     # a pending request can still be amended by whoever is signed in. Checked before the try block so the refusal stays a 403.
-    decided = one_row(supabase.table("leaves").select("status").eq("id", leave_id).execute())
+    decided = one_row(supabase.table("leaves").select("id,status,employee_id").eq("id", leave_id).execute())
+    if viewer_scope(current_user) is not None:
+        assert_row_visible(current_user, "leaves", decided, supabase,
+                           person_ids_for(supabase, current_user),
+                           detail=f"Leave with ID {leave_id} not found")
     if decided and decided.get("status") in {"approved", "rejected"}:
         await require_role('manager')(authorization)
     try:
@@ -332,10 +352,14 @@ async def update_leave(leave_id: int, updated: LeaveUpdate, authorization: Optio
 @router.delete("/{leave_id}")
 async def delete_leave(leave_id: int, current_user: dict = Depends(require_role('manager'))):
     try:
-        existing_resp = supabase.table("leaves").select("id,status").eq("id", leave_id).execute()
+        existing_resp = supabase.table("leaves").select("id,status,employee_id").eq("id", leave_id).execute()
         found = one_row(existing_resp)
         if found is None:
             raise HTTPException(status_code=404, detail=f"Leave with ID {leave_id} not found")
+        if viewer_scope(current_user) is not None:
+            assert_row_visible(current_user, "leaves", found, supabase,
+                               person_ids_for(supabase, current_user),
+                               detail=f"Leave with ID {leave_id} not found")
         if str(found.get("status") or "pending").lower() == "approved":
             raise HTTPException(status_code=409, detail="An approved leave cannot be deleted: it may already have been counted. Reject it instead; that keeps the history.")
         supabase.table("leaves").delete().eq("id", leave_id).execute()

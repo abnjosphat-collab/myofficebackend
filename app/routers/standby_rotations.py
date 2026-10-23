@@ -14,6 +14,7 @@ from app.crud_router import CrudRouter
 from app.supabase_client import supabase
 from app.auth import get_current_user
 from app.db_helpers import get_or_404
+from app.scope import assert_row_visible, person_ids_for
 
 TABLE = "standby_rotations"
 
@@ -85,9 +86,13 @@ router = CrudRouter(
     filters={"section": "section"},
     search_columns=["name", "section"],
     not_found="Standby rotation not found",
+    scope_table="standby_rotations",
 ).router
 
 
-@router.get("/{rotation_id}", dependencies=[Depends(get_current_user)])
-async def get_rotation(rotation_id: int):
-    return get_or_404(supabase, TABLE, rotation_id, detail="Standby rotation not found")
+@router.get("/{rotation_id}")
+async def get_rotation(rotation_id: int, current_user: dict = Depends(get_current_user)):
+    row = get_or_404(supabase, TABLE, rotation_id, detail="Standby rotation not found")
+    return assert_row_visible(current_user, TABLE, row, supabase,
+                              person_ids_for(supabase, current_user),
+                              detail="Standby rotation not found")

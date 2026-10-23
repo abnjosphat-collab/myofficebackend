@@ -12,6 +12,7 @@ from app.db_helpers import fetch_all_pages, get_or_404
 from app.errors import server_error
 from app.concurrency import assert_unchanged, touch
 from app.ppe_conflicts import duplicate_message, existing_duplicate
+from app.scope import apply_list_scope, assert_row_visible, person_ids_for, viewer_scope
 import logging
 import json
 
@@ -117,14 +118,16 @@ def _resolve_person_or_422(employee_id: str) -> dict:
 
 # Helper function to convert dates in records
 # PPE Records Endpoints
-@router.get("", dependencies=[Depends(get_current_user)])
+@router.get("")
 async def get_ppe_records(
     status: Optional[str] = None,
     ppe_type: Optional[str] = None,
     department: Optional[str] = None,
     location: Optional[str] = None,
-    employee_id: Optional[str] = None
+    employee_id: Optional[str] = None,
+    current_user: dict = Depends(get_current_user),
 ):
+    person_ids = person_ids_for(supabase, current_user)
     try:
         query = supabase.table("ppe_records").select("*")
         
@@ -138,7 +141,8 @@ async def get_ppe_records(
             query = query.eq("location", location)
         if employee_id and employee_id != 'all':
             query = query.eq("employee_id", employee_id)
-            
+
+        query = apply_list_scope(query, current_user, "ppe_records", supabase, person_ids)
         query = query.order("created_at", desc=True).order("id", desc=True)
         records = await run_in_threadpool(
             lambda: fetch_all_pages(lambda start, end: query.range(start, end).execute(), extract_rows=rows)
@@ -157,6 +161,8 @@ async def create_ppe_record(record: PPEIssueCreate, current_user: dict = Depends
     try:
         # The person must be on the register; the row keeps the register's copies and spelling, not the client's.
         person = _resolve_person_or_422(record.employee_id)
+        if viewer_scope(current_user) is not None and (person.get("section") or "") != viewer_scope(current_user):
+            raise HTTPException(status_code=404, detail="Not found")
 
         # Convert Pydantic model to dict and handle date serialization
         data_to_insert = _stamp_person(record.model_dump(), person)
@@ -188,10 +194,12 @@ async def create_ppe_record(record: PPEIssueCreate, current_user: dict = Depends
         logger.error(f"Error creating PPE record: {str(e)}")
         raise server_error(e, "Creating PPE record")
 
-@router.get("/{record_id:int}", dependencies=[Depends(get_current_user)])
-async def get_ppe_record(record_id: int):
+@router.get("/{record_id:int}")
+async def get_ppe_record(record_id: int, current_user: dict = Depends(get_current_user)):
     try:
         result = get_or_404(supabase, "ppe_records", record_id, detail="PPE record not found")
+        assert_row_visible(current_user, "ppe_records", result, supabase,
+                           person_ids_for(supabase, current_user), detail="PPE record not found")
         convert_dates_to_iso(result)
         return result
 
@@ -206,7 +214,10 @@ async def get_ppe_record(record_id: int):
 async def update_ppe_record(record_id: int, updated: PPEIssueUpdate, current_user: dict = Depends(get_current_user)):
     try:
         existing = get_or_404(supabase, "ppe_records", record_id, detail="PPE record not found")
-        
+        if viewer_scope(current_user) is not None:
+            assert_row_visible(current_user, "ppe_records", existing, supabase,
+                               person_ids_for(supabase, current_user), detail="PPE record not found")
+
         # exclude_unset, not a None-filter: an explicitly-sent null must clear the
         # field, not be silently dropped. See work_orders (backend edec24a).
         data_to_update = updated.model_dump(exclude_unset=True)
@@ -219,7 +230,10 @@ async def update_ppe_record(record_id: int, updated: PPEIssueUpdate, current_use
                 # The same person (a re-pick that changed nothing, or only the id's case): keep the stored spelling.
                 data_to_update.pop("employee_id")
             else:
-                _stamp_person(data_to_update, _resolve_person_or_422(sent or ""))
+                new_person = _resolve_person_or_422(sent or "")
+                if viewer_scope(current_user) is not None and (new_person.get("section") or "") != viewer_scope(current_user):
+                    raise HTTPException(status_code=404, detail="PPE record not found")
+                _stamp_person(data_to_update, new_person)
 
         # Moving the item, the date or the person must not make it a duplicate of another issue.
         if any(k in data_to_update for k in ('employee_id', 'ppe_type', 'issue_date')):
@@ -254,8 +268,11 @@ async def update_ppe_record(record_id: int, updated: PPEIssueUpdate, current_use
 @router.delete("/{record_id}")
 async def delete_ppe_record(record_id: int, current_user: dict = Depends(require_role('manager'))):
     try:
-        get_or_404(supabase, "ppe_records", record_id, detail="PPE record not found")
-        
+        existing = get_or_404(supabase, "ppe_records", record_id, detail="PPE record not found")
+        if viewer_scope(current_user) is not None:
+            assert_row_visible(current_user, "ppe_records", existing, supabase,
+                               person_ids_for(supabase, current_user), detail="PPE record not found")
+
         supabase.table("ppe_records").delete().eq("id", record_id).execute()
         return {"success": True, "message": "PPE record deleted successfully"}
         
@@ -265,10 +282,13 @@ async def delete_ppe_record(record_id: int, current_user: dict = Depends(require
         logger.error(f"Error deleting PPE record: {str(e)}")
         raise server_error(e, "Deleting PPE record")
 
-@router.get("/employee/{employee_id}", dependencies=[Depends(get_current_user)])
-async def get_employee_ppe_records(employee_id: str):
+@router.get("/employee/{employee_id}")
+async def get_employee_ppe_records(employee_id: str, current_user: dict = Depends(get_current_user)):
     try:
-        query = supabase.table("ppe_records").select("*").eq("employee_id", employee_id).order("issue_date", desc=True).order("id", desc=True)
+        query = apply_list_scope(
+            supabase.table("ppe_records").select("*").eq("employee_id", employee_id),
+            current_user, "ppe_records", supabase, person_ids_for(supabase, current_user),
+        ).order("issue_date", desc=True).order("id", desc=True)
         records = await run_in_threadpool(
             lambda: fetch_all_pages(lambda start, end: query.range(start, end).execute(), extract_rows=rows)
         )
@@ -282,14 +302,17 @@ async def get_employee_ppe_records(employee_id: str):
         raise server_error(e, "Loading employee PPE records")
 
 # Statistics Endpoint
-@router.get("/stats/summary", dependencies=[Depends(get_current_user)])
-async def get_ppe_stats():
+@router.get("/stats/summary")
+async def get_ppe_stats(current_user: dict = Depends(get_current_user)):
+    person_ids = person_ids_for(supabase, current_user)
     try:
         records_all = await run_in_threadpool(
             lambda: fetch_all_pages(
-                lambda start, end: supabase.table("ppe_records")
+                lambda start, end: apply_list_scope(
+                    supabase.table("ppe_records")
                     .select("id, employee_id, status, condition, expiry_date")
-                    .order("id")
+                    .order("id"),
+                    current_user, "ppe_records", supabase, person_ids)
                     .range(start, end)
                     .execute(),
                 extract_rows=rows,
@@ -393,6 +416,8 @@ async def get_ppe_matrix():
 
 def _apply_matrix_to_type(ppe_type: str, interval: int) -> int:
     """Recalculate expiry = issue_date + interval for every ACTIVE record of this type,
+    across all sections by design (a scoped recalc would leave rows stale against the
+    same shared matrix; the caller only ever learns counts, never rows).
     overwriting whatever expiry_date is currently stored (including a manually-typed
     one — the matrix is the source of truth once a type's interval is set/changed).
     Returns the number of records updated."""

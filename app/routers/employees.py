@@ -10,6 +10,7 @@ from app.cache import cached, invalidate_namespace
 from app.db_helpers import fetch_all_pages, get_or_404
 from app.concurrency import assert_unchanged, touch
 from app.errors import server_error
+from app.scope import apply_list_scope, assert_row_visible, row_visible, stamp_create, viewer_scope
 import logging
 import re
 
@@ -224,10 +225,11 @@ async def employees_health():
         raise HTTPException(503, detail="Employees service unhealthy.")
 
 
-@router.get("/search/{query}", dependencies=[Depends(get_current_user)])
+@router.get("/search/{query}")
 async def search_employees(
     query: str,
-    search_by: str = Query("all", enum=["all", "name", "id", "id_number", "email"])
+    search_by: str = Query("all", enum=["all", "name", "id", "id_number", "email"]),
+    current_user: dict = Depends(get_current_user),
 ):
     """Search employees by various fields."""
     try:
@@ -247,13 +249,15 @@ async def search_employees(
                      f"employee_id.ilike.{q},id_number.ilike.{q}").execute()
 
         rows = _data(r)
+        if viewer_scope(current_user) is not None:
+            rows = [e for e in rows if row_visible(current_user, "employees", e)]
         return [_dates_from_db(e) for e in rows] if rows else []
     except Exception as e:
         raise server_error(e, "Searching employees")
 
 
-@router.post("/bulk-normalize", dependencies=[Depends(require_role('manager'))])
-async def bulk_normalize_employees(body: BulkNormalizeRequest):
+@router.post("/bulk-normalize")
+async def bulk_normalize_employees(body: BulkNormalizeRequest, current_user: dict = Depends(require_role('manager'))):
     """
     Apply roster normalization patches in one request.
     Updates only the fields provided per employee — no full-record validation.
@@ -261,6 +265,7 @@ async def bulk_normalize_employees(body: BulkNormalizeRequest):
     succeeded = 0
     failed = 0
     errors: List[str] = []
+    scope = viewer_scope(current_user)
 
     for item in body.updates:
         # exclude_unset, not a None-filter: an explicitly-sent null must clear the
@@ -272,6 +277,16 @@ async def bulk_normalize_employees(body: BulkNormalizeRequest):
             continue
 
         try:
+            if scope is not None:
+                target = _data(supabase.table("employees").select("id,section").eq("id", item.id).execute())
+                if not target or not row_visible(current_user, "employees", target[0]):
+                    failed += 1
+                    errors.append(f"Employee #{item.id} not found")
+                    continue
+                if patch.get("section") is not None and patch["section"] != scope:
+                    failed += 1
+                    errors.append(f"Employee #{item.id} is outside your section")
+                    continue
             rows = _data(
                 supabase.table("employees").update(patch).eq("id", item.id).execute()
             )
@@ -290,27 +305,29 @@ async def bulk_normalize_employees(body: BulkNormalizeRequest):
     return BulkNormalizeResponse(succeeded=succeeded, failed=failed, errors=errors[:25])
 
 
-@router.get("", dependencies=[Depends(get_current_user)])
-@router.get("/", dependencies=[Depends(get_current_user)])
+@router.get("")
+@router.get("/")
 @cached("employees", ttl=60)
-async def get_employees():
+async def get_employees(current_user: dict = Depends(get_current_user)):
     """Return all employees."""
     try:
         rows = await run_in_threadpool(lambda: fetch_all_pages(
-            lambda start, end: supabase.table("employees").select("*")
-            .order("employee_id", desc=False).order("id", desc=False)
-            .range(start, end).execute()
+            lambda start, end: apply_list_scope(
+                supabase.table("employees").select("*")
+                .order("employee_id", desc=False).order("id", desc=False),
+                current_user, "employees").range(start, end).execute()
         ))
         return [_dates_from_db(e) for e in rows] if rows else []
     except Exception as e:
         raise server_error(e, "Loading employees")
 
 
-@router.get("/{id}", dependencies=[Depends(get_current_user)])
-async def get_employee(id: int):
+@router.get("/{id}")
+async def get_employee(id: int, current_user: dict = Depends(get_current_user)):
     """Return a single employee by their database ID."""
     try:
         row = get_or_404(supabase, "employees", id, detail=f"Employee #{id} not found")
+        assert_row_visible(current_user, "employees", row, detail=f"Employee #{id} not found")
         return _dates_from_db(row)
     except HTTPException:
         raise
@@ -339,7 +356,7 @@ async def create_employee(employee: Employee, current_user: dict = Depends(get_c
 
         data = employee.model_dump()
         data.pop('expected_updated_at', None)  # creates cannot conflict; never stored
-        payload = _prepare_employee_write(data)
+        payload = stamp_create(current_user, "employees", _prepare_employee_write(data))
         rows = _data(supabase.table("employees").insert(payload).execute())
         if not rows:
             raise server_error(RuntimeError("Supabase returned no row for the insert"), "Creating employee")
@@ -377,6 +394,10 @@ async def update_employee(id: int, updated: Employee, current_user: dict = Depen
             raise HTTPException(404, detail=f"Employee #{id} not found")
 
         existing = existing_rows[0]
+        if viewer_scope(current_user) is not None:
+            assert_row_visible(current_user, "employees", existing, detail=f"Employee #{id} not found")
+            if updated.section != viewer_scope(current_user):
+                raise HTTPException(404, detail=f"Employee #{id} not found")
         data = updated.model_dump()
         assert_unchanged(existing, data.pop('expected_updated_at', None))
         old_emp_id = existing['employee_id']
@@ -423,12 +444,14 @@ async def delete_employee(id: int, current_user: dict = Depends(require_role('ma
     try:
         existing_rows = _data(
             supabase.table("employees")
-            .select("id,employee_id,first_name,last_name")
+            .select("id,employee_id,first_name,last_name,section")
             .eq("id", id)
             .execute()
         )
         if not existing_rows:
             raise HTTPException(404, detail=f"Employee #{id} not found")
+        if viewer_scope(current_user) is not None:
+            assert_row_visible(current_user, "employees", existing_rows[0], detail=f"Employee #{id} not found")
 
         emp = existing_rows[0]
         name = f"{emp.get('first_name', '')} {emp.get('last_name', '')}".strip() or "Unknown"

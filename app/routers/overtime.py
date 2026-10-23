@@ -9,6 +9,7 @@ from app.audit import decision_stamp, has_columns
 from app.leave_conflicts import conflict_message as leave_conflict_message, overlapping_leave
 from app.concurrency import assert_unchanged, touch
 from app.db_helpers import get_or_404
+from app.scope import apply_list_scope, assert_row_visible, person_ids_for, row_visible, stamp_create, viewer_scope
 from app.serialization import encode_json_fields, decode_json_fields
 from app.errors import server_error
 import logging
@@ -152,9 +153,10 @@ class OvertimeUpdate(BaseModel):
         return (v or '').strip() or 'Engineering'
 
 # GET all overtime
-@router.get("", dependencies=[Depends(get_current_user)])
-@router.get("/", dependencies=[Depends(get_current_user)])
-async def get_overtime(status: Optional[str] = None, overtime_type: Optional[str] = None):
+@router.get("")
+@router.get("/")
+async def get_overtime(status: Optional[str] = None, overtime_type: Optional[str] = None, current_user: dict = Depends(get_current_user)):
+    person_ids = person_ids_for(supabase, current_user)
     try:
         logger.info("Fetching overtime data...")
 
@@ -164,6 +166,7 @@ async def get_overtime(status: Optional[str] = None, overtime_type: Optional[str
                 q = q.eq("status", status)
             if overtime_type:
                 q = q.eq("overtime_type", overtime_type)
+            q = apply_list_scope(q, current_user, "overtime", supabase, person_ids)
             return q.order("created_at", desc=True)
 
         # Supabase PostgREST caps each request at 1000 rows — a single unbounded
@@ -196,10 +199,12 @@ async def get_overtime(status: Optional[str] = None, overtime_type: Optional[str
 
 
 # ---------- GET overtime by id (deep-link fetch for the notifications bell) ----------
-@router.get("/{overtime_id}", dependencies=[Depends(get_current_user)])
-async def get_overtime_by_id(overtime_id: int):
+@router.get("/{overtime_id}")
+async def get_overtime_by_id(overtime_id: int, current_user: dict = Depends(get_current_user)):
     try:
         row = get_or_404(supabase, "overtime", overtime_id, detail="Overtime not found")
+        assert_row_visible(current_user, "overtime", row, supabase,
+                           person_ids_for(supabase, current_user), detail="Overtime not found")
         return decode_json_fields(row, ['spares_used'])
     except Exception as e:
         logger.error(f"Error fetching overtime {overtime_id}: {str(e)}")
@@ -221,6 +226,9 @@ def _overlapping_request(employee_id: Optional[str], day: Optional[str], start: 
 @router.post("")
 @router.post("/")
 async def create_overtime(overtime: OvertimeCreate, current_user: dict = Depends(get_current_user)):
+    if viewer_scope(current_user) is not None:
+        stamp_create(current_user, "overtime", {"employee_id": overtime.employee_id},
+                     supabase, person_ids_for(supabase, current_user))
     try:
         logger.info(f"Creating overtime for: {overtime.employee_name}")
 
@@ -284,20 +292,28 @@ async def bulk_update_overtime_status(
     )
     try:
         ids = list(dict.fromkeys(body.ids))
+        requested = len(ids)
+        if viewer_scope(current_user) is not None:
+            person_ids = person_ids_for(supabase, current_user)
+            targets = rows(supabase.table("overtime").select("id,employee_id,status").in_("id", ids).execute())
+            ids = [t["id"] for t in targets if row_visible(current_user, "overtime", t, supabase, person_ids)]
         data_to_update: Dict[str, Any] = {"status": body.status, **decision_stamp(body.status, current_user)}
         if body.status == 'approved' and body.approval_signature is not None:
             data_to_update['approval_signature'] = body.approval_signature
 
-        response = (
-            supabase.table("overtime")
-            .update(data_to_update)
-            .in_("id", ids)
-            .eq("status", "pending")
-            .execute()
-        )
-        updated = [decode_json_fields(row, ['spares_used']) for row in (response.data or [])]
+        if ids:
+            response = (
+                supabase.table("overtime")
+                .update(data_to_update)
+                .in_("id", ids)
+                .eq("status", "pending")
+                .execute()
+            )
+            updated = [decode_json_fields(row, ['spares_used']) for row in (response.data or [])]
+        else:
+            updated = []
         succeeded = len(updated)
-        failed = max(0, len(ids) - succeeded)
+        failed = max(0, requested - succeeded)
         return BulkStatusResponse(succeeded=succeeded, failed=failed, updated=updated)
     except Exception as e:
         logger.error(f"Error bulk-updating overtime status: {str(e)}")
@@ -319,14 +335,19 @@ async def bulk_edit_overtime(
         raise HTTPException(status_code=422, detail="Nothing to change: unlock at least one field.")
     try:
         existing = cast(List[Dict[str, Any]], (supabase.table("overtime").select("id,status,employee_id,date,start_time,end_time").in_("id", ids).execute()).data or [])
+        hidden: set = set()
+        if viewer_scope(current_user) is not None:
+            person_ids = person_ids_for(supabase, current_user)
+            by_id = {row.get("id"): row for row in existing}
+            hidden = {i for i in ids if by_id.get(i) is None or not row_visible(current_user, "overtime", by_id[i], supabase, person_ids)}
         status_of = {row.get("id"): (row.get("status") or "pending").lower() for row in existing}
-        locked = [i for i in ids if status_of.get(i) in _OT_LOCKED_STATUSES]
-        editable = [i for i in ids if i not in locked]
-        errors: List[str] = []
+        locked = [i for i in ids if status_of.get(i) in _OT_LOCKED_STATUSES and i not in hidden]
+        editable = [i for i in ids if i not in locked and i not in hidden]
+        errors: List[str] = [f"Request #{i} was not found." for i in ids if i in hidden]
         if locked:
             try:
                 await require_role("manager")(authorization)
-                editable = list(ids)
+                editable = [i for i in ids if i not in hidden]
                 locked = []
             except HTTPException:
                 errors.extend(f"Request #{i} is {status_of.get(i)} — only a manager can change it." for i in locked)
@@ -367,7 +388,10 @@ async def update_overtime(overtime_id: int, updated: OvertimeUpdate, authorizati
         logger.info(f"Updating overtime {overtime_id}")
         
         existing_row = get_or_404(supabase, "overtime", overtime_id, detail="Overtime not found")
-        
+        person_ids = person_ids_for(supabase, current_user)
+        if viewer_scope(current_user) is not None:
+            assert_row_visible(current_user, "overtime", existing_row, supabase, person_ids, detail="Overtime not found")
+
         # exclude_unset, not a None-filter: an explicitly-sent null must clear the
         # field, not be silently dropped. See work_orders (backend edec24a).
         data_to_update = updated.model_dump(exclude_unset=True)
@@ -395,6 +419,10 @@ async def update_overtime(overtime_id: int, updated: OvertimeUpdate, authorizati
         merged = {**existing_row, **data_to_update}
         moved = any(key in data_to_update and data_to_update[key] != existing_row.get(key) for key in ('employee_id', 'date', 'start_time', 'end_time'))
         reopened = existing_status in INACTIVE_STATUSES and str(merged.get('status') or 'pending').lower() not in INACTIVE_STATUSES
+        if viewer_scope(current_user) is not None and "employee_id" in data_to_update:
+            assert person_ids is not None  # person_ids_for never returns None for a scoped viewer
+            if str(data_to_update["employee_id"]) not in person_ids["register"]:
+                raise HTTPException(status_code=404, detail="Overtime not found")
         if (moved or reopened) and str(merged.get('status') or 'pending').lower() not in INACTIVE_STATUSES:
             clash = _overlapping_request(merged.get('employee_id'), merged.get('date'), merged.get('start_time'), merged.get('end_time'), ignore_id=overtime_id)
             if clash:
@@ -427,6 +455,9 @@ async def delete_overtime(
         
         # Check if exists
         existing = get_or_404(supabase, "overtime", overtime_id, detail="Overtime not found")
+        if viewer_scope(current_user) is not None:
+            assert_row_visible(current_user, "overtime", existing, supabase,
+                               person_ids_for(supabase, current_user), detail="Overtime not found")
         if str(existing.get("status") or "pending").lower() in ("approved", "paid"):
             raise HTTPException(status_code=409, detail="Approved or paid overtime cannot be deleted: it may already have been counted in payroll. Cancel it instead; that keeps the history.")
         
@@ -456,6 +487,9 @@ async def take_as_leave(
         raise HTTPException(status_code=422, detail="The leave cannot end before it starts.")
     try:
         ot = get_or_404(supabase, "overtime", overtime_id, detail="Overtime not found")
+        if viewer_scope(current_user) is not None:
+            assert_row_visible(current_user, "overtime", ot, supabase,
+                               person_ids_for(supabase, current_user), detail="Overtime not found")
         if ot.get("status") != "approved":
             raise HTTPException(status_code=422, detail="Only approved overtime can be taken as leave.")
         if ot.get("payout_method") != "lieu":

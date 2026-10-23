@@ -16,10 +16,10 @@ from app.scope import (
     viewer_scope,
 )
 
-SCOPED = {"role": "user", "permissions": {"scope": "Projects"}}
-UNSCOPED = {"role": "user", "permissions": {}}
+SCOPED = {"role": "user", "scope": "Projects"}
+UNSCOPED = {"role": "user", "scope": None}
 LEGACY = {"role": "manager"}
-ADMIN = {"role": "admin", "permissions": {}}
+ADMIN = {"role": "admin", "scope": None}
 
 
 class _Q:
@@ -35,6 +35,10 @@ class _Q:
     def in_(self, col, vals):
         self._calls.append(("in", col, list(vals)))
         self._rows = [r for r in self._rows if r.get(col) in vals]
+        return self
+
+    def or_(self, s):
+        self._calls.append(("or", s))
         return self
 
     def select(self, *_a, **_k):
@@ -72,12 +76,15 @@ def db():
     })
 
 
-def test_viewer_scope_reads_permissions_and_tolerates_old_sessions():
+def test_viewer_scope_reads_top_level_first_and_tolerates_old_sessions():
     assert viewer_scope(SCOPED) == "Projects"
     assert viewer_scope(UNSCOPED) is None
     assert viewer_scope(LEGACY) is None
     assert viewer_scope(None) is None
     assert viewer_scope({"role": "user", "permissions": {"scope": ""}}) is None
+    # Raw profile rows (permissions nested, no top-level key) still resolve.
+    assert viewer_scope({"role": "user", "permissions": {"scope": "Projects"}}) == "Projects"
+    assert viewer_scope({"role": "user", "scope": "", "permissions": {"scope": "Projects"}}) == "Projects"
 
 
 def test_registry_covers_the_batch_0_inventory():
@@ -88,7 +95,29 @@ def test_registry_covers_the_batch_0_inventory():
 
 def test_scope_person_ids_collects_both_id_kinds(db):
     ids = scope_person_ids(db, "Projects")
-    assert ids == {"register": {"C1001", "C1002"}, "db": {1, 2}}
+    assert ids == {"register": {"C1001", "C1002"}, "db": {1, 2}, "names": set()}
+
+
+def test_scope_person_ids_collects_normalized_names():
+    store = _DB({"employees": [
+        {"id": 1, "employee_id": "C1001", "section": "Projects",
+         "first_name": "  Pam", "last_name": " Moyo "},
+        {"id": 2, "employee_id": "C1002", "section": "Projects",
+         "first_name": "", "last_name": ""},
+        {"id": 3, "employee_id": "C2001", "section": "Mechanical",
+         "first_name": "Mike", "last_name": "Doe"},
+    ]})
+    assert scope_person_ids(store, "Projects")["names"] == {"pam moyo"}
+
+
+def test_empty_scope_predicates_match_nothing_instead_of_erroring(db):
+    empty = {"register": set(), "db": set(), "names": set()}
+    q = db.table("leaves")
+    apply_list_scope(q, SCOPED, "leaves", db, empty)
+    assert ("eq", "employee_id", "__scope_empty__") in db.calls
+    q = db.table("artisan_timesheets")
+    apply_list_scope(q, SCOPED, "artisan_timesheets", db, empty)
+    assert ("eq", "employee_db_id", -1) in db.calls
 
 
 def test_unscoped_list_queries_pass_through_untouched(db):
@@ -108,6 +137,43 @@ def test_person_list_filters_to_in_scope_ids(db):
     q = db.table("leaves")
     apply_list_scope(q, SCOPED, "leaves", db)
     assert ("in", "employee_id", ["C1001", "C1002"]) in db.calls
+
+
+def test_dual_link_list_builds_one_or_of_two_in_lists(db):
+    q = db.table("artisan_timesheets")
+    apply_list_scope(q, SCOPED, "artisan_timesheets", db)
+    assert ("or", 'employee_db_id.in.(1,2),employee_id.in.("C1001","C1002")') in db.calls
+
+
+def test_dual_link_row_visible_matches_either_link(db):
+    ids = scope_person_ids(db, "Projects")
+    assert row_visible(SCOPED, "artisan_timesheets", {"employee_db_id": 1, "employee_id": "CX"}, db, ids)
+    assert row_visible(SCOPED, "artisan_timesheets", {"employee_db_id": 99, "employee_id": "C1001"}, db, ids)
+    assert row_visible(SCOPED, "artisan_timesheets", {"employee_db_id": None, "employee_id": "C1002"}, db, ids)
+    assert not row_visible(SCOPED, "artisan_timesheets", {"employee_db_id": 99, "employee_id": "CX"}, db, ids)
+    assert not row_visible(SCOPED, "artisan_timesheets", {"employee_db_id": None, "employee_id": None}, db, ids)
+
+
+def test_json_nested_person_link_filters_in_python(db):
+    ids = scope_person_ids(db, "Projects")
+    assert row_visible(SCOPED, "ppe_order_list", {"entry": {"employee_id": "C1001"}}, db, ids)
+    assert not row_visible(SCOPED, "ppe_order_list", {"entry": {"employee_id": "CX"}}, db, ids)
+    assert not row_visible(SCOPED, "ppe_order_list", {"entry": {}}, db, ids)
+    assert not row_visible(SCOPED, "ppe_order_list", {}, db, ids)
+    assert not row_visible(SCOPED, "ppe_order_list", {"entry": None}, db, ids)
+    with pytest.raises(RuntimeError):
+        apply_list_scope(db.table("ppe_order_list"), SCOPED, "ppe_order_list", db, ids)
+    out = stamp_create(SCOPED, "ppe_order_list", {"entry": {"employee_id": "C1002"}}, db, ids)
+    assert out["entry"]["employee_id"] == "C1002"
+    with pytest.raises(HTTPException):
+        stamp_create(SCOPED, "ppe_order_list", {"entry": {"employee_id": ""}}, db, ids)
+
+
+def test_dual_link_stamp_needs_either_link(db):
+    out = stamp_create(SCOPED, "artisan_timesheets", {"employee_id": "C1001", "employee_db_id": None}, db)
+    assert out["employee_id"] == "C1001"
+    with pytest.raises(HTTPException):
+        stamp_create(SCOPED, "artisan_timesheets", {"employee_id": "CX", "employee_db_id": 99}, db)
 
 
 def test_unknown_table_fails_closed_for_scoped_viewers(db):
@@ -187,6 +253,16 @@ def test_stamp_create_forces_section_and_refuses_out_of_scope_people(db):
     # Unscoped creates pass through byte-identical.
     payload = {"name": "M", "section": "Mechanical"}
     assert stamp_create(UNSCOPED, "equipment", dict(payload), db) == payload
+
+
+def test_stamp_create_members_needs_a_visible_row(db):
+    visible = {"section": "Projects", "members": [{"employee_id": "C2001"}]}
+    assert stamp_create(SCOPED, "standby_rotations", dict(visible), db) == visible
+    visible = {"members": [{"employee_id": "C1001"}]}
+    assert stamp_create(SCOPED, "duty_rotations", dict(visible), db) == visible
+    with pytest.raises(HTTPException) as exc:
+        stamp_create(SCOPED, "duty_rotations", {"members": [{"employee_id": "C2001"}]}, db)
+    assert exc.value.status_code == 404
 
 
 def test_stamp_create_validates_the_parent(db):

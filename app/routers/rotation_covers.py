@@ -21,6 +21,7 @@ from app.supabase_client import supabase, rows, one_row
 from app.auth import get_current_user, require_role
 from app.db_helpers import fetch_all_pages, get_or_404
 from app.errors import server_error
+from app.scope import assert_row_visible, filter_rows, person_ids_for, row_visible, stamp_create, viewer_scope
 
 logger = logging.getLogger(__name__)
 
@@ -104,9 +105,18 @@ def _reject_self_cover(absent_id: Any, cover_id: Any) -> None:
         )
 
 
+def _visible_ids(user) -> Optional[set]:
+    """Row ids this viewer may see, or None for a full view (unscoped)."""
+    if viewer_scope(user) is None:
+        return None
+    bank = person_ids_for(supabase, user)
+    found = rows(supabase.table(TABLE).select("id,absent_employee_id,cover_employee_id").execute())
+    return {r["id"] for r in found if row_visible(user, TABLE, r, supabase, bank)}
+
+
 def _find_overlap(
     kind: str, rotation_id: Any, absent_id: Any, date_from: str, date_to: str,
-    exclude_id: Optional[int] = None,
+    exclude_id: Optional[int] = None, only_ids: Optional[set] = None,
 ) -> Optional[Dict[str, Any]]:
     want_absent = _who(absent_id)
 
@@ -117,6 +127,8 @@ def _find_overlap(
 
     existing = fetch_all_pages(lambda start, end: _query().range(start, end).execute(), extract_rows=rows)
     for row in existing:
+        if only_ids is not None and row.get("id") not in only_ids:
+            continue
         if exclude_id is not None and row.get("id") == exclude_id:
             continue
         if _check_kind(str(row.get("kind"))) != kind:
@@ -135,8 +147,11 @@ def _find_overlap(
 def _reject_overlap(
     kind: str, rotation_id: Any, absent_id: Any, absent_name: Any,
     date_from: str, date_to: str, exclude_id: Optional[int] = None,
+    only_ids: Optional[set] = None,
 ) -> None:
-    clash = _find_overlap(kind, rotation_id, absent_id, date_from, date_to, exclude_id)
+    # A scoped overlap check only sees the viewer's own rows: a 409 naming a
+    # hidden cover would leak it. Managers see everything, so theirs is whole.
+    clash = _find_overlap(kind, rotation_id, absent_id, date_from, date_to, exclude_id, only_ids)
     if clash:
         raise HTTPException(
             status_code=409,
@@ -153,6 +168,7 @@ async def list_covers(
     rotation_id: Optional[int] = None,
     current_user: dict = Depends(get_current_user),
 ):
+    person_ids = person_ids_for(supabase, current_user)
     try:
         def _query():
             q = supabase.table(TABLE).select("*").order("date_from").order("id")
@@ -162,7 +178,8 @@ async def list_covers(
                 q = q.eq("rotation_id", rotation_id)
             return q
 
-        return fetch_all_pages(lambda start, end: _query().range(start, end).execute(), extract_rows=rows)
+        found = fetch_all_pages(lambda start, end: _query().range(start, end).execute(), extract_rows=rows)
+        return filter_rows(current_user, TABLE, found, supabase, person_ids)
     except Exception as e:
         logger.error(f"Error listing rotation covers: {e}")
         raise server_error(e, "Loading covers")
@@ -171,7 +188,10 @@ async def list_covers(
 @router.get("/{cover_id}")
 async def get_cover(cover_id: int, current_user: dict = Depends(get_current_user)):
     try:
-        return get_or_404(supabase, TABLE, cover_id, detail="Rotation cover not found")
+        row = get_or_404(supabase, TABLE, cover_id, detail="Rotation cover not found")
+        return assert_row_visible(current_user, TABLE, row, supabase,
+                                  person_ids_for(supabase, current_user),
+                                  detail="Rotation cover not found")
     except HTTPException:
         raise
     except Exception as e:
@@ -181,6 +201,11 @@ async def get_cover(cover_id: int, current_user: dict = Depends(get_current_user
 
 @router.post("")
 async def create_cover(body: RotationCoverCreate, current_user: dict = Depends(get_current_user)):
+    if viewer_scope(current_user) is not None:
+        stamp_create(current_user, TABLE,
+                     {"absent_employee_id": body.absent_employee_id,
+                      "cover_employee_id": body.cover_employee_id},
+                     supabase, person_ids_for(supabase, current_user))
     try:
         date_from = body.date_from.isoformat()
         date_to = body.date_to.isoformat()
@@ -188,6 +213,7 @@ async def create_cover(body: RotationCoverCreate, current_user: dict = Depends(g
         _reject_overlap(
             body.kind, body.rotation_id, body.absent_employee_id,
             body.absent_employee_name, date_from, date_to,
+            only_ids=_visible_ids(current_user),
         )
 
         payload = body.model_dump()
@@ -210,6 +236,10 @@ async def create_cover(body: RotationCoverCreate, current_user: dict = Depends(g
 async def update_cover(cover_id: int, body: RotationCoverUpdate, current_user: dict = Depends(get_current_user)):
     try:
         existing = get_or_404(supabase, TABLE, cover_id, detail="Rotation cover not found")
+        if viewer_scope(current_user) is not None:
+            assert_row_visible(current_user, TABLE, existing, supabase,
+                               person_ids_for(supabase, current_user),
+                               detail="Rotation cover not found")
         data = body.model_dump(exclude_unset=True)
         if not data:
             return existing
@@ -227,8 +257,14 @@ async def update_cover(cover_id: int, body: RotationCoverUpdate, current_user: d
         date_to = _as_day(data.get("date_to", existing.get("date_to")))
         if date_from > date_to:
             raise HTTPException(status_code=422, detail="date_to must not be before date_from")
+        if viewer_scope(current_user) is not None and ("absent_employee_id" in data or "cover_employee_id" in data):
+            merged = {**existing, **data}
+            assert_row_visible(current_user, TABLE, merged, supabase,
+                               person_ids_for(supabase, current_user),
+                               detail="Rotation cover not found")
         _reject_self_cover(absent_id, cover_employee)
-        _reject_overlap(kind, rotation_id, absent_id, absent_name, date_from, date_to, exclude_id=cover_id)
+        _reject_overlap(kind, rotation_id, absent_id, absent_name, date_from, date_to, exclude_id=cover_id,
+                        only_ids=_visible_ids(current_user))
 
         data["updated_at"] = datetime.utcnow().isoformat()
         response = supabase.table(TABLE).update(data).eq("id", cover_id).execute()
@@ -246,7 +282,11 @@ async def update_cover(cover_id: int, body: RotationCoverUpdate, current_user: d
 @router.delete("/{cover_id}")
 async def delete_cover(cover_id: int, current_user: dict = Depends(require_role("manager"))):
     try:
-        get_or_404(supabase, TABLE, cover_id, detail="Rotation cover not found")
+        existing = get_or_404(supabase, TABLE, cover_id, detail="Rotation cover not found")
+        if viewer_scope(current_user) is not None:
+            assert_row_visible(current_user, TABLE, existing, supabase,
+                               person_ids_for(supabase, current_user),
+                               detail="Rotation cover not found")
         supabase.table(TABLE).delete().eq("id", cover_id).execute()
         return {"success": True, "message": "Rotation cover deleted"}
     except HTTPException:

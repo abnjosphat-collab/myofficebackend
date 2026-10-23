@@ -163,10 +163,10 @@ class _FakeSupabase:
 # Fixture: Projects + Mechanical people and records, three users
 # --------------------------------------------------------------------------
 
-ADMIN = {"sub": "admin-1", "email": "admin@example.com", "role": "admin", "permissions": {}}
-MANAGER = {"sub": "mgr-1", "email": "mgr@example.com", "role": "manager", "permissions": {}}
+ADMIN = {"sub": "admin-1", "email": "admin@example.com", "role": "admin", "scope": None}
+MANAGER = {"sub": "mgr-1", "email": "mgr@example.com", "role": "manager", "scope": None}
 SCOPED = {"sub": "user-1", "email": "scoped@example.com", "role": "user",
-          "permissions": {"scope": "Projects"}}
+          "scope": "Projects"}
 
 
 def _store():
@@ -289,6 +289,18 @@ SCOPED_TABLES = {
 EXEMPT_READS = {
     ("app/routers/overtime.py", "equipment"):
         "reason-text cross-match against register names; names never served",
+    ("app/leave_conflicts.py", "leaves"):
+        "pure helper over a caller-supplied person; leaves.py stamps first, "
+        "overtime take-as-leave asserts the OT row first",
+    ("app/ppe_conflicts.py", "ppe_records"):
+        "pure helper over caller-supplied person+type; ppe.py checks the "
+        "person's section before both duplicate checks",
+    ("app/nec_import/apply_runner.py", "employees"):
+        "only runs from apply_import, which 403s scoped callers first",
+    ("app/nec_import/apply_runner.py", "leaves"):
+        "only runs from apply_import, which 403s scoped callers first",
+    ("app/nec_import/apply_runner.py", "timesheets"):
+        "only runs from apply_import, which 403s scoped callers first",
 }
 
 
@@ -302,7 +314,9 @@ def _tables_read(src):
 
 
 def test_scoped_table_reads_go_through_scope_registry():
-    """A new endpoint reading a scoped table without app/scope.py fails here."""
+    """A new endpoint reading a scoped table without app/scope.py fails here.
+    Reads through an opted-in CrudRouter (scope_table=) count: the generic
+    layer enforces on the router's behalf."""
     root = Path("app")
     offenders = []
     for path in sorted(root.rglob("*.py")):
@@ -310,7 +324,7 @@ def test_scoped_table_reads_go_through_scope_registry():
         if rel == "app/scope.py":
             continue
         src = path.read_text(encoding="utf-8")
-        uses_scope = "app.scope" in src or "from app import scope" in src
+        uses_scope = "app.scope" in src or "from app import scope" in src or "scope_table=" in src
         for table in sorted(_tables_read(src) & SCOPED_TABLES):
             if (rel, table) in EXEMPT_READS or uses_scope:
                 continue

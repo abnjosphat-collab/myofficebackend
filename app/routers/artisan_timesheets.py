@@ -14,6 +14,7 @@ from app.db_helpers import fetch_all_pages, get_or_404
 from app.concurrency import assert_unchanged
 from app.serialization import encode_json_fields, decode_json_fields
 from app.errors import server_error
+from app.scope import apply_list_scope, assert_row_visible, person_ids_for, stamp_create, viewer_scope
 
 logger = logging.getLogger(__name__)
 
@@ -187,6 +188,7 @@ async def list_artisan_timesheets(
     summary: bool = Query(False, description="Return each timesheet without its daily rows and signatures; open one with GET /{id}."),
     current_user: dict = Depends(get_current_user),
 ):
+    person_ids = person_ids_for(supabase, current_user)
     try:
         query = supabase.table(TABLE).select(SUMMARY_COLUMNS if summary else "*")
         if employee_id:
@@ -195,6 +197,7 @@ async def list_artisan_timesheets(
             query = query.eq("year", year)
         if month is not None:
             query = query.eq("month", month)
+        query = apply_list_scope(query, current_user, TABLE, supabase, person_ids)
         query = query.order("year", desc=True).order("month", desc=True).order("employee_name").order("id")
         if summary:
             # Small rows, so read every page rather than stopping at PostgREST's first 1,000.
@@ -210,6 +213,8 @@ async def list_artisan_timesheets(
 async def get_artisan_timesheet(timesheet_id: int, current_user: dict = Depends(get_current_user)):
     try:
         row = get_or_404(supabase, TABLE, timesheet_id, detail="Artisan timesheet not found")
+        assert_row_visible(current_user, TABLE, row, supabase,
+                           person_ids_for(supabase, current_user), detail="Artisan timesheet not found")
         return _decode(row)
     except HTTPException:
         raise
@@ -220,6 +225,10 @@ async def get_artisan_timesheet(timesheet_id: int, current_user: dict = Depends(
 
 @router.post("")
 async def create_artisan_timesheet(body: ArtisanTimesheetCreate, current_user: dict = Depends(get_current_user)):
+    if viewer_scope(current_user) is not None:
+        stamp_create(current_user, TABLE,
+                     {"employee_id": body.employee_id, "employee_db_id": body.employee_db_id},
+                     supabase, person_ids_for(supabase, current_user))
     try:
         existing = (
             supabase.table(TABLE)
@@ -265,10 +274,18 @@ async def update_artisan_timesheet(
 ):
     try:
         existing = get_or_404(supabase, TABLE, timesheet_id, detail="Artisan timesheet not found")
+        person_ids = person_ids_for(supabase, current_user)
+        if viewer_scope(current_user) is not None:
+            assert_row_visible(current_user, TABLE, existing, supabase, person_ids,
+                               detail="Artisan timesheet not found")
         data = body.model_dump(exclude_unset=True)
         assert_unchanged(existing, data.pop("expected_updated_at", None))
         if not data:
             return _decode(existing)
+        if viewer_scope(current_user) is not None and ("employee_id" in data or "employee_db_id" in data):
+            merged = {**existing, **data}
+            assert_row_visible(current_user, TABLE, merged, supabase, person_ids,
+                               detail="Artisan timesheet not found")
 
         if body.daily_rows is not None:
             raw_employee = data.get("employee_id", existing.get("employee_id"))
@@ -299,7 +316,10 @@ async def update_artisan_timesheet(
 @router.delete("/{timesheet_id}")
 async def delete_artisan_timesheet(timesheet_id: int, current_user: dict = Depends(get_current_user)):
     try:
-        get_or_404(supabase, TABLE, timesheet_id, detail="Artisan timesheet not found")
+        existing = get_or_404(supabase, TABLE, timesheet_id, detail="Artisan timesheet not found")
+        if viewer_scope(current_user) is not None:
+            assert_row_visible(current_user, TABLE, existing, supabase,
+                               person_ids_for(supabase, current_user), detail="Artisan timesheet not found")
         supabase.table(TABLE).delete().eq("id", timesheet_id).execute()
         return {"success": True, "message": "Artisan timesheet deleted"}
     except HTTPException:

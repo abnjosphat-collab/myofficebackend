@@ -38,4 +38,5 @@ router = CrudRouter(
     order_by="employee_name",
     filters={"employee_id": "employee_id", "trade": "trade", "equipment_type": "equipment_type"},
     not_found="Entry not found",
+    scope_table="competency_matrix",
 ).router

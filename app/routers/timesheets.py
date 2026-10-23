@@ -9,6 +9,7 @@ from app.db_helpers import apply_date_range, fetch_all_pages, get_or_404
 from app.serialization import encode_json_fields, decode_json_fields
 from app.errors import server_error
 from app.concurrency import assert_unchanged
+from app.scope import apply_list_scope, assert_row_visible, person_ids_for, stamp_create, viewer_scope
 import logging
 
 logger = logging.getLogger(__name__)
@@ -52,18 +53,21 @@ class TimesheetEntryUpdate(BaseModel):
     expected_updated_at: Optional[str] = None
 
 # Timesheet Endpoints
-@router.get("", dependencies=[Depends(get_current_user)])
+@router.get("")
 async def get_timesheets(
     employee_id: Optional[int] = Query(None),
     start_date: Optional[date] = Query(None),
-    end_date: Optional[date] = Query(None)
+    end_date: Optional[date] = Query(None),
+    current_user: dict = Depends(get_current_user),
 ):
     """Get timesheet entries with optional filters"""
+    person_ids = person_ids_for(supabase, current_user)
     try:
         def _base_query():
             q = supabase.table("timesheets").select("*")
             if employee_id:
                 q = q.eq("employee_id", employee_id)
+            q = apply_list_scope(q, current_user, "timesheets", supabase, person_ids)
             q = apply_date_range(
                 q, "date",
                 start_date.isoformat() if start_date else None,
@@ -85,6 +89,9 @@ async def get_timesheets(
 @router.post("")
 async def create_timesheet_entry(entry: TimesheetEntryCreate, current_user: dict = Depends(get_current_user)):
     """Create a new timesheet entry"""
+    if viewer_scope(current_user) is not None:
+        stamp_create(current_user, "timesheets", {"employee_id": entry.employee_id},
+                     supabase, person_ids_for(supabase, current_user))
     try:
         logger.info(f"Creating timesheet entry for employee {entry.employee_id} on {entry.date}")
         
@@ -129,11 +136,13 @@ async def create_timesheet_entry(entry: TimesheetEntryCreate, current_user: dict
         logger.error(f"Error creating timesheet entry: {str(e)}")
         raise server_error(e, "Creating timesheet entry")
 
-@router.get("/{entry_id}", dependencies=[Depends(get_current_user)])
-async def get_timesheet_entry(entry_id: int):
+@router.get("/{entry_id}")
+async def get_timesheet_entry(entry_id: int, current_user: dict = Depends(get_current_user)):
     """Get a specific timesheet entry by ID"""
     try:
         result = get_or_404(supabase, "timesheets", entry_id, detail="Timesheet entry not found")
+        assert_row_visible(current_user, "timesheets", result, supabase,
+                           person_ids_for(supabase, current_user), detail="Timesheet entry not found")
         return decode_json_fields(result, ['overtime_periods'])
 
 
@@ -147,7 +156,10 @@ async def update_timesheet_entry(entry_id: int, updated: TimesheetEntryUpdate, c
     try:
         # Check if entry exists
         existing = get_or_404(supabase, "timesheets", entry_id, detail="Timesheet entry not found")
-        
+        if viewer_scope(current_user) is not None:
+            assert_row_visible(current_user, "timesheets", existing, supabase,
+                               person_ids_for(supabase, current_user), detail="Timesheet entry not found")
+
         # exclude_unset, not a None-filter: an explicitly-sent null must clear the
         # field, not be silently dropped. See work_orders (backend edec24a).
         data_to_update = updated.model_dump(exclude_unset=True)
@@ -177,8 +189,11 @@ async def delete_timesheet_entry(entry_id: int, current_user: dict = Depends(req
     """Delete a timesheet entry"""
     try:
         # Check if entry exists
-        get_or_404(supabase, "timesheets", entry_id, detail="Timesheet entry not found")
-        
+        existing = get_or_404(supabase, "timesheets", entry_id, detail="Timesheet entry not found")
+        if viewer_scope(current_user) is not None:
+            assert_row_visible(current_user, "timesheets", existing, supabase,
+                               person_ids_for(supabase, current_user), detail="Timesheet entry not found")
+
         supabase.table("timesheets").delete().eq("id", entry_id).execute()
         
         logger.info(f"Deleted timesheet entry ID: {entry_id}")
