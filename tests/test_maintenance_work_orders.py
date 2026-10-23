@@ -472,3 +472,10 @@ async def test_get_work_orders_pages_past_the_1000_row_database_cap(patch_supaba
     patch_supabase([{"id": i, "status": "pending", "priority": "low", "created_at": f"2026-01-01T00:{i // 60:02d}:{i % 60:02d}"} for i in range(1, 1201)])
     result = await get_work_orders(status=None, priority=None, department=None, allocated_to=None, to_department=None, limit=None)
     assert len(result) == 1200
+
+
+async def test_update_work_order_stale_expected_updated_at_is_409(patch_supabase):
+    patch_supabase([{"id": 7, "status": "pending", "updated_at": "2026-08-10T12:00:00"}])
+    with pytest.raises(HTTPException) as exc:
+        await update_work_order(7, WorkOrderUpdate(status="completed", expected_updated_at="2026-08-01T00:00:00"), current_user=_user())
+    assert exc.value.status_code == 409

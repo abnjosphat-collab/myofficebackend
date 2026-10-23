@@ -1,8 +1,10 @@
 from typing import Optional, List, Any
 from fastapi import HTTPException, Depends
 from pydantic import BaseModel
-from app.crud_router import CrudRouter
-from app.supabase_client import supabase
+from app.concurrency import assert_unchanged, touch
+from app.crud_router import CrudRouter, serialize_row
+from app.supabase_client import supabase, one_row
+from app.db_helpers import get_or_404
 from app.auth import get_current_user
 from app.audit import actor_name
 from datetime import datetime, timezone
@@ -48,6 +50,8 @@ class JobCardUpdate(BaseModel):
     completed_at: Optional[str] = None
     # sign_off_by / sign_off_at are stamped by the server when the card is completed (see _stamp_update below).
     notes: Optional[str] = None
+    # Optimistic concurrency: the updated_at the editor opened (popped before every write).
+    expected_updated_at: Optional[str] = None
 
 
 def _stamp_create(payload: dict) -> dict:
@@ -73,6 +77,36 @@ router = CrudRouter(
     before_create=_stamp_create,
     before_update=_stamp_update,
 ).router
+
+# The generic CrudRouter PATCH is replaced below so a save from a stale copy is
+# refused (F-09) — same route, guard and messages, plus the standard 409. The
+# reads, create and DELETE stay generic.
+router.routes[:] = [
+    r for r in router.routes
+    if not (getattr(r, "path", None) == "/{item_id}" and getattr(r, "methods", set()) == {"PATCH"})
+]
+
+
+@router.patch("/{item_id}", dependencies=[Depends(get_current_user)])
+async def update_job_card(item_id: str, data: JobCardUpdate):
+    """The generic PATCH plus the optimistic-concurrency guard: a save from a
+    stale copy is refused with the standard 409, exactly like overtime."""
+    try:
+        item_key = int(item_id)
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=422, detail=f"Invalid id: {item_id!r}")
+    payload = data.model_dump(exclude_unset=True)
+    expectation = payload.pop("expected_updated_at", None)
+    if not payload:
+        raise HTTPException(status_code=400, detail="No fields to update")
+    existing = get_or_404(supabase, "job_cards", item_key, detail="Job card not found")
+    assert_unchanged(existing, expectation)
+    payload = _stamp_update(payload)
+    touch(existing, payload)
+    updated = one_row(supabase.table("job_cards").update(payload).eq("id", item_key).execute())
+    if updated is None:
+        raise HTTPException(status_code=404, detail="Job card not found")
+    return serialize_row(updated)
 
 
 @router.get("/{jc_id}", dependencies=[Depends(get_current_user)])

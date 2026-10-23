@@ -9,6 +9,7 @@ from app.cache import cached, cache_get, cache_set, build_key, invalidate_namesp
 from app.serialization import convert_dates_to_iso
 from app.aggregation import count_by
 from app.db_helpers import fetch_all_pages, get_or_404
+from app.concurrency import assert_unchanged
 from app.maintenance_events import append_event, diff_changes
 from app.errors import server_error
 from app.clock import today_harare
@@ -168,6 +169,8 @@ class WorkOrderUpdate(BaseModel):
     # Optional so callers that predate the audit trail keep working (R38); it is never stored as a column
     # value (the database bumps it).
     version: Optional[int] = None
+    # Optimistic concurrency: the updated_at the editor opened (popped before every write).
+    expected_updated_at: Optional[str] = None
 
 
 class WorkOrderCommentCreate(BaseModel):
@@ -431,6 +434,7 @@ async def update_work_order(work_order_id: int, updated: WorkOrderUpdate, curren
         data_to_update = updated.model_dump(exclude_unset=True)
         # The version is a precondition, not a value to store.
         expected_version = data_to_update.pop("version", None)
+        assert_unchanged(before, data_to_update.pop("expected_updated_at", None))
         data_to_update = prepare_data_for_db(data_to_update)
         data_to_update["updated_at"] = datetime.utcnow().isoformat()
 
