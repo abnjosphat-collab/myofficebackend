@@ -12,6 +12,7 @@ from collections import defaultdict
 
 from dotenv import load_dotenv
 from fastapi import APIRouter, HTTPException, Depends, Query, Body, BackgroundTasks, Form, UploadFile, File, Request
+from app.clock import today_harare
 from app.uploads import read_and_validate_upload
 from app.rate_limit import limiter
 from app.aggregation import count_by
@@ -1389,7 +1390,7 @@ def ensure_weekly_routine_schedules(supabase_client, today: Optional[date] = Non
     Idempotent: a compressor whose marker exists (active or deliberately paused) is skipped, as is
     one whose meter row is offline. Raises on DB failure — the caller decides how loud to be.
     """
-    today = today or date.today()
+    today = today or today_harare()
     units = load_register_units(supabase_client)
     rows = supabase_client.table(SCHEDULES_TABLE).select("id,equipment_info").eq("recurrence_type", "weekly").execute()
     have = {r.get("equipment_info") for r in (getattr(rows, "data", rows) or [])}

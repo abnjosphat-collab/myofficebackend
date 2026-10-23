@@ -17,6 +17,7 @@ from typing import Any, List, Optional
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from pydantic import BaseModel
 
+from app.clock import today_harare
 from app.aggregation import count_by
 from app.auth import get_current_user, require_role
 from app.db_helpers import response_rows
@@ -36,7 +37,7 @@ MAX_CERTIFICATE_BYTES = 15 * 1024 * 1024
 
 def check_status(expiry_date: date) -> str:
     """Compliance status from the expiry date: Expired, Due Soon (within 90 days) or Valid."""
-    today = date.today()
+    today = today_harare()
     if expiry_date < today:
         return "Expired"
     if expiry_date <= today + timedelta(days=90):
@@ -245,7 +246,7 @@ async def get_employee_certifications(employee_id: str):
 @router.get("/alerts/expiring", dependencies=[Depends(get_current_user)])
 async def get_expiring_certifications(days: int = 90):
     """Certifications expiring within `days`, soonest first."""
-    today = date.today()
+    today = today_harare()
     expiring = []
     for r in _all_records():
         left = (r.expiry_date - today).days

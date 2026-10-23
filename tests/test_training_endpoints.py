@@ -5,12 +5,15 @@
 # and a failure is reported instead of being shown as an empty register.
 
 import asyncio
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
+from zoneinfo import ZoneInfo
 
 import pytest
 from fastapi import HTTPException
 
+import app.clock as clock_mod
 from app.routers import training as training_mod
+from app.clock import today_harare
 from tests._table_fake import TableFake
 from app.routers.training import (
     create_new_certification, delete_certification, get_all_certifications, get_certification,
@@ -18,7 +21,7 @@ from app.routers.training import (
     get_training_stats, update_certification,
 )
 
-TODAY = date.today()
+TODAY = today_harare()
 USER = {"user_id": "u1", "email": "u1@x.com", "role": "user"}
 MANAGER = {"user_id": "m1", "email": "m1@x.com", "role": "manager"}
 
@@ -45,6 +48,17 @@ def db(monkeypatch):
 
 def run(coro):
     return asyncio.run(coro)
+
+# 23:30 UTC is already the next day in Harare (UTC+2): the audit's F-12
+# scenario. The frozen date is deliberately far from any run date so a UTC
+# "today" fails these tests deterministically (until 2030).
+FROZEN_HARARE = datetime(2030, 5, 6, 1, 30, tzinfo=ZoneInfo("Africa/Harare"))
+
+
+@pytest.fixture
+def frozen_clock(monkeypatch):
+    monkeypatch.setattr(clock_mod, "now_harare", lambda: FROZEN_HARARE)
+
 
 
 def add(name="First Aid", expiry=TODAY + timedelta(days=200), employee="E-1", refresher="BLS Refresher", file=None):
@@ -195,3 +209,11 @@ def test_a_file_that_cannot_be_cleaned_up_does_not_fail_the_delete(db):
 
 def test_the_compliance_rate_of_an_empty_register_is_full(db):
     assert run(get_compliance_rate()) == {"compliance_rate": 100.0, "total_tracked": 0, "non_compliant": 0}
+
+def test_expiring_window_uses_the_harare_date_near_midnight_utc(db, frozen_clock):
+    # At 23:30 UTC Harare is already on 2030-05-06: a certificate expiring
+    # five Harare-days out is inside the 90-day window with 5 days left.
+    add(name="Frozen", expiry=date(2030, 5, 11))
+    expiring = run(get_expiring_certifications(days=90))
+    assert expiring["count"] == 1
+    assert expiring["certifications"][0]["days_until_expiry"] == 5

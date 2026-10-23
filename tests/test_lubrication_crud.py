@@ -17,10 +17,11 @@ from app.routers.lubrication import (
 )
 from fastapi import HTTPException
 from datetime import date, timedelta
+from app.clock import today_harare
 
 
 def _iso(days_from_today: int) -> str:
-    return (date.today() + timedelta(days=days_from_today)).strftime("%Y-%m-%d")
+    return (today_harare() + timedelta(days=days_from_today)).strftime("%Y-%m-%d")
 
 
 class _Resp:

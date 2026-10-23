@@ -9,13 +9,16 @@
 # recipe as test_vfl_reports.py/test_pto_reports.py — bespoke per file since this
 # router touches multiple tables with different per-table behaviour.
 
-from datetime import date
+from datetime import date, datetime
+from zoneinfo import ZoneInfo
 
 import pytest
 from pydantic import ValidationError
 from fastapi import HTTPException
 
+import app.clock as clock_mod
 import app.routers.schedules as sched_mod
+from app.clock import today_harare
 from app.routers.schedules import (
     list_schedules, create_schedule, update_schedule, delete_schedule, schedule_runs,
     ScheduleCreate, ScheduleUpdate,
@@ -107,6 +110,17 @@ def _calls(state, table, op=None):
     return [c for c in state["calls"] if c["table"] == table and (op is None or c["op"] == op)]
 
 
+# 23:30 UTC is already the next day in Harare (UTC+2): the audit's F-12
+# scenario. The frozen date is deliberately far from any run date so a UTC
+# "today" fails these tests deterministically (until 2030).
+FROZEN_HARARE = datetime(2030, 5, 6, 1, 30, tzinfo=ZoneInfo("Africa/Harare"))
+
+
+@pytest.fixture
+def frozen_clock(monkeypatch):
+    monkeypatch.setattr(clock_mod, "now_harare", lambda: FROZEN_HARARE)
+
+
 # ─── list_schedules ──────────────────────────────────────────────────────────────
 
 async def test_list_schedules_happy_path(patch_supabase):
@@ -133,8 +147,20 @@ async def test_create_schedule_computes_next_due_date_when_not_supplied(patch_su
 
     insert_payload = _calls(state, "maintenance_schedules", "insert")[0]["payload"]
     assert insert_payload["created_by"] == "manager-1"
-    assert insert_payload["next_due_date"] == (date.today() + __import__("datetime").timedelta(days=1)).isoformat()
+    assert insert_payload["next_due_date"] == (today_harare() + __import__("datetime").timedelta(days=1)).isoformat()
     assert result["id"] == 1
+
+
+async def test_create_schedule_anchors_next_due_on_the_harare_date(patch_supabase, frozen_clock):
+    # At 23:30 UTC Harare is already on 2030-05-06, so a daily schedule's
+    # first due date is 2030-05-07, not "server today + 1".
+    state = patch_supabase({
+        "maintenance_schedules": {"insert_return": lambda payload, f: [dict(payload, id=1)]},
+    })
+    payload = ScheduleCreate(name="Daily oil check", recurrence_type="daily")
+    await create_schedule(payload, user={"user_id": "manager-1"})
+    insert_payload = _calls(state, "maintenance_schedules", "insert")[0]["payload"]
+    assert insert_payload["next_due_date"] == "2030-05-07"
 
 
 async def test_create_schedule_preserves_explicit_next_due_date(patch_supabase):

@@ -5,14 +5,30 @@
 # with the several other expiry-status functions covered elsewhere this pass
 # (compressors' 7/30-day service urgency, training's 90-day cert expiry).
 
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
+from zoneinfo import ZoneInfo
 
+import pytest
+
+import app.clock as clock_mod
+from app.clock import today_harare
 from app.routers.compliance import _compute_status
 from app.routers.lubrication import _lube_status
 
+# 23:30 UTC is already the next day in Harare (UTC+2): the audit's F-12
+# scenario. The frozen date is deliberately far from any run date so a UTC
+# "today" fails these tests deterministically (until 2030).
+FROZEN_HARARE = datetime(2030, 5, 6, 1, 30, tzinfo=ZoneInfo("Africa/Harare"))
+
+
+@pytest.fixture
+def frozen_clock(monkeypatch):
+    monkeypatch.setattr(clock_mod, "now_harare", lambda: FROZEN_HARARE)
+
+
 
 def _iso(days_from_today: int) -> str:
-    return (date.today() + timedelta(days=days_from_today)).strftime("%Y-%m-%d")
+    return (today_harare() + timedelta(days=days_from_today)).strftime("%Y-%m-%d")
 
 
 # ─── compliance._compute_status — 30-day window ─────────────────────────────────────
@@ -58,3 +74,12 @@ def test_lube_8_days_out_is_current():
 
 def test_lube_malformed_date_is_unknown_not_a_crash():
     assert _lube_status("garbage") == "unknown"
+
+def test_compliance_uses_the_harare_date_near_midnight_utc(frozen_clock):
+    # At 23:30 UTC Harare is already on 2030-05-06: an expiry on that day
+    # is "due_soon", not "current".
+    assert _compute_status("2030-05-06") == "due_soon"
+
+
+def test_lube_uses_the_harare_date_near_midnight_utc(frozen_clock):
+    assert _lube_status("2030-05-06") == "due_soon"

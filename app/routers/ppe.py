@@ -3,6 +3,7 @@ from starlette.concurrency import run_in_threadpool
 from pydantic import BaseModel, Field
 from typing import Optional
 from datetime import datetime, date
+from app.clock import today_harare
 from app.supabase_client import supabase, rows, one_row
 from app.auth import get_current_user, require_role
 from app.serialization import convert_dates_to_iso
@@ -299,7 +300,7 @@ async def get_ppe_stats():
         condition_counts = count_by(records_all, 'condition')
         
         # Count expiring soon (within 30 days) and expired
-        today = date.today()
+        today = today_harare()
         expiring_soon = 0
         expired = 0
 

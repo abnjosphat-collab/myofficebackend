@@ -3,12 +3,26 @@
 # safety-critical: PPE past its replacement date is a real compliance risk, and this
 # is the number that drives the dashboard's expiry warnings.
 
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
+from zoneinfo import ZoneInfo
 
 import pytest
 
+import app.clock as clock_mod
 import app.routers.ppe as ppe_mod
+from app.clock import today_harare
 from app.routers.ppe import get_ppe_stats
+
+
+# 23:30 UTC is already the next day in Harare (UTC+2): the audit's F-12
+# scenario. The frozen date is deliberately far from any run date so a UTC
+# "today" fails these tests deterministically (until 2030).
+FROZEN_HARARE = datetime(2030, 5, 6, 1, 30, tzinfo=ZoneInfo("Africa/Harare"))
+
+
+@pytest.fixture
+def frozen_clock(monkeypatch):
+    monkeypatch.setattr(clock_mod, "now_harare", lambda: FROZEN_HARARE)
 
 
 class _Resp:
@@ -49,7 +63,7 @@ def patch_supabase(monkeypatch):
 
 
 def _iso(days_from_today: int) -> str:
-    return (date.today() + timedelta(days=days_from_today)).strftime("%Y-%m-%d")
+    return (today_harare() + timedelta(days=days_from_today)).strftime("%Y-%m-%d")
 
 
 async def test_empty_records_is_all_zero(patch_supabase):
@@ -132,3 +146,16 @@ async def test_stats_pages_past_supabase_default_limit(patch_supabase):
     assert stats["total_records"] == 1001
     assert stats["unique_employees"] == 1001
     assert stats["status_breakdown"] == {"active": 1001}
+
+
+async def test_expiry_buckets_use_the_harare_date_near_midnight_utc(patch_supabase, frozen_clock):
+    # At 23:30 UTC Harare is already on 2030-05-06: an item expiring that day
+    # is expiring-soon, and one that expired the Harare-day before is expired.
+    records = [
+        {"id": 1, "employee_id": "E1", "status": "active", "condition": "good", "expiry_date": "2030-05-06"},
+        {"id": 2, "employee_id": "E2", "status": "active", "condition": "good", "expiry_date": "2030-05-05"},
+    ]
+    patch_supabase(records)
+    stats = await get_ppe_stats()
+    assert stats["expiring_soon"] == 1
+    assert stats["expired"] == 1

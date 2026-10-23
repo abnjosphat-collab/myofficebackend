@@ -16,6 +16,7 @@ from typing import Optional, List
 from fastapi import APIRouter, HTTPException, Depends, Header
 from pydantic import BaseModel, Field, field_validator
 
+from app.clock import today_harare
 from app.supabase_client import supabase
 from app.auth import get_current_user, require_role
 from app.routers.compressors import ensure_weekly_routine_schedules
@@ -202,7 +203,7 @@ async def create_schedule(payload: ScheduleCreate, user: dict = Depends(require_
     body = payload.model_dump(mode='json')
     body['created_by'] = user['user_id']
     if not body.get('next_due_date'):
-        body['next_due_date'] = next_occurrence(body, date.today()).isoformat()
+        body['next_due_date'] = next_occurrence(body, today_harare()).isoformat()
     try:
         resp = supabase.table('maintenance_schedules').insert(body).execute()
         return _rows(resp)[0]
@@ -342,7 +343,7 @@ async def generate_due_work_orders(
     if not authorised:
         await require_role('manager')(authorization)
 
-    today = date.today()
+    today = today_harare()
     try:
         resp = supabase.table('maintenance_schedules').select('*').eq('active', True).execute()
         schedules = _rows(resp)

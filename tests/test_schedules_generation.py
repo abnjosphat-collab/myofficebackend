@@ -12,11 +12,14 @@
 # ever called from _generate_one, not worth a third fake-supabase rig.
 
 from datetime import date, datetime, timedelta
+from zoneinfo import ZoneInfo
 
 import pytest
 from fastapi import HTTPException
 
+import app.clock as clock_mod
 import app.routers.schedules as sched_mod
+from app.clock import today_harare
 from app.routers.schedules import (
     _generate_one, _next_work_order_number, generate_due_work_orders,
 )
@@ -271,12 +274,9 @@ async def test_generate_mixed_batch_only_generates_the_schedules_actually_due(mo
     work order, and that one bad schedule doesn't stop the rest of the run."""
     monkeypatch.setenv("CRON_SECRET", "s3cr3t")
     today = date(2026, 8, 30)
-
-    class _FixedDate(date):
-        @classmethod
-        def today(cls):
-            return today
-    monkeypatch.setattr(sched_mod, "date", _FixedDate)  # generate_due_work_orders calls date.today() itself
+    # generate_due_work_orders takes "today" from the Harare clock: freeze it
+    # at noon so the date is unambiguous in every timezone.
+    monkeypatch.setattr(clock_mod, "now_harare", lambda: datetime(2026, 8, 30, 12, 0, tzinfo=ZoneInfo("Africa/Harare")))
 
     due_ok = {
         "id": 1, "name": "Due and healthy", "recurrence_type": "daily",
@@ -357,7 +357,7 @@ async def test_generate_creates_a_missing_compressor_weekly_routine(monkeypatch,
     assert payload["recurrence_type"] == "weekly"
     assert payload["to_department"] == "Engineering"
     assert payload["active"] is True
-    today = date.today()
+    today = today_harare()
     assert payload["next_due_date"] == (today + timedelta(days=(7 - today.weekday()) % 7 or 7)).isoformat()
 
 
@@ -395,3 +395,24 @@ async def test_generate_cron_secret_uses_constant_time_compare(monkeypatch, patc
     result = await generate_due_work_orders(x_cron_secret="s3cr3t", authorization=None)
     assert result == {"generated": 0, "created": [], "failed": []}
     assert calls.get("args") == ("s3cr3t", "s3cr3t")
+
+async def test_generate_uses_the_harare_date_near_midnight_utc(monkeypatch, patch_supabase):
+    # At 23:30 UTC Harare is already on 2030-05-06: a schedule due that day
+    # generates; on the server's UTC date it would wait another day.
+    monkeypatch.setenv("CRON_SECRET", "s3cr3t")
+    monkeypatch.setattr(clock_mod, "now_harare", lambda: datetime(2030, 5, 6, 1, 30, tzinfo=ZoneInfo("Africa/Harare")))
+    patch_supabase({
+        "maintenance_schedules": {"select_return": [
+            {"id": 1, "name": "Due on the Harare date", "recurrence_type": "daily",
+             "next_due_date": date(2030, 5, 6), "active": True, "advance_days": 0},
+        ]},
+        "maintenance_schedule_runs": {"insert_return": lambda p, f: [{"id": 10, **p}]},
+        "work_orders": {
+            "select_return": [{"work_order_number": "WO-00003"}],
+            "insert_return": lambda p, f: [{"id": 55, **p}],
+        },
+    })
+    result = await generate_due_work_orders(x_cron_secret="s3cr3t", authorization=None)
+    assert result["generated"] == 1
+    assert [c["schedule_id"] for c in result["created"]] == [1]
+
