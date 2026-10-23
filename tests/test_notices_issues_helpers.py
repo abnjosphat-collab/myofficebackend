@@ -3,9 +3,24 @@
 # (trim/blank-to-None normalization) + get_stats (today/this-week counting window).
 # All had zero tests.
 
-from datetime import date
+from datetime import date, datetime
+from zoneinfo import ZoneInfo
 
 import pytest
+
+import app.clock as clock_mod
+from app.clock import today_harare
+
+# 23:30 UTC is already the next day in Harare (UTC+2): the audit's F-12
+# scenario. The frozen date is deliberately far from any run date so a UTC
+# "today" fails these tests deterministically (until 2030).
+FROZEN_HARARE = datetime(2030, 5, 6, 1, 30, tzinfo=ZoneInfo("Africa/Harare"))
+
+
+@pytest.fixture
+def frozen_clock(monkeypatch):
+    monkeypatch.setattr(clock_mod, "now_harare", lambda: FROZEN_HARARE)
+
 
 from app.routers.notices import _dates_to_iso
 from app.routers.issues import _clean_issue_write
@@ -88,7 +103,7 @@ def patch_supabase(monkeypatch):
 
 
 async def test_stats_counts_todays_issues(patch_supabase):
-    today = date.today().isoformat()
+    today = today_harare().isoformat()
     patch_supabase([
         {"issued_at": f"{today}T09:00:00", "recipient_name": "A"},
         {"issued_at": f"{today}T14:00:00", "recipient_name": "B"},
@@ -107,7 +122,7 @@ async def test_stats_empty_records_is_all_zero(patch_supabase):
 
 
 async def test_stats_deduplicates_recipients(patch_supabase):
-    today = date.today().isoformat()
+    today = today_harare().isoformat()
     patch_supabase([
         {"issued_at": f"{today}T09:00:00", "recipient_name": "A"},
         {"issued_at": f"{today}T10:00:00", "recipient_name": "A"},
@@ -120,3 +135,16 @@ async def test_stats_read_every_page_not_just_the_first_thousand(patch_supabase)
     patch_supabase([{"issued_at": "2020-01-01T00:00:00", "recipient_name": f"P{i % 7}"} for i in range(2500)])
     result = await get_stats()
     assert result["total"] == 2500 and result["unique_recipients"] == 7
+
+async def test_stats_windows_use_the_harare_date_near_midnight_utc(patch_supabase, frozen_clock):
+    # At 23:30 UTC Harare is already on Monday 2030-05-06: only that day's
+    # issue counts as today, and Sunday's issue falls outside this week.
+    patch_supabase([
+        {"issued_at": "2030-05-06T09:00:00", "recipient_name": "A"},
+        {"issued_at": "2030-05-05T09:00:00", "recipient_name": "B"},
+        {"issued_at": "2030-04-01T09:00:00", "recipient_name": "C"},
+    ])
+    stats = await get_stats()
+    assert stats["total"] == 3
+    assert stats["today"] == 1
+    assert stats["this_week"] == 1

@@ -1,6 +1,7 @@
 from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel
 from typing import Optional
+from app.clock import today_harare
 from app.supabase_client import supabase
 from app.auth import get_current_user, require_role
 from app.db_helpers import get_or_404
@@ -15,7 +16,7 @@ def _compute_status(expiry: Optional[str]) -> str:
     if not expiry:
         return "current"
     try:
-        days = (date.fromisoformat(expiry) - date.today()).days
+        days = (date.fromisoformat(expiry) - today_harare()).days
         if days < 0:   return "overdue"
         if days <= 30: return "due_soon"
         return "current"

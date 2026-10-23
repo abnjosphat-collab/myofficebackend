@@ -1,6 +1,7 @@
 from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel
 from typing import Optional
+from app.clock import today_harare
 from app.supabase_client import supabase
 from app.auth import get_current_user, require_role
 from app.errors import server_error
@@ -14,7 +15,7 @@ def _lube_status(next_due: Optional[str]) -> str:
     if not next_due:
         return "current"
     try:
-        days = (date.fromisoformat(next_due) - date.today()).days
+        days = (date.fromisoformat(next_due) - today_harare()).days
         if days < 0:   return "overdue"
         if days <= 7:  return "due_soon"
         return "current"

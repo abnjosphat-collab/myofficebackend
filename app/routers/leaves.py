@@ -3,6 +3,7 @@ from fastapi import APIRouter, HTTPException, Header, Depends
 from pydantic import BaseModel, Field, validator
 from typing import Optional, List, Dict, Any
 from datetime import date, datetime
+from app.clock import today_harare
 from app.supabase_client import supabase, rows, one_row
 from app.auth import get_current_user, require_role, require_role_if_status_in
 from app.db_helpers import fetch_all_pages, get_or_404
@@ -194,7 +195,7 @@ async def get_leave_stats():
     try:
         response = supabase.table("leaves").select("*").execute()
         data = rows(response)
-        today = date.today().isoformat()
+        today = today_harare().isoformat()
         total = len(data)
         pending = sum(1 for l in data if l.get('status') == 'pending')
         approved = sum(1 for l in data if l.get('status') == 'approved')

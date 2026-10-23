@@ -3,13 +3,27 @@
 # upcoming date-window logic. Both had zero tests despite being real payroll/HR
 # calculations.
 
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
+from zoneinfo import ZoneInfo
 
 import pytest
 
+import app.clock as clock_mod
 import app.routers.leaves as leaves_mod
+from app.clock import today_harare
 from app.leave_days import calculate_total_days
 from app.routers.leaves import get_leave_stats
+
+
+# 23:30 UTC is already the next day in Harare (UTC+2): the audit's F-12
+# scenario. The frozen date is deliberately far from any run date so a UTC
+# "today" fails these tests deterministically (until 2030).
+FROZEN_HARARE = datetime(2030, 5, 6, 1, 30, tzinfo=ZoneInfo("Africa/Harare"))
+
+
+@pytest.fixture
+def frozen_clock(monkeypatch):
+    monkeypatch.setattr(clock_mod, "now_harare", lambda: FROZEN_HARARE)
 
 
 # ─── calculate_total_days ────────────────────────────────────────────────────────────
@@ -68,7 +82,7 @@ def patch_supabase(monkeypatch):
 
 
 def _iso(days_from_today: int) -> str:
-    return (date.today() + timedelta(days=days_from_today)).strftime("%Y-%m-%d")
+    return (today_harare() + timedelta(days=days_from_today)).strftime("%Y-%m-%d")
 
 
 async def test_currently_active_approved_leave_counts_as_on_leave_now(patch_supabase):
@@ -117,3 +131,16 @@ async def test_status_tallies(patch_supabase):
     assert stats["pending"] == 1
     assert stats["approved"] == 2
     assert stats["rejected"] == 1
+
+
+async def test_windows_use_the_harare_date_near_midnight_utc(patch_supabase, frozen_clock):
+    # At 23:30 UTC Harare is already on 2030-05-06: a leave spanning that day
+    # is on-leave-now, and one starting the day after is upcoming.
+    records = [
+        {"status": "approved", "start_date": "2030-05-01", "end_date": "2030-05-10"},
+        {"status": "approved", "start_date": "2030-05-07", "end_date": "2030-05-09"},
+    ]
+    patch_supabase(records)
+    stats = await get_leave_stats()
+    assert stats["on_leave_now"] == 1
+    assert stats["upcoming"] == 1

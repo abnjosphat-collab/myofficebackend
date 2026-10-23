@@ -19,7 +19,6 @@ Two things the original router had that this migration deliberately changes:
 /stats/summary is genuinely custom (an aggregation, not a CRUD verb) and stays
 hand-added alongside the base, same pattern as contractors.py.
 """
-from datetime import date, timedelta
 from typing import List, Optional
 
 from fastapi import Depends, HTTPException
@@ -27,6 +26,7 @@ from starlette.concurrency import run_in_threadpool
 from pydantic import BaseModel, Field
 import logging
 
+from app.clock import today_harare, week_start_harare
 from app.crud_router import CrudRouter
 from app.supabase_client import supabase, one_row
 from app.auth import get_current_user, require_role
@@ -190,8 +190,8 @@ async def get_stats():
         records = await run_in_threadpool(lambda: fetch_all_pages(
             lambda start, end: supabase.table("stock_issues").select("issued_at, recipient_name").order("id").range(start, end).execute()
         ))
-        today_str = date.today().isoformat()
-        week_start = (date.today() - timedelta(days=date.today().weekday())).isoformat()
+        today_str = today_harare().isoformat()
+        week_start = week_start_harare().isoformat()
         today_count = sum(1 for r in records if (r.get("issued_at") or "").startswith(today_str))
         week_count = sum(1 for r in records if (r.get("issued_at") or "") >= week_start)
         recipients = len(set(r.get("recipient_name", "") for r in records if r.get("recipient_name")))

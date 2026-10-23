@@ -2,10 +2,12 @@
 # have: ensure_weekly_routine_schedules creates the missing maintenance_schedules rows
 # (one per compressor, weekly, Engineering-owned) so schedule generation raises their
 # work orders. Idempotent, offline-aware, and quiet when the register is empty.
-from datetime import date
+from datetime import date, datetime
+from zoneinfo import ZoneInfo
 
 import pytest
 
+import app.clock as clock_mod
 from app.compressor_register import EQUIPMENT_TABLE
 from app.routers.compressors import (
     COMPRESSORS_TABLE,
@@ -16,6 +18,16 @@ from app.routers.compressors import (
 from tests._compressors_fake import FakeSupabase
 
 TUESDAY = date(2026, 10, 13)  # next Monday is 2026-10-19
+
+# 23:30 UTC is already the next day in Harare (UTC+2): the audit's F-12
+# scenario. The frozen date is deliberately far from any run date so a UTC
+# "today" fails these tests deterministically (until 2030).
+FROZEN_HARARE = datetime(2030, 5, 6, 1, 30, tzinfo=ZoneInfo("Africa/Harare"))
+
+
+@pytest.fixture
+def frozen_clock(monkeypatch):
+    monkeypatch.setattr(clock_mod, "now_harare", lambda: FROZEN_HARARE)
 
 
 def _unit(**overrides):
@@ -86,3 +98,12 @@ def test_empty_register_is_a_quiet_noop():
 
 def test_marker_is_stable_and_namespaced():
     assert routine_marker(7) == "compressor-routine:7"
+
+
+def test_default_today_is_the_harare_date(frozen_clock):
+    # Without an explicit today the routine anchors on Harare: frozen on
+    # Monday 2030-05-06, the next routine falls on Monday 2030-05-13.
+    fake = FakeSupabase({EQUIPMENT_TABLE: [_unit()]})
+    result = ensure_weekly_routine_schedules(fake)
+    assert result["checked"] == 1
+    assert _schedules(fake)[0]["next_due_date"] == "2030-05-13"
