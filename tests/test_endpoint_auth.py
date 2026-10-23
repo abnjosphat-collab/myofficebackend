@@ -89,17 +89,15 @@ def test_write_endpoints_require_auth(method, path):
     assert resp.status_code == 401, f"{method.upper()} {path} returned {resp.status_code}, expected 401"
 
 
-# The 8 data-bearing open reads are DELIBERATE (see docs/ENGINEERING_STANDARDS.md,
+# The 6 data-bearing open reads are DELIBERATE (see docs/ENGINEERING_STANDARDS.md,
 # "Open reads: what and why") — aggregate/operational data the homepage and shared
 # pick-lists need without a token — plus the health probes. Anything listed here
 # returning 401 is a bug; any other data-bearing read NOT requiring auth is a bug.
 OPEN_READS = [
     "/api/health",
     "/api/employees/health/status",   # health probe stays open
-    "/api/availabilities",            # equipment + latest availability, merged
     "/api/availabilities/stats",      # aggregate counts
     "/api/breakdowns/dashboard/overview",  # homepage KPI aggregates
-    "/api/equipment",                 # equipment list isn't PII — stays open
     "/api/leaves/stats/summary",      # aggregate counts, not individual records
     "/api/lookup-lists/location",     # shared pick-list values
     "/api/maintenance/work-orders/stats/summary",  # aggregate counts
