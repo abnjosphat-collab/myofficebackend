@@ -30,6 +30,16 @@ from app.supabase_client import supabase  # noqa: E402
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
+# Files that ran once and must never be re-applied: re-running them destroys
+# live data. --list shows them as retired (never pending); --mark-applied
+# refuses them, because the only reason to touch them now is a re-run.
+RETIRED_DO_NOT_RERUN = {
+    "supabase_migration_maintenance_schedules.sql": (
+        "applied once; re-running drops every live maintenance schedule "
+        "(guarded in-file since Oct 2026, but never run it again)"
+    ),
+}
+
 
 def migration_files() -> list[str]:
     # supabase_rollback_* is deliberately excluded: emergency-only scripts must
@@ -56,7 +66,12 @@ def cmd_list():
         print("No supabase_migration_*.sql files found at the repo root.")
         return
     pending = 0
+    retired = 0
     for f in files:
+        if f in RETIRED_DO_NOT_RERUN:
+            retired += 1
+            print(f"  [RETIRED — never re-run] {f} ({RETIRED_DO_NOT_RERUN[f]})")
+            continue
         row = applied.get(f)
         if row:
             print(f"  [applied {row['applied_at']}] {f}" + (f" — {row['note']}" if row.get("note") else ""))
@@ -68,10 +83,13 @@ def cmd_list():
     orphaned = set(applied) - set(files)
     for f in sorted(orphaned):
         print(f"  [applied, file missing] {f} — tracked as applied but no longer exists in the repo")
-    print(f"\n{len(files) - pending}/{len(files)} tracked as applied, {pending} pending.")
+    print(f"\n{len(files) - pending - retired}/{len(files)} tracked as applied, {pending} pending, {retired} retired.")
 
 
 def cmd_mark_applied(filename: str, note: str | None):
+    if filename in RETIRED_DO_NOT_RERUN:
+        print(f"Refusing to mark {filename}: retired, never re-run ({RETIRED_DO_NOT_RERUN[filename]})")
+        sys.exit(1)
     if not (REPO_ROOT / filename).exists():
         print(f"Warning: {filename} doesn't exist at the repo root — marking it applied anyway (could be a typo, or the file was since removed).")
     try:
