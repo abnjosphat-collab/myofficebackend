@@ -1,12 +1,33 @@
 -- backend/supabase_migration_maintenance_schedules.sql
 -- Recurring maintenance schedules + automatic work-order generation.
 --
--- Replaces the previous maintenance_schedules table, which modelled a one-off
--- job (equipment_id + a single scheduled_date) and could not store what the
--- maintenance page actually does: a recurring template that generates work
--- orders. That table was empty and no code called its router, so nothing is
--- lost. Schedules previously lived in the browser's localStorage, which meant
--- they were invisible to every other user and to the server.
+-- DO NOT RE-RUN AGAINST A LIVE DATABASE. This file rebuilds
+-- public.maintenance_schedules from scratch (DROP + CREATE). The "empty
+-- table" note below was true on first application only; the table is now
+-- live, holds every recurrence template, and the daily cron raises work
+-- orders from it. Re-running this file deletes all of that. The guard block
+-- underneath refuses to proceed when the table already exists, and
+-- scripts/track_migration.py lists this file as retired.
+--
+-- Historical note (first application): replaces the previous
+-- maintenance_schedules table, which modelled a one-off job (equipment_id +
+-- a single scheduled_date) and could not store what the maintenance page
+-- actually does: a recurring template that generates work orders. That table
+-- was empty and no code called its router, so nothing was lost then.
+-- Schedules previously lived in the browser's localStorage, which meant they
+-- were invisible to every other user and to the server.
+
+-- Re-run guard: on a fresh database the table is absent and the file applies
+-- normally (the DROP is a no-op); where the table exists, this migration has
+-- run before and the file stops here instead of dropping live schedules.
+DO $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM information_schema.tables
+             WHERE table_schema = 'public' AND table_name = 'maintenance_schedules') THEN
+    RAISE EXCEPTION 'maintenance_schedules already exists: this migration ran before and must never be re-applied (it would drop % live schedules). Restore from backup instead — see backend/docs/BACKUP_AND_RESTORE.md.',
+      (SELECT count(*) FROM public.maintenance_schedules);
+  END IF;
+END $$;
 
 DROP TABLE IF EXISTS public.maintenance_schedules CASCADE;
 
