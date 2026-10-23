@@ -6,6 +6,7 @@ from app.crud_router import CrudRouter, serialize_row
 from app.supabase_client import supabase, one_row
 from app.db_helpers import get_or_404
 from app.auth import get_current_user
+from app.scope import assert_row_visible, viewer_scope
 from app.audit import actor_name
 from datetime import datetime, timezone
 from app.db_helpers import get_or_404
@@ -76,6 +77,7 @@ router = CrudRouter(
     reject_empty_update=True,
     before_create=_stamp_create,
     before_update=_stamp_update,
+    scope_table="job_cards",
 ).router
 
 # The generic CrudRouter PATCH is replaced below so a save from a stale copy is
@@ -88,7 +90,7 @@ router.routes[:] = [
 
 
 @router.patch("/{item_id}", dependencies=[Depends(get_current_user)])
-async def update_job_card(item_id: str, data: JobCardUpdate):
+async def update_job_card(item_id: str, data: JobCardUpdate, current_user: dict = Depends(get_current_user)):
     """The generic PATCH plus the optimistic-concurrency guard: a save from a
     stale copy is refused with the standard 409, exactly like overtime."""
     try:
@@ -100,6 +102,9 @@ async def update_job_card(item_id: str, data: JobCardUpdate):
     if not payload:
         raise HTTPException(status_code=400, detail="No fields to update")
     existing = get_or_404(supabase, "job_cards", item_key, detail="Job card not found")
+    if viewer_scope(current_user) is not None:
+        merged = {**existing, **payload}
+        assert_row_visible(current_user, "job_cards", merged, detail="Job card not found")
     assert_unchanged(existing, expectation)
     payload = _stamp_update(payload)
     touch(existing, payload)
@@ -110,5 +115,6 @@ async def update_job_card(item_id: str, data: JobCardUpdate):
 
 
 @router.get("/{jc_id}", dependencies=[Depends(get_current_user)])
-async def get_job_card(jc_id: int):
-    return get_or_404(supabase, "job_cards", jc_id, detail="Job card not found")
+async def get_job_card(jc_id: int, current_user: dict = Depends(get_current_user)):
+    row = get_or_404(supabase, "job_cards", jc_id, detail="Job card not found")
+    return assert_row_visible(current_user, "job_cards", row, detail="Job card not found")

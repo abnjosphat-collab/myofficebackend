@@ -170,3 +170,50 @@ Plumbing + obvious UI; no per-module filtering yet (Batches 2–5).
   free-text with canonical suggestions, not a closed select.
 - Suite: test_projects_scope.py 9 red / 10 green (registry test went green
   as designed; 8 behaviour + 1 guard red until enforcement lands).
+
+## Batch 2 — done (branch projects-scope-2, both repos)
+
+- People modules enforced: employees, leaves, overtime, NEC + artisan
+  timesheets, PPE (records + order list), stock issues (Q6: recipient id,
+  NULL falls back to name), training, competency, standby/duty rosters and
+  rotations, rotation covers. CrudRouter gained `scope_table=` hooks;
+  hand-rolled routers got list/single/create/patch guards. Out-of-scope
+  singles 404; duplicate/overlap checks see visible rows only; NEC preview
+  sliced, apply refused 403 (partial apply would corrupt payroll).
+- Members rules filter in Python (handfuls of rows); empty IN sets spell
+  match-nothing for PostgREST. Q7: rotation visibility is ANY-member.
+- Frontend: scope-aware headers + empties on 9 pages, PPE section pin,
+  NEC apply replaced by a whole-mine notice. Pickers ride the scoped
+  shared hook; no form changes needed.
+- Suite: test_projects_scope.py 4 red (nearmiss, equipment, findings,
+  guard); scope files 120 green; pyright 194/196.
+
+## Batch 3 — done (branch projects-scope-3, both repos)
+
+- Direct-section tables enforced (9 routers): near miss, work stoppage,
+  SHEQ inspections + findings (nested + standalone), PTO, requisitions,
+  plus the PLAN-unnamed direct-section orphans — handovers, job cards
+  (CrudRouter `scope_table=` + hand-rolled single/patch asserts),
+  lubrication, safety complaints. Findings/actions/items inherit their
+  parent; requisition numbers/line numbers/daily totals see the slice.
+- Section validation patterns widened to Projects (near miss, stoppage,
+  PTO); no DB CHECK constrains these columns. Stats slice in Python and
+  gain the scope key (unscoped shapes byte-identical).
+- Registry corrections: lube_schedules is direct-section (it carries its
+  own column; the Batch 1 inherits entry would have hidden every row
+  until Batch 4); lube_records added as inherits-via-schedule (also added
+  to the Batch 0 inventory). Q2: complaints keep General/blank open —
+  lists filter in Python (open_values can't be one predicate) with
+  limit/offset on the slice.
+- `distinct_suggestions()` takes the user and scopes values (stoppage
+  departments/inspectors, PTO observers; pachedu/VFL call sites stay
+  unscoped until Batch 4). Patch rule is stay-or-scope: the section may
+  stay as it is or become the viewer's scope, never anything else (so a
+  General complaint stays editable).
+- Frontend: 'Projects' joins every section union/options list (incl. the
+  lowercase SHEQ list — stored values must match the scope exactly);
+  forms pin the section to a disabled field, filters hide + pin,
+  near-miss section tiles hide when scoped. SHEQ dashboard rides scoped
+  fetches (VFL/Pachedu panels complete in Batch 4).
+- Suite: test_projects_scope.py 2 red (equipment + guard, both Batch 4);
+  test_scope_batch3.py 63 green; pyright 192/196.

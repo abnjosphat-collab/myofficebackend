@@ -81,7 +81,12 @@ TABLES: dict[str, dict[str, Any]] = {
     "availabilities": {"rule": "inherits", "parent": "equipment", "via": "equipment_id"},
     "compliance": {"rule": "inherits", "parent": "equipment", "via": "equipment_id"},
     "condition_monitoring": {"rule": "inherits", "parent": "equipment", "via": "equipment_id"},
-    "lube_schedules": {"rule": "inherits", "parent": "equipment", "via": "equipment_id"},
+    # lube_schedules carries its own section column (the list filter and the
+    # create payload both use it), so it is direct-section: the Batch 1
+    # inherits entry would have hidden every row until Batch 4 wires
+    # equipment. lube_records (history) inherit their schedule instead.
+    "lube_schedules": {"rule": "section", "column": "section"},
+    "lube_records": {"rule": "inherits", "parent": "lube_schedules", "via": "schedule_id"},
     # -- documents subtree (Batch 5) ---------------------------------------
     "documents": {"rule": "subtree"},
     "document_folders": {"rule": "subtree"},

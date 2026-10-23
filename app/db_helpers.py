@@ -9,6 +9,8 @@ from typing import Any, Callable, List, Optional, TypeVar
 
 from fastapi import HTTPException
 
+from app.scope import apply_list_scope
+
 T = TypeVar("T")
 
 # PostgREST / Supabase default page size — unbounded .execute() silently truncates here.
@@ -104,14 +106,18 @@ def or_ilike(columns: List[str], term: str) -> str:
     return ",".join(f"{c}.ilike.%{term}%" for c in columns)
 
 
-async def distinct_suggestions(db, table: str, column: str, search: Optional[str], log_label: str) -> list:
+async def distinct_suggestions(db, table: str, column: str, search: Optional[str], log_label: str,
+                               user: Optional[dict] = None) -> list:
     """Sorted distinct non-empty values of one column, optionally filtered by
     a search term — the shape behind every page's "type to see past values"
-    suggestion endpoint (department, observer, inspector, ...). Swallows
+    suggestion endpoint (department, observer, inspector, ...). Pass the
+    signed-in user and the values come from their section only. Swallows
     errors to an empty list, matching every call site's original fallback
     behavior (a broken suggestions endpoint shouldn't break the form)."""
     try:
         query = db.table(table).select(column).neq(column, "").not_.is_(column, "null").order(column)
+        if user is not None:
+            query = apply_list_scope(query, user, table, db)
         if search:
             query = query.ilike(column, f"%{search}%")
         response = query.execute()
