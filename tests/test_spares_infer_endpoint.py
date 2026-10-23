@@ -19,9 +19,14 @@ class _FakeUploadFile:
     def __init__(self, filename: str, content: bytes):
         self.filename = filename
         self._content = content
+        self._offset = 0
 
-    async def read(self) -> bytes:
-        return self._content
+    async def read(self, size=-1) -> bytes:
+        if size is None or size < 0:
+            size = len(self._content) - self._offset
+        chunk = self._content[self._offset:self._offset + size]
+        self._offset += len(chunk)
+        return chunk
 
 
 def _xlsx_bytes(rows: list, bold_rows: set = frozenset()) -> bytes:
@@ -189,7 +194,7 @@ async def test_infer_rejects_unsupported_extension():
 async def test_infer_generic_failure_is_500_not_swallowed():
     class _BrokenUploadFile:
         filename = "parts.csv"
-        async def read(self):
+        async def read(self, size=-1):
             raise OSError("stream reset by peer")
 
     with pytest.raises(HTTPException) as exc:

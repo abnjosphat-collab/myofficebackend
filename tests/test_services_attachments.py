@@ -125,9 +125,14 @@ class _FakeUploadFile:
         self.filename = filename
         self.content_type = content_type
         self._content = content
+        self._offset = 0
 
-    async def read(self):
-        return self._content
+    async def read(self, size=-1):
+        if size is None or size < 0:
+            size = len(self._content) - self._offset
+        chunk = self._content[self._offset:self._offset + size]
+        self._offset += len(chunk)
+        return chunk
 
 
 # ─── list_attachments ────────────────────────────────────────────────────────────────
@@ -225,6 +230,15 @@ async def test_upload_attachment_filename_without_extension_defaults_to_bin(patc
         # filename with no extension is rejected there — confirms the allowlist check
         # runs before the "default to .bin" fallback further down ever gets reached.
         await upload_attachment("s1", file, current_user=CURRENT_USER)
+
+
+async def test_upload_attachment_derives_content_type_from_extension(patch_supabase):
+    # The browser's content-type header is the uploader's claim, not a fact —
+    # the stored type comes from the extension, like documents.py.
+    fake = patch_supabase({"insert_return": [{"id": "a1"}]}, bucket_cfg={})
+    file = _FakeUploadFile("invoice.pdf", b"pdf-bytes", content_type="text/html")
+    await upload_attachment("s1", file, current_user=CURRENT_USER)
+    assert fake.storage.bucket_cfg["uploaded"][0]["opts"] == {"content-type": "application/pdf"}
 
 
 # ─── delete_attachment ───────────────────────────────────────────────────────────────

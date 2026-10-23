@@ -31,7 +31,7 @@ from app.auth import get_current_user
 from app.aggregation import count_by
 from app.db_helpers import fetch_all_pages, get_or_404
 from app.crud_router import CrudRouter
-from app.uploads import read_and_validate_upload, NOTICE_ATTACHMENT_EXTS
+from app.uploads import read_and_validate_upload, storage_content_type, NOTICE_ATTACHMENT_EXTS
 from app.errors import server_error
 import logging, uuid as uuid_module
 
@@ -130,7 +130,7 @@ async def upload_notice_attachment(file: UploadFile = File(...)):
         supabase.storage.from_(ATTACHMENT_BUCKET).upload(
             storage_path,
             content,
-            {"content-type": file.content_type or "application/octet-stream"},
+            {"content-type": storage_content_type(original_name)},
         )
     except Exception as e:
         raise server_error(e, "Storage upload")
