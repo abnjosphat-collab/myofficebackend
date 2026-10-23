@@ -13,6 +13,8 @@
 
 from fastapi import HTTPException, UploadFile
 
+from app.document_rules import content_type_for
+
 # Purpose-scoped allowlists — extend per-endpoint as needed rather than
 # accepting "anything", which is what several endpoints did before this.
 DOCUMENT_EXTS = {
@@ -40,6 +42,40 @@ def _ext(filename: str | None) -> str:
     return name.rsplit(".", 1)[-1] if "." in name else ""
 
 
+# Body reads happen in these pieces so an oversize upload is refused after at
+# most max_bytes + one chunk, instead of buffering the whole body first (a
+# single large request could otherwise exhaust a small instance).
+_READ_CHUNK_BYTES = 1024 * 1024
+
+
+async def read_capped(file: UploadFile, *, max_bytes: int, too_large_detail: str) -> bytes:
+    """Read an upload in chunks, refusing as soon as the cap is passed."""
+    chunks: list[bytes] = []
+    total = 0
+    while True:
+        piece = await file.read(_READ_CHUNK_BYTES)
+        if not piece:
+            break
+        chunks.append(piece)
+        total += len(piece)
+        if total > max_bytes:
+            raise HTTPException(status_code=400, detail=too_large_detail)
+    return b"".join(chunks)
+
+
+def storage_content_type(filename: str | None) -> str:
+    """
+    The content type to store with an upload: derived from the extension
+    (documents.py's rule), never the client's header. SVG is stored as
+    octet-stream — served as image/svg+xml from a public bucket it would run
+    an embedded script in a colleague's browser; this keeps it downloadable
+    but inert.
+    """
+    if _ext(filename) == "svg":
+        return "application/octet-stream"
+    return content_type_for(filename)
+
+
 async def read_and_validate_upload(
     file: UploadFile,
     *,
@@ -56,9 +92,5 @@ async def read_and_validate_upload(
     if ext not in allowed_exts:
         raise HTTPException(status_code=400, detail=f"Unsupported file type: .{ext or 'unknown'}")
 
-    content = await file.read()
-    if len(content) > max_bytes:
-        mb = max_bytes // (1024 * 1024)
-        raise HTTPException(status_code=400, detail=f"File too large — maximum {mb} MB")
-
-    return content
+    mb = max_bytes // (1024 * 1024)
+    return await read_capped(file, max_bytes=max_bytes, too_large_detail=f"File too large — maximum {mb} MB")

@@ -14,9 +14,14 @@ class _FakeUploadFile:
         self.filename = filename
         self.content_type = content_type
         self._content = content
+        self._offset = 0
 
-    async def read(self) -> bytes:
-        return self._content
+    async def read(self, size=-1) -> bytes:
+        if size is None or size < 0:
+            size = len(self._content) - self._offset
+        chunk = self._content[self._offset:self._offset + size]
+        self._offset += len(chunk)
+        return chunk
 
 
 class _FakeStorageBucket:
@@ -26,6 +31,7 @@ class _FakeStorageBucket:
     def upload(self, path, content, options):
         self.state["uploaded_path"] = path
         self.state["uploaded_bytes"] = content
+        self.state["uploaded_options"] = options
 
     def get_public_url(self, path):
         return f"https://fake.storage/{path}"
@@ -95,6 +101,23 @@ async def test_case_insensitive_extension_is_accepted(patch_supabase):
     file = _FakeUploadFile("photo.JPG", b"x")
     result = await upload_photo(file=file, folder="misc", current_user={"user_id": "u1"})
     assert result["path"].endswith(".jpg")  # normalized to lowercase
+
+
+async def test_stored_content_type_comes_from_the_extension(patch_supabase):
+    state = patch_supabase
+    file = _FakeUploadFile("photo.jpg", b"x", content_type="text/html")
+    await upload_photo(file=file, folder="misc", current_user={"user_id": "u1"})
+    assert state["uploaded_options"] == {"content-type": "image/jpeg"}
+
+
+async def test_svg_photo_is_stored_as_download(patch_supabase):
+    # image/svg+xml from a public bucket would run an embedded script in a
+    # colleague's browser; octet-stream forces a download instead.
+    state = patch_supabase
+    file = _FakeUploadFile("logo.svg", b"<svg/>", content_type="image/svg+xml")
+    result = await upload_photo(file=file, folder="misc", current_user={"user_id": "u1"})
+    assert result["path"].endswith(".svg")
+    assert state["uploaded_options"] == {"content-type": "application/octet-stream"}
 
 
 # ─── delete_photo ────────────────────────────────────────────────────────────────────

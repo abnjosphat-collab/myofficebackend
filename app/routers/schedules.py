@@ -7,6 +7,7 @@
 # client: a work order that only gets raised if somebody happens to open the
 # page is not a schedule.
 
+import hmac
 import os
 import re
 from datetime import date, datetime, timedelta
@@ -333,7 +334,11 @@ async def generate_due_work_orders(
     manager pressing the button. Safe to call repeatedly — see _generate_one.
     """
     secret = os.getenv('CRON_SECRET')
-    authorised = bool(secret and x_cron_secret and x_cron_secret == secret)
+    # Constant-time compare: == would let a timing probe learn the secret prefix.
+    # Missing or empty on either side is unauthorised, as before.
+    authorised = False
+    if secret and x_cron_secret:
+        authorised = hmac.compare_digest(x_cron_secret, secret)
     if not authorised:
         await require_role('manager')(authorization)
 

@@ -922,3 +922,64 @@ def test_signed_in_user_can_change_own_password():
     new = client.post("/api/tools-workspace/auth/login", json={"username": "viewer", "password": "newpass12"})
     assert new.status_code == 200
     assert new.json()["token"]
+
+# ─── F-03: sessions end on logout and on credential rotation ───────────────────
+
+def test_password_change_revokes_all_existing_sessions():
+    register("admin")
+    first = register("viewer")
+    second = client.post("/api/tools-workspace/auth/login", json={"username": "viewer", "password": "secret12"}).json()["token"]
+    changed = client.put("/api/tools-workspace/auth/password", headers={"Authorization": f"Bearer {first}"}, json={"current_password": "secret12", "new_password": "newpass12"})
+    assert changed.status_code == 200
+    # A leaked token must not survive the password change — not even the one
+    # that made it. The user signs in again with the new password.
+    for token in (first, second):
+        me = client.get("/api/tools-workspace/auth/me", headers={"Authorization": f"Bearer {token}"})
+        assert me.status_code == 401
+    fresh = client.post("/api/tools-workspace/auth/login", json={"username": "viewer", "password": "newpass12"})
+    assert fresh.status_code == 200
+
+
+def test_admin_reset_revokes_the_account_sessions():
+    admin = register("admin")
+    viewer = register("viewer")
+    target = _account_id(admin, "viewer")
+    reset = client.post(f"/api/tools-workspace/accounts/{target}/reset-password", headers={"Authorization": f"Bearer {admin}"}, json={"password": "newpass12"})
+    assert reset.status_code == 200
+    me = client.get("/api/tools-workspace/auth/me", headers={"Authorization": f"Bearer {viewer}"})
+    assert me.status_code == 401
+    # The admin's own session is untouched.
+    admin_me = client.get("/api/tools-workspace/auth/me", headers={"Authorization": f"Bearer {admin}"})
+    assert admin_me.status_code == 200
+
+
+def test_logout_ends_only_the_current_session():
+    register("admin")
+    first = register("viewer")
+    second = client.post("/api/tools-workspace/auth/login", json={"username": "viewer", "password": "secret12"}).json()["token"]
+    out = client.post("/api/tools-workspace/auth/logout", headers={"Authorization": f"Bearer {first}"})
+    assert out.status_code == 200
+    assert out.json() == {"ok": True}
+    assert client.get("/api/tools-workspace/auth/me", headers={"Authorization": f"Bearer {first}"}).status_code == 401
+    assert client.get("/api/tools-workspace/auth/me", headers={"Authorization": f"Bearer {second}"}).status_code == 200
+    # Logging out twice (or with an expired token) still answers ok.
+    again = client.post("/api/tools-workspace/auth/logout", headers={"Authorization": f"Bearer {first}"})
+    assert again.status_code == 200
+
+
+def test_demoted_token_loses_issuer_rights_on_its_next_call():
+    # Roles are re-read from the account on every request, so a demotion is
+    # already effective without ending the session: no stale privilege, and
+    # routine admin edits (department, approval roles) do not kick the user.
+    admin = register("admin")
+    viewer = register("engineering-issuer")
+    auth = {"Authorization": f"Bearer {viewer}"}
+    target = _account_id(admin, "engineering-issuer")
+    promoted = client.patch(f"/api/tools-workspace/accounts/{target}", headers={"Authorization": f"Bearer {admin}"}, json={"role": "issuer", "department": "Engineering"})
+    assert promoted.status_code == 200
+    assert client.get("/api/tools-workspace/auth/me", headers=auth).json()["role"] == "issuer"
+    demoted = client.patch(f"/api/tools-workspace/accounts/{target}", headers={"Authorization": f"Bearer {admin}"}, json={"role": "viewer", "department": "Engineering"})
+    assert demoted.status_code == 200
+    assert client.get("/api/tools-workspace/auth/me", headers=auth).json()["role"] == "viewer"
+    issue = client.post("/api/tools-workspace/tools/does-not-exist/issue", headers=auth, json={"employee_id": "x", "location": "y"})
+    assert issue.status_code == 403

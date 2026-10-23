@@ -26,9 +26,14 @@ MANAGER = {"user_id": "m1", "email": "m1@x.com", "role": "manager"}
 class _Upload:
     def __init__(self, filename, content=b"%PDF-1.4 certificate", content_type="application/pdf"):
         self.filename, self._content, self.content_type = filename, content, content_type
+        self._offset = 0
 
-    async def read(self):
-        return self._content
+    async def read(self, size=-1):
+        if size is None or size < 0:
+            size = len(self._content) - self._offset
+        chunk = self._content[self._offset:self._offset + size]
+        self._offset += len(chunk)
+        return chunk
 
 
 @pytest.fixture

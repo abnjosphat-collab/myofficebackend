@@ -3,6 +3,7 @@ from fastapi import APIRouter, HTTPException, UploadFile, File, Form, Query, Dep
 from app.supabase_client import supabase
 from app.auth import get_current_user, require_role
 from app.errors import server_error
+from app.uploads import read_capped, storage_content_type
 import uuid
 import logging
 
@@ -34,9 +35,7 @@ async def upload_photo(
     if ext not in ALLOWED_EXTS:
         raise HTTPException(400, f"Unsupported image format: .{ext}")
 
-    content = await file.read()
-    if len(content) > MAX_BYTES:
-        raise HTTPException(400, "Photo too large — maximum 20 MB")
+    content = await read_capped(file, max_bytes=MAX_BYTES, too_large_detail="Photo too large — maximum 20 MB")
 
     storage_path = f"{folder}/{uuid.uuid4()}.{ext}"
 
@@ -44,7 +43,7 @@ async def upload_photo(
         supabase.storage.from_(BUCKET).upload(
             storage_path,
             content,
-            {"content-type": file.content_type or "image/jpeg"},
+            {"content-type": storage_content_type(original)},
         )
     except Exception as e:
         logger.error(f"upload_photo storage error: {e}")

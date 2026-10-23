@@ -55,9 +55,14 @@ class _FakeUploadFile:
         self.filename = filename
         self.content_type = content_type
         self._content = content
+        self._offset = 0
 
-    async def read(self):
-        return self._content
+    async def read(self, size=-1):
+        if size is None or size < 0:
+            size = len(self._content) - self._offset
+        chunk = self._content[self._offset:self._offset + size]
+        self._offset += len(chunk)
+        return chunk
 
 
 async def test_upload_attachment_happy_path(patch_supabase):
@@ -104,3 +109,22 @@ async def test_upload_attachment_public_url_failure_still_returns_empty_url(patc
     result = await upload_notice_attachment(file=_FakeUploadFile("memo.pdf", b"x"))
     assert result["url"] == ""
     assert result["name"] == "memo.pdf"
+
+
+async def test_upload_attachment_derives_content_type_from_extension(patch_supabase):
+    # The browser's content-type header is the uploader's claim, not a fact —
+    # the stored type comes from the extension, like documents.py.
+    state = patch_supabase()
+    await upload_notice_attachment(
+        file=_FakeUploadFile("memo.pdf", b"x", content_type="text/html"))
+    assert state["uploaded"][0][2] == {"content-type": "application/pdf"}
+
+
+async def test_upload_attachment_svg_is_stored_as_download(patch_supabase):
+    # Browsers send image/svg+xml for .svg; stored as-is on the public bucket
+    # it would run an embedded script. Octet-stream forces a download.
+    state = patch_supabase()
+    result = await upload_notice_attachment(
+        file=_FakeUploadFile("diagram.svg", b"<svg/>", content_type="image/svg+xml"))
+    assert result["name"] == "diagram.svg"
+    assert state["uploaded"][0][2] == {"content-type": "application/octet-stream"}

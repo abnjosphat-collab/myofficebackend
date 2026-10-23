@@ -5,7 +5,7 @@ from typing import Any, Optional, cast
 from datetime import datetime, date
 from app.supabase_client import supabase
 from app.auth import get_current_user, require_role
-from app.uploads import read_and_validate_upload, DOCUMENT_EXTS
+from app.uploads import read_and_validate_upload, storage_content_type, DOCUMENT_EXTS
 from app.db_helpers import fetch_all_pages
 from app.errors import server_error
 from starlette.concurrency import run_in_threadpool
@@ -355,7 +355,7 @@ async def upload_attachment(service_id: str, file: UploadFile = File(...), curre
         supabase.storage.from_(BUCKET).upload(
             storage_path,
             content,
-            {"content-type": file.content_type or "application/octet-stream"},
+            {"content-type": storage_content_type(original_name)},
         )
     except Exception as e:
         raise server_error(e, "Storage upload")

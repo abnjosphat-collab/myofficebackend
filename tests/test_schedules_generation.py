@@ -359,3 +359,39 @@ async def test_generate_creates_a_missing_compressor_weekly_routine(monkeypatch,
     assert payload["active"] is True
     today = date.today()
     assert payload["next_due_date"] == (today + timedelta(days=(7 - today.weekday()) % 7 or 7)).isoformat()
+
+
+# ─── F-11: cron secret must be compared in constant time ───────────────────────
+
+async def test_generate_equal_length_wrong_secret_does_not_take_cron_path(monkeypatch, patch_supabase):
+    # "xxxxxx" is the same length as "s3cr3t": it must still fall through to
+    # manager auth, and with no valid session that is a 403, never a run.
+    monkeypatch.setenv("CRON_SECRET", "s3cr3t")
+
+    async def _check(authorization):
+        raise HTTPException(status_code=403, detail="Manager role required")
+
+    monkeypatch.setattr(sched_mod, "require_role", lambda role: _check)
+    patch_supabase({})
+    with pytest.raises(HTTPException) as exc:
+        await generate_due_work_orders(x_cron_secret="xxxxxx", authorization="Bearer [REDACTED]")
+    assert exc.value.status_code == 403
+
+
+async def test_generate_cron_secret_uses_constant_time_compare(monkeypatch, patch_supabase):
+    # Pins the mechanism, not just the outcome: the cron path must consult
+    # hmac.compare_digest, so a timing probe cannot learn the secret prefix.
+    monkeypatch.setenv("CRON_SECRET", "s3cr3t")
+    calls = {}
+
+    class _Hmac:
+        @staticmethod
+        def compare_digest(a, b):
+            calls["args"] = (a, b)
+            return a == b
+
+    monkeypatch.setattr(sched_mod, "hmac", _Hmac, raising=False)
+    patch_supabase({"maintenance_schedules": {"select_return": []}})
+    result = await generate_due_work_orders(x_cron_secret="s3cr3t", authorization=None)
+    assert result == {"generated": 0, "created": [], "failed": []}
+    assert calls.get("args") == ("s3cr3t", "s3cr3t")

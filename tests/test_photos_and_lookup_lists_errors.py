@@ -21,9 +21,14 @@ class _FakeUploadFile:
         self.filename = filename
         self.content_type = "image/jpeg"
         self._content = content
+        self._offset = 0
 
-    async def read(self) -> bytes:
-        return self._content
+    async def read(self, size=-1) -> bytes:
+        if size is None or size < 0:
+            size = len(self._content) - self._offset
+        chunk = self._content[self._offset:self._offset + size]
+        self._offset += len(chunk)
+        return chunk
 
 
 class _FailingBucket:

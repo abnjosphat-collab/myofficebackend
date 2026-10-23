@@ -92,6 +92,11 @@ def _upsert(kind: str, row: dict[str,Any], conflict: str):
     data=rows(supabase.table(TABLE[kind]).upsert(row,on_conflict=conflict).execute())
     if not data: raise HTTPException(500,"The record could not be saved.")
     return data[0]
+def _delete_where(kind: str, field: str, value: Any):
+    if _test_mode:
+        _memory[kind][:] = [row for row in _memory[kind] if row.get(field) != value]
+        return
+    supabase.table(TABLE[kind]).delete().eq(field, value).execute()
 def _account_role(account:dict[str,Any]):
     return account.get("role") or ("admin" if account.get("can_issue") else "viewer")
 def _public(account):
@@ -357,6 +362,13 @@ def login(request:Request,body:Login):
     return {"token":_new_session(account["id"]),"account":_public(account)}
 @router.get("/auth/me")
 def me(account=Depends(_session)): return _public(account)
+@router.post("/auth/logout")
+def logout(authorization: Optional[str]=Header(default=None)):
+    # Ends only the session presenting this token; an already-ended token still
+    # answers ok so "sign out" never strands the user on an error screen.
+    if authorization and authorization.startswith("Bearer "):
+        _delete_where("sessions", "token_hash", _token_hash(authorization[7:].strip()))
+    return {"ok":True}
 @router.get("/accounts")
 def list_accounts(_=Depends(_admin)): return [_public(account) for account in _all("accounts")]
 @router.patch("/accounts/{account_id}")
@@ -374,6 +386,7 @@ def reset_account_password(account_id:str,body:AccountPasswordReset,_=Depends(_a
     if not account: raise HTTPException(404,"Account was not found.")
     salt,digest=_hash_password(body.password)
     _update("accounts",account_id,{"salt":salt,"password_hash":digest})
+    _delete_where("sessions","account_id",account_id)
     for row in _all("password_requests"):
         if row.get("source")=="tools" and (row.get("identifier") or "").lower()==(account.get("username") or "").lower() and row.get("status")=="pending":
             _update("password_requests",row["id"],{"status":"done","resolved_at":_now()})
@@ -393,6 +406,7 @@ def change_own_password(body:PasswordChange,account=Depends(_session)):
     if not hmac.compare_digest(candidate,account["password_hash"]): raise HTTPException(401,"The current password is incorrect.")
     salt,digest=_hash_password(body.new_password)
     _update("accounts",account["id"],{"salt":salt,"password_hash":digest})
+    _delete_where("sessions","account_id",account["id"])  # a leaked token must not survive the change
     return {"ok":True}
 
 @router.put("/auth/signing-pin")
