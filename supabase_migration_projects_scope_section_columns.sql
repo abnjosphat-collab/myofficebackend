@@ -34,15 +34,16 @@ DO $$
 DECLARE
   missing TEXT[];
 BEGIN
-  SELECT array_agg(t) INTO missing FROM (
-    SELECT unnest(ARRAY[
-      'equipment', 'work_orders', 'breakdowns', 'notices', 'sop_documents',
-      'services', 'daily_reports', 'maintenance_schedules'
-    ]) AS t
-    WHERE NOT EXISTS (
-      SELECT 1 FROM information_schema.tables
-      WHERE table_schema = 'public' AND table_name = t
-    )
+  SELECT array_agg(s.t) INTO missing FROM (
+    SELECT u.t
+      FROM unnest(ARRAY[
+        'equipment', 'work_orders', 'breakdowns', 'notices', 'sop_documents',
+        'services', 'daily_reports', 'maintenance_schedules'
+      ]) AS u(t)
+     WHERE NOT EXISTS (
+        SELECT 1 FROM information_schema.tables
+        WHERE table_schema = 'public' AND table_name = u.t
+      )
   ) s;
   IF missing IS NOT NULL THEN
     RAISE EXCEPTION 'missing tables, refusing to continue: %', array_to_string(missing, ', ');
@@ -73,16 +74,17 @@ DO $$
 DECLARE
   missing TEXT[];
 BEGIN
-  SELECT array_agg(t) INTO missing FROM (
-    SELECT unnest(ARRAY[
-      'equipment', 'work_orders', 'breakdowns', 'notices', 'sop_documents',
-      'services', 'daily_reports', 'maintenance_schedules'
-    ]) AS t
-    WHERE NOT EXISTS (
-      SELECT 1 FROM information_schema.columns
-      WHERE table_schema = 'public' AND table_name = t
-        AND column_name = 'section'
-    )
+  SELECT array_agg(s.t) INTO missing FROM (
+    SELECT u.t
+      FROM unnest(ARRAY[
+        'equipment', 'work_orders', 'breakdowns', 'notices', 'sop_documents',
+        'services', 'daily_reports', 'maintenance_schedules'
+      ]) AS u(t)
+     WHERE NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_schema = 'public' AND table_name = u.t
+          AND column_name = 'section'
+      )
   ) s;
   IF missing IS NOT NULL THEN
     RAISE EXCEPTION 'section column missing after ALTER, refusing to commit: %', array_to_string(missing, ', ');
