@@ -1,8 +1,8 @@
 """Tools workspace API using dedicated tables in the existing MyOffice Supabase."""
 from __future__ import annotations
 
-import csv, hashlib, hmac, io, re, secrets, uuid, zipfile
-from datetime import datetime, timedelta, timezone
+import csv, hashlib, hmac, io, logging, re, secrets, uuid, zipfile
+from datetime import date, datetime, timedelta, timezone
 from typing import Any, Literal, Optional
 from xml.etree import ElementTree
 
@@ -12,16 +12,18 @@ from openpyxl import load_workbook
 from pydantic import BaseModel, Field, field_validator
 from app.supabase_client import rows, supabase
 from app.db_helpers import fetch_all_pages
+from app.zim_holidays import zim_holiday_name
 from app.rate_limit import limiter
 import time as _time
 
 router = APIRouter()
-TABLE = {"accounts":"tools_workspace_accounts","sessions":"tools_workspace_sessions","employees":"tools_workspace_employees","tools":"tools_workspace_equipment","history":"tools_workspace_history","changes":"tools_workspace_changes","evidence":"tools_workspace_evidence","source_registers":"tools_workspace_source_registers","usage":"tools_workspace_usage","errors":"tools_workspace_errors","feedback":"tools_workspace_feedback","notification_reads":"tools_workspace_notification_reads","competencies":"tools_workspace_competencies","inspections":"tools_workspace_inspections","incidents":"tools_workspace_incidents","gate_passes":"tools_workspace_gate_passes","gate_pass_items":"tools_workspace_gate_pass_items","gate_pass_approvals":"tools_workspace_gate_pass_approvals","password_requests":"password_reset_requests"}
+TABLE = {"accounts":"tools_workspace_accounts","sessions":"tools_workspace_sessions","employees":"tools_workspace_employees","tools":"tools_workspace_equipment","history":"tools_workspace_history","changes":"tools_workspace_changes","evidence":"tools_workspace_evidence","source_registers":"tools_workspace_source_registers","usage":"tools_workspace_usage","errors":"tools_workspace_errors","feedback":"tools_workspace_feedback","notification_reads":"tools_workspace_notification_reads","competencies":"tools_workspace_competencies","inspections":"tools_workspace_inspections","incidents":"tools_workspace_incidents","gate_passes":"tools_workspace_gate_passes","gate_pass_items":"tools_workspace_gate_pass_items","gate_pass_approvals":"tools_workspace_gate_pass_approvals","password_requests":"password_reset_requests","plan":"tools_workspace_inspection_plan"}
 FEEDBACK_BUCKET = "tools-workspace-feedback"
 EVIDENCE_BUCKET = "tools-workspace-evidence"
 SOURCE_REGISTERS_BUCKET = "tools-workspace-source-registers"
 _test_mode = False
 _memory: dict[str,list[dict[str,Any]]] = {key:[] for key in TABLE}
+logger=logging.getLogger(__name__)
 # Failed Tools-login attempts per lowercased username (monotonic timestamps).
 # In-process only: a restart clears it, and with several workers each counts
 # its own — 5 failures/15min per worker, not globally. Deliberately separate
@@ -139,7 +141,7 @@ def _tool_state(tool: dict[str,Any], actor: str) -> dict[str,Any]:
     state.setdefault("id",str(uuid.uuid4())); state.setdefault("status","available"); state.setdefault("condition","Good")
     state.setdefault("equipment_kind","other-equipment"); state.setdefault("department","Engineering"); state.setdefault("archived",False)
     state.setdefault("site_code","PP"); state.setdefault("area_code","UG"); state.setdefault("pre_use_check_required",True); state.setdefault("competency_required",True)
-    state.setdefault("weekly_inspection_required",False); state.setdefault("monthly_inspection_required",True); state.setdefault("quarterly_inspection_required",True)
+    state.setdefault("weekly_inspection_required",False); state.setdefault("monthly_inspection_required",False); state.setdefault("quarterly_inspection_required",True)
     state.setdefault("calibration_required",False); state.setdefault("criticality","standard"); state.setdefault("cctv_required",False); state.setdefault("gps_required",False); state.setdefault("required_ppe",[]); state.setdefault("ownership_type","company")
     state.setdefault("custody",None); state.setdefault("row_version",1); state.setdefault("created_by",actor); state.setdefault("created_at",_now()); state.setdefault("updated_at",_now())
     return state
@@ -189,7 +191,7 @@ class EmployeeInput(BaseModel):
         if value is None: return None
         text=str(value).strip(); return text or None
 class ToolInput(BaseModel):
-    register_number:Optional[str]=Field(default=None,max_length=80); name:str=Field(min_length=2,max_length=160); make_model:Optional[str]=Field(default=None,max_length=200); serial_number:Optional[str]=Field(default=None,max_length=120); category:Optional[str]=Field(default=None,max_length=100); equipment_kind:str=Field(default="other-equipment",max_length=80); storage_location:str=Field(min_length=1,max_length=240); department:str=Field(default="Engineering",max_length=100); section:Optional[str]=Field(default=None,max_length=100); condition:str=Field(default="Good",max_length=60); notes:Optional[str]=Field(default=None,max_length=2000); approval_ref:Optional[str]=Field(default=None,max_length=160); calibration:Optional[str]=Field(default=None,max_length=160); specifications:dict[str,str]=Field(default_factory=dict); site_code:str=Field(default="PP",min_length=2,max_length=8,pattern=r"^[A-Za-z0-9]+$"); area_code:str=Field(default="UG",min_length=1,max_length=8,pattern=r"^[A-Za-z0-9]+$"); department_code:Optional[str]=Field(default=None,max_length=8,pattern=r"^[A-Za-z0-9]+$"); activity_code:Optional[str]=Field(default=None,max_length=8,pattern=r"^[A-Za-z0-9]+$"); home_storage_location:Optional[str]=Field(default=None,max_length=240); storage_conditions:Optional[str]=Field(default=None,max_length=1000); maintenance_requirements:Optional[str]=Field(default=None,max_length=2000); pre_use_check_required:bool=True; competency_required:bool=True; weekly_inspection_required:bool=False; monthly_inspection_required:bool=True; quarterly_inspection_required:bool=True; calibration_required:bool=False; calibration_frequency_days:Optional[int]=Field(default=None,ge=1,le=3650); replacement_value:Optional[float]=Field(default=None,ge=0); criticality:Literal["standard","high","safety_critical"]="standard"; cctv_required:bool=False; gps_required:bool=False; required_ppe:list[str]=Field(default_factory=list,max_length=20); ownership_type:Literal["company","contractor"]="company"; contractor_name:Optional[str]=Field(default=None,max_length=200); oem_manual_ref:Optional[str]=Field(default=None,max_length=240); purchase_date:Optional[str]=Field(default=None,pattern=r"^\d{4}-\d{2}-\d{2}$"); procurement_cost:Optional[float]=Field(default=None,ge=0); insured:Optional[bool]=None; last_verified:Optional[str]=Field(default=None,max_length=40); working_status:Optional[Literal["working","not_working"]]=None; trade_sections:Optional[list[str]]=Field(default=None,max_length=10)
+    register_number:Optional[str]=Field(default=None,max_length=80); name:str=Field(min_length=2,max_length=160); make_model:Optional[str]=Field(default=None,max_length=200); serial_number:Optional[str]=Field(default=None,max_length=120); category:Optional[str]=Field(default=None,max_length=100); equipment_kind:str=Field(default="other-equipment",max_length=80); storage_location:str=Field(min_length=1,max_length=240); department:str=Field(default="Engineering",max_length=100); section:Optional[str]=Field(default=None,max_length=100); condition:str=Field(default="Good",max_length=60); notes:Optional[str]=Field(default=None,max_length=2000); approval_ref:Optional[str]=Field(default=None,max_length=160); calibration:Optional[str]=Field(default=None,max_length=160); specifications:dict[str,str]=Field(default_factory=dict); site_code:str=Field(default="PP",min_length=2,max_length=8,pattern=r"^[A-Za-z0-9]+$"); area_code:str=Field(default="UG",min_length=1,max_length=8,pattern=r"^[A-Za-z0-9]+$"); department_code:Optional[str]=Field(default=None,max_length=8,pattern=r"^[A-Za-z0-9]+$"); activity_code:Optional[str]=Field(default=None,max_length=8,pattern=r"^[A-Za-z0-9]+$"); home_storage_location:Optional[str]=Field(default=None,max_length=240); storage_conditions:Optional[str]=Field(default=None,max_length=1000); maintenance_requirements:Optional[str]=Field(default=None,max_length=2000); pre_use_check_required:bool=True; competency_required:bool=True; weekly_inspection_required:bool=False; monthly_inspection_required:bool=False; quarterly_inspection_required:bool=True; calibration_required:bool=False; calibration_frequency_days:Optional[int]=Field(default=None,ge=1,le=3650); replacement_value:Optional[float]=Field(default=None,ge=0); criticality:Literal["standard","high","safety_critical"]="standard"; cctv_required:bool=False; gps_required:bool=False; required_ppe:list[str]=Field(default_factory=list,max_length=20); ownership_type:Literal["company","contractor"]="company"; contractor_name:Optional[str]=Field(default=None,max_length=200); oem_manual_ref:Optional[str]=Field(default=None,max_length=240); purchase_date:Optional[str]=Field(default=None,pattern=r"^\d{4}-\d{2}-\d{2}$"); procurement_cost:Optional[float]=Field(default=None,ge=0); insured:Optional[bool]=None; last_verified:Optional[str]=Field(default=None,max_length=40); working_status:Optional[Literal["working","not_working"]]=None; trade_sections:Optional[list[str]]=Field(default=None,max_length=10)
 class ToolUpdate(BaseModel):
     register_number:Optional[str]=Field(default=None,min_length=1,max_length=80); name:Optional[str]=Field(default=None,min_length=2,max_length=160); make_model:Optional[str]=Field(default=None,max_length=200); serial_number:Optional[str]=Field(default=None,max_length=120); category:Optional[str]=Field(default=None,max_length=100); equipment_kind:Optional[str]=Field(default=None,max_length=80); storage_location:Optional[str]=Field(default=None,min_length=1,max_length=240); department:Optional[str]=Field(default=None,max_length=100); section:Optional[str]=Field(default=None,max_length=100); condition:Optional[str]=Field(default=None,max_length=60); notes:Optional[str]=Field(default=None,max_length=2000); approval_ref:Optional[str]=Field(default=None,max_length=160); calibration:Optional[str]=Field(default=None,max_length=160); specifications:Optional[dict[str,str]]=None; home_storage_location:Optional[str]=Field(default=None,max_length=240); storage_conditions:Optional[str]=Field(default=None,max_length=1000); maintenance_requirements:Optional[str]=Field(default=None,max_length=2000); pre_use_check_required:Optional[bool]=None; competency_required:Optional[bool]=None; weekly_inspection_required:Optional[bool]=None; monthly_inspection_required:Optional[bool]=None; quarterly_inspection_required:Optional[bool]=None; calibration_required:Optional[bool]=None; calibration_frequency_days:Optional[int]=Field(default=None,ge=1,le=3650); replacement_value:Optional[float]=Field(default=None,ge=0); criticality:Optional[Literal["standard","high","safety_critical"]]=None; cctv_required:Optional[bool]=None; gps_required:Optional[bool]=None; required_ppe:Optional[list[str]]=Field(default=None,max_length=20); ownership_type:Optional[Literal["company","contractor"]]=None; contractor_name:Optional[str]=Field(default=None,max_length=200); oem_manual_ref:Optional[str]=Field(default=None,max_length=240); purchase_date:Optional[str]=Field(default=None,pattern=r"^\d{4}-\d{2}-\d{2}$"); procurement_cost:Optional[float]=Field(default=None,ge=0); insured:Optional[bool]=None; last_verified:Optional[str]=Field(default=None,max_length=40); working_status:Optional[Literal["working","not_working"]]=None; trade_sections:Optional[list[str]]=Field(default=None,max_length=10)
 class IssueInput(BaseModel):
@@ -325,10 +327,14 @@ def _latest_inspections(tool_id:str,inspections:Optional[list[dict[str,Any]]]=No
     return latest
 
 def _inspection_due(tool:dict[str,Any],inspections:Optional[list[dict[str,Any]]]=None):
-    latest=_latest_inspections(tool["id"],inspections); now=datetime.now(timezone.utc); due=[]
+    rows=inspections if inspections is not None else _all("inspections")
+    latest=_latest_inspections(tool["id"],rows); now=datetime.now(timezone.utc); due=[]
     requirements=(("weekly",tool.get("weekly_inspection_required")),("monthly",tool.get("monthly_inspection_required")),("quarterly",tool.get("quarterly_inspection_required")),("calibration",tool.get("calibration_required")))
     for inspection_type,required in requirements:
         if not required: continue
+        if inspection_type=="quarterly":
+            if _quarterly_due(tool,rows): due.append(inspection_type)
+            continue
         record=latest.get(inspection_type); deadline=_parse_datetime(record.get("next_due_at")) if record else None
         if not record or record.get("outcome")!="passed" or not deadline or deadline<now: due.append(inspection_type)
     return due
@@ -339,9 +345,94 @@ def _inspection_colour(inspection_type:str,outcome:str,inspected_at:datetime):
     return "Amber" if outcome=="conditional" else "Green"
 
 def _default_next_due(inspection_type:str,inspected_at:datetime,tool:dict[str,Any]):
+    if inspection_type=="quarterly":
+        planned=_next_quarter_planned_date(tool,inspected_at)
+        if planned: return f"{planned}T00:00:00+00:00"
     days={"pre_use":1,"weekly":7,"monthly":30,"quarterly":90,"calibration":tool.get("calibration_frequency_days") or 365,"maintenance":90,"storage_audit":90,"repair":0}[inspection_type]
     return (inspected_at+timedelta(days=days)).isoformat() if days else None
 
+def _quarter_of(value): return (value.year,(value.month-1)//3+1)
+def _quarter_key(year,quarter): return f"{year}-Q{quarter}"
+def _next_quarter(year,quarter): return (year+1,1) if quarter==4 else (year,quarter+1)
+def _quarter_window(year,quarter):
+    """The first 10 working days (Monday to Friday, excluding Zimbabwe public holidays) of the quarter, as ISO dates."""
+    days=[]; current=date(year,(quarter-1)*3+1,1)
+    while len(days)<10:
+        if current.weekday()<5 and zim_holiday_name(current.isoformat()) is None: days.append(current.isoformat())
+        current+=timedelta(days=1)
+    return days
+def _plan_row(tool_id,quarter,planned_date):
+    return {"id":str(uuid.uuid4()),"tool_id":tool_id,"quarter":quarter,"planned_date":planned_date,"completed_inspection_id":None,"created_at":_now()}
+def _next_free_plan_day(rows,window,today):
+    counts={day:0 for day in window}
+    for row in rows:
+        if row.get("planned_date") in counts: counts[row["planned_date"]]+=1
+    open_days=[day for day in window if day>=today.isoformat()]
+    return min(open_days,key=lambda day:(counts[day],day)) if open_days else None
+def _ensure_quarter_plan_rows(year,quarter,today):
+    key=_quarter_key(year,quarter)
+    existing=[row for row in _all("plan") if row.get("quarter")==key]
+    planned={row.get("tool_id") for row in existing}
+    missing=[tool for tool in _all("tools") if not tool.get("archived") and tool.get("quarterly_inspection_required") and tool["id"] not in planned]
+    if not missing: return existing
+    window=_quarter_window(year,quarter)
+    if existing:
+        rows=list(existing)
+        for tool in sorted(missing,key=lambda item:item.get("register_number") or ""):
+            day=_next_free_plan_day(rows,window,today)
+            if day is None:
+                following=_quarter_key(*_next_quarter(year,quarter))
+                _insert("plan",_plan_row(tool["id"],following,_quarter_window(*_next_quarter(year,quarter))[0]))
+            else: rows.append(_insert("plan",_plan_row(tool["id"],key,day)))
+        return rows
+    groups:dict[str,list[dict[str,Any]]]={}
+    for tool in missing: groups.setdefault(tool.get("storage_location") or "Unspecified",[]).append(tool)
+    loads={day:0 for day in window}; rows=[]
+    for location in sorted(groups,key=lambda name:(-len(groups[name]),name)):
+        day=min(window,key=lambda item:(loads[item],item))
+        for tool in sorted(groups[location],key=lambda item:item.get("register_number") or ""):
+            rows.append(_insert("plan",_plan_row(tool["id"],key,day))); loads[day]+=1
+    return rows
+def _ensure_quarter_plan(year,quarter,today=None):
+    """The quarter's inspection plan, generated on first read and backfilled as tools arrive; existing rows never move.
+    Empty (with quarterly falling back to next-due dates) while the plan table is not migrated yet."""
+    try:
+        return _ensure_quarter_plan_rows(year,quarter,today or date.today())
+    except Exception:
+        if _test_mode: raise
+        logger.warning("tools inspection plan unavailable; quarterly checks fall back to next-due dates")
+        return []
+def _quarterly_passed(tool_id,year,quarter,inspections):
+    for row in inspections:
+        if row.get("tool_id")!=tool_id or row.get("inspection_type")!="quarterly" or row.get("outcome")!="passed" or not row.get("inspected_at"): continue
+        try: moment=_parse_datetime(row.get("inspected_at"))
+        except HTTPException: continue
+        if moment and _quarter_of(moment.date())==(year,quarter): return True
+    return False
+def _quarterly_due(tool,inspections,today=None):
+    """Quarterly is due on its planned date and stays due (overdue past the window) until a pass is recorded that quarter."""
+    now=today or date.today(); year,quarter=_quarter_of(now)
+    if _quarterly_passed(tool["id"],year,quarter,inspections): return False
+    planned=next((row.get("planned_date") for row in _ensure_quarter_plan(year,quarter,now) if row.get("tool_id")==tool.get("id")),None)
+    if planned is None:
+        record=_latest_inspections(tool["id"],inspections).get("quarterly")
+        deadline=_parse_datetime(record.get("next_due_at")) if record else None
+        return not record or record.get("outcome")!="passed" or not deadline or deadline.date()<=now
+    return planned<=now.isoformat()
+def _next_quarter_planned_date(tool,inspected_at):
+    try:
+        rows=_ensure_quarter_plan(*_next_quarter(*_quarter_of(inspected_at.date())))
+        return next((row.get("planned_date") for row in rows if row.get("tool_id")==tool.get("id")),None)
+    except Exception:
+        if _test_mode: raise
+        return None
+def _complete_plan_row(tool_id,inspected_at,inspection_id):
+    try:
+        key=_quarter_key(*_quarter_of(inspected_at.date()))
+        row=next((item for item in _all("plan") if item.get("tool_id")==tool_id and item.get("quarter")==key and not item.get("completed_inspection_id")),None)
+        if row: _update("plan",row["id"],{"completed_inspection_id":inspection_id})
+    except Exception:
+        if _test_mode: raise
 def _verify_signing_credential(account:dict[str,Any],credential:str):
     _,password_candidate=_hash_password(credential,bytes.fromhex(account["salt"]))
     if hmac.compare_digest(password_candidate,account["password_hash"]): return "password"
@@ -621,7 +712,9 @@ def compliance(account=Depends(_session)):
     inspections=[row for row in _all("inspections",True) if department is None or row.get("tool_id") in tool_ids]
     incidents=[row for row in _all("incidents",True) if department is None or row.get("tool_id") in tool_ids]
     gate_passes=[_gate_pass_view(item) for item in _all("gate_passes",True) if department is None or item.get("department")==department]
-    return {"competencies":competencies,"inspections":inspections,"incidents":incidents,"gate_passes":gate_passes}
+    year,quarter=_quarter_of(date.today())
+    plan=[row for row in _ensure_quarter_plan(year,quarter) if department is None or row.get("tool_id") in tool_ids]
+    return {"competencies":competencies,"inspections":inspections,"incidents":incidents,"gate_passes":gate_passes,"inspection_plan":plan}
 
 @router.post("/competencies",status_code=201)
 def save_competency(body:CompetencyInput,account=Depends(_operator)):
@@ -656,6 +749,7 @@ def record_inspection(tool_id:str,body:InspectionInput,account=Depends(_operator
     if body.inspection_type=="pre_use" and custody.get("pre_use_pending"):
         after={**tool,"custody":{**custody,"pre_use_pending":False}}
         _apply_change(tool,after,"pre_use_recorded",account["name"],f"Pre-use check recorded ({body.outcome})")
+    if body.inspection_type=="quarterly" and body.outcome=="passed": _complete_plan_row(tool_id,inspected,row["id"])
     return row
 
 @router.post("/tools/{tool_id}/incidents",status_code=201)

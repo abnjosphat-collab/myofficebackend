@@ -167,9 +167,9 @@ def _eligible_tool_with_checks_due():
     auth = {"Authorization": f"Bearer {issuer}"}
     admin_auth = {"Authorization": f"Bearer {admin}"}
     employee = client.post("/api/tools-workspace/employees", headers=admin_auth, json={"employee_number": "E-7", "name": "Alex", "department": "Engineering"}).json()
-    tool = client.post("/api/tools-workspace/tools", headers=admin_auth, json={"register_number": "T-7", "name": "Angle grinder", "storage_location": "Workshop"}).json()
+    tool = client.post("/api/tools-workspace/tools", headers=admin_auth, json={"register_number": "T-7", "name": "Angle grinder", "storage_location": "Workshop", "monthly_inspection_required": True}).json()
     competency = client.post("/api/tools-workspace/competencies", headers=admin_auth, json={"employee_id": employee["id"], "tool_id": tool["id"], "trained": True, "qualified": True, "authorized": True})
-    assert competency.status_code == 201  # no inspection recorded, so the monthly and quarterly checks are due
+    assert competency.status_code == 201  # monthly explicitly required and nothing recorded, so checks are due
     return auth, employee, tool
 
 
