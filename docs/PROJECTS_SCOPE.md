@@ -137,3 +137,36 @@ person/equipment/section link found (Q9).
   some?
 - Q10 documents seed-ams + reindex under a scoped account: refuse, or run
   Projects-only?
+
+## Batch 1 — done (branch projects-scope-1, both repos)
+
+Plumbing + obvious UI; no per-module filtering yet (Batches 2–5).
+
+- `app/scope.py`: TABLES registry (section/person/members/inherits/subtree)
+  + viewer_scope/scope_person_ids/apply_list_scope/row_visible/filter_rows/
+  assert_row_visible/stamp_create. Unknown table + scoped viewer fails closed.
+- `app/auth.py`: get_current_user fetches `permissions.scope` via sibling RPC
+  `get_user_scope_by_id`; RPC failure (incl. missing function pre-migration)
+  is a loud 503, never silent "unscoped". The 30s sign-in cache stores the
+  scope with the user; set/clear calls invalidate_user (next request bites).
+- `app/cache.py`: build_key() takes scope (unscoped keys byte-identical);
+  @cached folds scope from current_user automatically.
+- `PATCH /api/admin/users/{id}/scope`: set/clear, same self/super_admin
+  guard as other admin user actions, audited via the normal write path.
+- `supabase_migration_user_scope.sql` (file only, NOT run): creates the RPC.
+  Must be applied before the Batch 1 backend is deployed.
+- Frontend: `scope` on useAuth() (from profile.permissions, no new fetch);
+  quiet section Tag by the account menu; Admin Manage-user section-limit
+  field + Section column; personnel page is the pilot (pinned section,
+  hidden Section filter, "No {scope} people yet", fixed section on the form).
+  Browser cache hygiene: shared lookup caches (employees/equipment/spares)
+  are dropped + generation-guarded when the signed-in account changes, so a
+  cached slice can never serve another account; creates pin section=scope
+  in the payload (edits keep the row's section; the server has final say).
+- Decisions: per-module frontend adoption rides with its enforcement batch
+  (Batches 2–5), not all in Batch 1 — filter-hiding without enforcement
+  would mislead, and each batch stays verifiable end-to-end. "Projects" is
+  not in the frontend SECTION_ORDER list, so the admin scope field is
+  free-text with canonical suggestions, not a closed select.
+- Suite: test_projects_scope.py 9 red / 10 green (registry test went green
+  as designed; 8 behaviour + 1 guard red until enforcement lands).

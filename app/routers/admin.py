@@ -12,7 +12,7 @@ import json
 import os
 import urllib.request
 import urllib.error
-from typing import Any
+from typing import Any, Optional, cast
 from fastapi import APIRouter, HTTPException, Depends, Request
 from starlette.concurrency import run_in_threadpool
 from pydantic import BaseModel
@@ -50,6 +50,12 @@ class InviteUserRequest(BaseModel):
 
 class SetActiveRequest(BaseModel):
     active: bool
+
+
+class SetScopeRequest(BaseModel):
+    # The section this account is limited to — must match the section name on
+    # the data itself (e.g. "Projects"). Null/"" lifts the limit entirely.
+    scope: Optional[str] = None
 
 
 class PasswordResetAsk(BaseModel):
@@ -232,6 +238,51 @@ async def set_user_active(
     except Exception as e:
         logger.error(f"Error updating is_active for {user_id}: {e}")
         raise server_error(e, "Updating user")
+
+
+@router.patch("/users/{user_id}/scope")
+async def set_user_scope(
+    user_id: str,
+    body: SetScopeRequest,
+    current_user: dict = Depends(require_role("admin")),
+):
+    """Limit an account to one section (or lift the limit with null).
+
+    The limit lives in user_profiles.permissions.scope and is enforced by
+    the server on every scoped read; the account keeps full module access
+    with filtered data. Same self/super_admin guard as every other admin
+    action on a user, and the auth cache is dropped so the change bites on
+    the very next request."""
+    target = _load_target_for_self_admin_check(user_id)
+    _assert_may_act_on(current_user["role"], current_user["user_id"], target, "limit to a section")
+
+    scope = (body.scope or "").strip() or None
+    if scope is not None and len(scope) > 64:
+        raise HTTPException(status_code=400, detail="Section scope is too long (max 64 characters).")
+
+    try:
+        existing = supabase.table(TABLE).select("permissions").eq("id", user_id).execute()
+        first_row = cast(dict, existing.data[0]) if existing.data else {}
+        permissions = first_row.get("permissions") or {}
+        if not isinstance(permissions, dict):
+            permissions = {}
+        if scope is None:
+            permissions.pop("scope", None)
+        else:
+            permissions["scope"] = scope
+        result = supabase.table(TABLE).update({
+            "permissions": permissions,
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }).eq("id", user_id).execute()
+        if not result.data:
+            raise HTTPException(status_code=500, detail="No data returned after update")
+        invalidate_user(user_id)
+        return result.data[0]
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error updating scope for {user_id}: {e}")
+        raise server_error(e, "Updating section limit")
 
 
 @router.post("/users/{user_id}/reset-password")

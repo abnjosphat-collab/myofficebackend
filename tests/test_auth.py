@@ -48,15 +48,18 @@ class _FakeRpcResult:
 
 
 class _FakeSupabase:
-    def __init__(self, user, role):
+    def __init__(self, user, role, scope=None):
         self.auth = _FakeAuth(user)
         self._role = role
+        self._scope = scope
 
     def rpc(self, name, params):
         self._last_rpc = (name, params)
         return self
 
     def execute(self):
+        if self._last_rpc[0] == "get_user_scope_by_id":
+            return _FakeRpcResult(self._scope)
         return _FakeRpcResult(self._role)
 
 
@@ -72,8 +75,8 @@ class _FakeUser:
 @pytest.fixture
 def patch_supabase(monkeypatch):
     """Swap app.auth.supabase for a fake returning the given user + role."""
-    def _apply(user, role):
-        monkeypatch.setattr(auth, "supabase", _FakeSupabase(user, role))
+    def _apply(user, role, scope=None):
+        monkeypatch.setattr(auth, "supabase", _FakeSupabase(user, role, scope))
     return _apply
 
 
@@ -113,7 +116,7 @@ async def test_auth_service_outage_is_retryable_not_invalid_session(patch_supaba
 async def test_get_current_user_valid(patch_supabase):
     patch_supabase(user=_FakeUser("u-9", "x@y.com"), role="manager")
     result = await auth.get_current_user("Bearer good-token")
-    assert result == {"user_id": "u-9", "email": "x@y.com", "role": "manager", "name": "X"}
+    assert result == {"user_id": "u-9", "email": "x@y.com", "role": "manager", "name": "X", "scope": None}
 
 
 async def test_slow_auth_does_not_block_other_requests(patch_supabase):
@@ -176,7 +179,7 @@ async def test_get_current_user_optional_invalid_token_returns_none(patch_supaba
 async def test_get_current_user_optional_valid_token_returns_user(patch_supabase):
     patch_supabase(user=_FakeUser("u-9", "x@y.com"), role="manager")
     result = await auth.get_current_user_optional("Bearer good-token")
-    assert result == {"user_id": "u-9", "email": "x@y.com", "role": "manager", "name": "X"}
+    assert result == {"user_id": "u-9", "email": "x@y.com", "role": "manager", "name": "X", "scope": None}
 
 
 # ─── MFA gate (server-side aal2 enforcement) ──────────────────────────────────
@@ -213,7 +216,7 @@ async def test_mfa_enrolled_aal2_passes(patch_supabase):
         role="manager",
     )
     result = await auth.get_current_user(f"Bearer {_jwt_with_aal('aal2')}")
-    assert result == {"user_id": "u-9", "email": "x@y.com", "role": "manager", "name": "X"}
+    assert result == {"user_id": "u-9", "email": "x@y.com", "role": "manager", "name": "X", "scope": None}
 
 
 async def test_mfa_unenrolled_aal1_passes(patch_supabase):
@@ -333,9 +336,9 @@ async def test_auth_cache_second_call_skips_supabase(patch_supabase, monkeypatch
     auth.supabase.rpc = counting_rpc
     first = await auth.get_current_user("Bearer [REDACTED]")
     second = await auth.get_current_user("Bearer [REDACTED]")
-    assert first == second == {"user_id": "u-9", "email": "x@y.com", "role": "manager", "name": "X"}
+    assert first == second == {"user_id": "u-9", "email": "x@y.com", "role": "manager", "name": "X", "scope": None}
     assert len(get_user_calls) == 1, "2nd request must not re-verify the token"
-    assert len(rpc_calls) == 1, "2nd request must not re-fetch the role"
+    assert len(rpc_calls) == 2, "role + scope RPCs run once on the 1st request, never on the 2nd"
 
 
 async def test_auth_cache_ttl_expiry_revalidates(patch_supabase, monkeypatch):

@@ -19,11 +19,11 @@
 # a verified TOTP factor + anything but aal2 → 401 mfa_required.
 # REQUIRE_MFA_AAL2=false is the emergency off-switch.
 #
-# Auth cache: every authenticated request used to cost 2 Supabase round-trips
-# (get_user + role RPC). Verified results are cached in-process for
+# Auth cache: every authenticated request used to cost 3 Supabase round-trips
+# (get_user + role RPC + scope RPC). Verified results are cached in-process for
 # AUTH_CACHE_TTL_SECONDS (default 30s), keyed by sha256(token) — tokens and
-# hashes never leave the process (never Redis). Trade-off: a role change
-# takes up to TTL to be seen elsewhere; admin role/deactivate/MFA-reset
+# hashes never leave the process (never Redis). Trade-off: a role/scope change
+# takes up to TTL to be seen elsewhere; admin role/scope/deactivate/MFA-reset
 # endpoints call invalidate_user() so those take effect immediately.
 
 from fastapi import HTTPException, Header
@@ -83,7 +83,7 @@ def _reset_for_tests() -> None:
 def invalidate_user(user_id: str) -> None:
     """Drop every cached entry for `user_id` (auth results + factor answer).
 
-    Called from the admin role-change, deactivate and MFA-factor-reset
+    Called from the admin role/scope-change, deactivate and MFA-factor-reset
     endpoints so those take effect immediately instead of at TTL expiry.
     """
     for key, (_exp, cached, _mfa_ok) in list(_auth_cache.items()):
@@ -241,9 +241,10 @@ def display_name(user) -> str:
 
 async def get_current_user(authorization: Optional[str] = Header(None)) -> dict:
     """
-    Verify the Bearer [REDACTED] and fetch the caller's role.
+    Verify the Bearer [REDACTED] and fetch the caller's role and section scope.
     Raises 401 if unauthenticated or the token is invalid/expired.
-    Returns {'user_id': str, 'email': str, 'role': str, 'name': str}.
+    Returns {'user_id': str, 'email': str, 'role': str, 'name': str,
+    'scope': Optional[str]} (scope None = not limited to a section).
     """
     if not authorization or not authorization.startswith('Bearer '):
         raise HTTPException(status_code=401, detail='Sign in required.')
@@ -314,7 +315,25 @@ async def get_current_user(authorization: Optional[str] = Header(None)) -> dict:
             detail='Could not verify your permissions right now. Please try again in a moment.',
         )
 
-    result = {'user_id': str(user.id), 'email': user.email or '', 'role': role, 'name': display_name(user)}
+    # Section scope comes from the sibling RPC over
+    # user_profiles.permissions->>'scope' (NULL/empty = not limited). Same
+    # failure contract as the role lookup: an RPC error is a loud retryable
+    # 503 — including a missing function before the Batch 1 migration is
+    # applied — never a silent "unscoped", which would leak cross-section
+    # data to a limited account.
+    try:
+        scope_resp = await run_in_threadpool(
+            lambda: supabase.rpc('get_user_scope_by_id', {'user_id': str(user.id)}).execute()
+        )
+        scope = scope_resp.data.strip() if isinstance(scope_resp.data, str) and scope_resp.data.strip() else None
+    except Exception as e:
+        logger.error(f'Scope lookup failed for {user.id}: {e}')
+        raise HTTPException(
+            status_code=503,
+            detail='Could not verify your permissions right now. Please try again in a moment.',
+        )
+
+    result = {'user_id': str(user.id), 'email': user.email or '', 'role': role, 'name': display_name(user), 'scope': scope}
     # Only verified successes are cached — 401s, 503s and the MFA 401 above
     # raise before reaching here, so failures are never served from cache.
     _store_auth_cache(cache_key, result, mfa_ok)

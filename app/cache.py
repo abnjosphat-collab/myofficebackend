@@ -127,12 +127,19 @@ def _namespace_keyset(namespace: str) -> str:
     return f"{KEY_PREFIX}:{namespace}:__keys__"
 
 
-def build_key(namespace: str, **params: Any) -> str:
+def build_key(namespace: str, scope: Optional[str] = None, **params: Any) -> str:
     """A stable cache key for a namespace + a set of query params (order-
     independent, so `status=a&priority=b` and `priority=b&status=a` share a
     cache entry). Params with a None/empty value are dropped so the
-    unfiltered call (the common case) gets its own clean key."""
+    unfiltered call (the common case) gets its own clean key.
+
+    Scoped callers pass the viewer's section (app/scope.py's
+    viewer_scope(current_user)) and get their own key segment, so a cached
+    slice can never be served across scopes. Unscoped callers (scope None)
+    build byte-identical keys to before scoping existed."""
     parts = sorted(f"{k}={v}" for k, v in params.items() if v not in (None, "", "all"))
+    if scope:
+        parts.append(f"scope={scope}")
     suffix = "&".join(parts) if parts else "_all"
     return f"{KEY_PREFIX}:{namespace}:{suffix}"
 
@@ -209,19 +216,26 @@ def cached(namespace: str, ttl: int):
     Decorator for a no-argument (or all-optional-default) GET route handler:
     serves a cached response when available, otherwise calls the handler and
     caches its result. Only appropriate for endpoints whose response doesn't
-    vary by caller (no per-user data, no un-cached query params) — see
+    vary by caller except by section scope (no other per-user data, no un-cached query params) — see
     build_key()-based manual caching for endpoints with filter params.
 
     The cache key always folds in the wrapped function's name, so two
     different @cached endpoints sharing a namespace (e.g. a stats-summary
     endpoint and a list endpoint both cached under "work_orders") never
     collide on the same key — each function gets its own entry regardless
-    of what else shares its namespace.
+    of what else shares its namespace. The viewer's section scope
+    (from a current_user kwarg, when the endpoint takes one) is folded in
+    the same way.
     """
     def decorator(fn):
         @wraps(fn)
         async def wrapper(*args, **kwargs):
-            key = build_key(namespace, _fn=fn.__name__)
+            # A scoped viewer's response is a filtered slice, never the whole:
+            # fold their section into the key. Anything unscoped (no
+            # current_user, or scope None) builds the exact key it always did.
+            viewer = kwargs.get("current_user")
+            scope = viewer.get("scope") if isinstance(viewer, dict) else None
+            key = build_key(namespace, scope=scope, _fn=fn.__name__)
             hit = await cache_get(key)
             if hit is not None:
                 return hit
