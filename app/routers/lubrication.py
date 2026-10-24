@@ -4,6 +4,7 @@ from typing import Optional
 from app.clock import today_harare
 from app.supabase_client import supabase
 from app.auth import get_current_user, require_role
+from app.scope import apply_list_scope, assert_row_visible, stamp_create, viewer_scope
 from app.errors import server_error
 from datetime import date, timedelta
 import logging
@@ -65,10 +66,11 @@ class LubeRecordCreate(BaseModel):
 
 @router.get("", dependencies=[Depends(get_current_user)])
 @router.get("/", dependencies=[Depends(get_current_user)])
-async def get_schedules(status: Optional[str] = None, section: Optional[str] = None):
+async def get_schedules(status: Optional[str] = None, section: Optional[str] = None, current_user: dict = Depends(get_current_user)):
     try:
         q = supabase.table("lube_schedules").select("*").order("next_due_date")
         if section: q = q.eq("section", section)
+        q = apply_list_scope(q, current_user, "lube_schedules")
         items = (q.execute()).data or []
         for item in items:
             item["status"] = _lube_status(item.get("next_due_date"))
@@ -84,6 +86,7 @@ async def create_schedule(data: LubeScheduleCreate, current_user: dict = Depends
     try:
         payload = data.model_dump(exclude_none=True)
         payload["status"] = _lube_status(data.next_due_date)
+        payload = stamp_create(current_user, "lube_schedules", payload)
         r = supabase.table("lube_schedules").insert(payload).execute()
         if not r.data:
             raise HTTPException(500, "Insert failed")
@@ -100,6 +103,10 @@ async def update_schedule(s_id: int, data: LubeScheduleUpdate, current_user: dic
     payload = data.model_dump(exclude_unset=True)
     if "next_due_date" in payload:
         payload["status"] = _lube_status(payload["next_due_date"])
+    if viewer_scope(current_user) is not None:
+        found = (supabase.table("lube_schedules").select("*").eq("id", s_id).execute()).data or []
+        merged = {**(found[0] if found else {}), **payload}
+        assert_row_visible(current_user, "lube_schedules", merged, detail="Schedule not found")
     r = supabase.table("lube_schedules").update(payload).eq("id", s_id).execute()
     if not r.data:
         raise HTTPException(404, "Schedule not found")
@@ -107,22 +114,28 @@ async def update_schedule(s_id: int, data: LubeScheduleUpdate, current_user: dic
 
 @router.delete("/{s_id}")
 async def delete_schedule(s_id: int, current_user: dict = Depends(require_role('manager'))):
+    if viewer_scope(current_user) is not None:
+        found = (supabase.table("lube_schedules").select("*").eq("id", s_id).execute()).data or []
+        assert_row_visible(current_user, "lube_schedules", found[0] if found else None, detail="Schedule not found")
     supabase.table("lube_schedules").delete().eq("id", s_id).execute()
     return {"ok": True}
 
 # ─── Lube records (history) ───────────────────────────────────────────────────
 
 @router.get("/records", dependencies=[Depends(get_current_user)])
-async def get_lube_records(schedule_id: Optional[int] = None):
+async def get_lube_records(schedule_id: Optional[int] = None, current_user: dict = Depends(get_current_user)):
     q = supabase.table("lube_records").select("*").order("done_date", desc=True)
     if schedule_id:
         q = q.eq("schedule_id", schedule_id)
+    q = apply_list_scope(q, current_user, "lube_records", supabase)
     return (q.execute()).data or []
 
 @router.post("/records")
 async def create_lube_record(data: LubeRecordCreate, current_user: dict = Depends(get_current_user)):
     try:
-        r = supabase.table("lube_records").insert(data.model_dump(exclude_none=True)).execute()
+        payload = data.model_dump(exclude_none=True)
+        payload = stamp_create(current_user, "lube_records", payload, supabase)
+        r = supabase.table("lube_records").insert(payload).execute()
         if not r.data:
             raise HTTPException(500, "Insert failed")
         # Update the parent schedule's last_done_date

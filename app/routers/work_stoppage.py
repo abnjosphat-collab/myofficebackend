@@ -10,6 +10,7 @@ from app.supabase_client import supabase, rows, one_row
 from app.auth import get_current_user, require_role
 from app.aggregation import count_by
 from app.db_helpers import get_or_404, apply_date_range, or_ilike, distinct_suggestions, status_choice_validator
+from app.scope import apply_list_scope, assert_row_visible, stamp_create, viewer_scope
 from app.errors import server_error
 import logging
 from datetime import datetime
@@ -47,7 +48,7 @@ class CorrectiveActionResponse(CorrectiveActionBase):
 class WorkStoppageBase(BaseModel):
     date: str = Field(..., min_length=1)
     department: str = Field(..., min_length=1)
-    section: str = Field(..., pattern="^(Mechanical|Electrical|General)$")
+    section: str = Field(..., pattern="^(Mechanical|Electrical|General|Projects)$")
     description: str = Field(..., min_length=10)
     investigationFindings: Optional[str] = ""
     stoppageBy: str = Field(..., min_length=1)
@@ -120,7 +121,8 @@ async def get_reports(
     from_date: Optional[str] = Query(None, description="Start date YYYY-MM-DD"),
     to_date: Optional[str] = Query(None, description="End date YYYY-MM-DD"),
     limit: int = Query(100, ge=1, le=1000),
-    offset: int = Query(0, ge=0)
+    offset: int = Query(0, ge=0),
+    current_user: dict = Depends(get_current_user)
 ):
     try:
         logger.info("Fetching work stoppage reports...")
@@ -139,6 +141,7 @@ async def get_reports(
             query = query.ilike("stoppage_by", f"%{inspector}%")
 
         query = apply_date_range(query, "date", from_date, to_date)
+        query = apply_list_scope(query, current_user, "work_stoppage_reports")
 
         # Order by most recent
         query = query.order("submitted_at", desc=True)
@@ -174,17 +177,17 @@ async def get_reports(
 
 # GET unique departments for auto-complete
 @router.get("/suggestions/departments", dependencies=[Depends(get_current_user)])
-async def get_department_suggestions(search: Optional[str] = Query(None)):
-    return await distinct_suggestions(supabase, "work_stoppage_reports", "department", search, "department")
+async def get_department_suggestions(search: Optional[str] = Query(None), current_user: dict = Depends(get_current_user)):
+    return await distinct_suggestions(supabase, "work_stoppage_reports", "department", search, "department", current_user)
 
 # GET unique inspectors for auto-complete
 @router.get("/suggestions/inspectors", dependencies=[Depends(get_current_user)])
-async def get_inspector_suggestions(search: Optional[str] = Query(None)):
-    return await distinct_suggestions(supabase, "work_stoppage_reports", "stoppage_by", search, "inspector")
+async def get_inspector_suggestions(search: Optional[str] = Query(None), current_user: dict = Depends(get_current_user)):
+    return await distinct_suggestions(supabase, "work_stoppage_reports", "stoppage_by", search, "inspector", current_user)
 
 # GET single report
 @router.get("/{report_id}", dependencies=[Depends(get_current_user)])
-async def get_report(report_id: str):
+async def get_report(report_id: str, current_user: dict = Depends(get_current_user)):
     try:
         logger.info(f"Fetching work stoppage report {report_id}")
         
@@ -197,6 +200,7 @@ async def get_report(report_id: str):
         db_report = one_row(report_response)
         if db_report is None:
             raise HTTPException(status_code=404, detail="Report not found")
+        assert_row_visible(current_user, "work_stoppage_reports", db_report, detail="Report not found")
 
         # Get corrective actions
         actions_response = supabase.table("corrective_actions")\
@@ -243,6 +247,7 @@ async def create_report(report: WorkStoppageCreate, current_user: dict = Depends
             "submitted_at": now
         }
         
+        report_data = stamp_create(current_user, "work_stoppage_reports", report_data)
         logger.info(f"Inserting report: {report_data}")
         
         report_response = supabase.table("work_stoppage_reports")\
@@ -331,6 +336,9 @@ async def update_report(report_id: str, updated: WorkStoppageUpdate, current_use
             if key in field_mapping and key != "correctiveActions":
                 data_to_update[field_mapping[key]] = value
         
+        if viewer_scope(current_user) is not None:
+            merged = {**existing_row, **data_to_update}
+            assert_row_visible(current_user, "work_stoppage_reports", merged, detail="Report not found")
         if data_to_update:
             update_response = supabase.table("work_stoppage_reports")\
                 .update(data_to_update)\
@@ -416,8 +424,10 @@ async def delete_report(report_id: str, current_user: dict = Depends(require_rol
             .eq("id", report_id)\
             .execute()
 
-        if one_row(existing) is None:
+        existing_row = one_row(existing)
+        if existing_row is None:
             raise HTTPException(status_code=404, detail="Report not found")
+        assert_row_visible(current_user, "work_stoppage_reports", existing_row, detail="Report not found")
 
         # Corrective actions will be automatically deleted due to foreign key cascade
         supabase.table("work_stoppage_reports")\
@@ -435,7 +445,7 @@ async def delete_report(report_id: str, current_user: dict = Depends(require_rol
 
 # GET stats
 @router.get("/stats/overview", dependencies=[Depends(get_current_user)])
-async def get_stats():
+async def get_stats(current_user: dict = Depends(get_current_user)):
     try:
         logger.info("Fetching work stoppage stats...")
         
@@ -446,6 +456,11 @@ async def get_stats():
         # Get all actions
         actions_response = supabase.table("corrective_actions").select("*").execute()
         actions = rows(actions_response)
+        scope = viewer_scope(current_user)
+        if scope is not None:
+            reports = [r for r in reports if r.get("section") == scope]
+            visible_ids = {r.get("id") for r in reports}
+            actions = [a for a in actions if a.get("report_id") in visible_ids]
         
         # Calculate stats
         total = len(reports)
@@ -456,6 +471,8 @@ async def get_stats():
             "Electrical": 0,
             "General": 0
         }
+        if scope is not None and scope not in by_section:
+            by_section[scope] = 0
         
         # Count by inspector
         by_inspector = count_by((r.get("stoppage_by") for r in reports if r.get("stoppage_by")), lambda name: name)

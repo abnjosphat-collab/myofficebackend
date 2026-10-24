@@ -6,6 +6,7 @@ from typing import Optional, List
 from app.supabase_client import supabase
 from app.auth import get_current_user, require_role
 from app.db_helpers import apply_date_range
+from app.scope import assert_row_visible, filter_rows, stamp_create, viewer_scope
 from app.errors import server_error
 import logging
 from datetime import datetime, date
@@ -117,6 +118,7 @@ async def list_complaints(
     to_date: Optional[str] = Query(None),
     limit: int = Query(200, ge=1, le=1000),
     offset: int = Query(0, ge=0),
+    current_user: dict = Depends(get_current_user),
 ):
     try:
         q = supabase.table("safety_complaints").select("*").order("date", desc=True)
@@ -129,9 +131,15 @@ async def list_complaints(
         if category:
             q = q.eq("category", category)
         q = apply_date_range(q, "date", from_date, to_date)
-        q = q.range(offset, offset + limit - 1)
+        scope = viewer_scope(current_user)
+        if scope is None:
+            q = q.range(offset, offset + limit - 1)
         result = q.execute()
         rows = result.data or []
+        if scope is not None:
+            # open_values (General/blank stay visible) cannot be one query
+            # predicate: filter the small table in Python, then slice.
+            rows = filter_rows(current_user, "safety_complaints", rows)[offset:offset + limit]
         mapped = [map_row(r) for r in rows]
         if search:
             s = search.lower()
@@ -150,11 +158,12 @@ async def list_complaints(
 
 
 @router.get("/{complaint_id}", dependencies=[Depends(get_current_user)])
-async def get_complaint(complaint_id: str):
+async def get_complaint(complaint_id: str, current_user: dict = Depends(get_current_user)):
     try:
         result = supabase.table("safety_complaints").select("*").eq("id", complaint_id).single().execute()
         if not result.data:
             raise HTTPException(status_code=404, detail="Complaint not found")
+        assert_row_visible(current_user, "safety_complaints", result.data, detail="Complaint not found")
         return map_row(result.data)
     except HTTPException:
         raise
@@ -185,6 +194,7 @@ async def create_complaint(payload: SafetyComplaintCreate, current_user: dict = 
             "status": payload.status or "open",
             "submitted_at": datetime.utcnow().isoformat(),
         }
+        record = stamp_create(current_user, "safety_complaints", record)
         result = supabase.table("safety_complaints").insert(record).execute()
         if not result.data:
             raise HTTPException(status_code=500, detail="Insert returned no data")
@@ -206,6 +216,17 @@ async def update_complaint(complaint_id: str, payload: SafetyComplaintUpdate, cu
         updates = {k: (None if k in _DATE_COLS and v == "" else v) for k, v in raw.items()}
         if not updates:
             raise HTTPException(status_code=400, detail="No fields to update")
+        scope = viewer_scope(current_user)
+        if scope is not None:
+            found = (supabase.table("safety_complaints").select("*").eq("id", complaint_id).execute()).data or []
+            assert_row_visible(current_user, "safety_complaints", found[0] if found else None, detail="Complaint not found")
+            if updates.get("section") is not None:
+                # The section may stay as it is (a General row stays General)
+                # or become the viewer's scope — never anything else.
+                new_section = updates["section"]
+                old_section = found[0].get("section") if found else None
+                if new_section != scope and new_section != old_section:
+                    raise HTTPException(status_code=404, detail="Complaint not found")
         result = supabase.table("safety_complaints").update(updates).eq("id", complaint_id).execute()
         if not result.data:
             raise HTTPException(status_code=404, detail="Complaint not found")
@@ -220,6 +241,9 @@ async def update_complaint(complaint_id: str, payload: SafetyComplaintUpdate, cu
 @router.delete("/{complaint_id}", status_code=204)
 async def delete_complaint(complaint_id: str, current_user: dict = Depends(require_role('manager'))):
     try:
+        if viewer_scope(current_user) is not None:
+            found = (supabase.table("safety_complaints").select("*").eq("id", complaint_id).execute()).data or []
+            assert_row_visible(current_user, "safety_complaints", found[0] if found else None, detail="Complaint not found")
         result = supabase.table("safety_complaints").delete().eq("id", complaint_id).execute()
         if not result.data:
             raise HTTPException(status_code=404, detail="Complaint not found")

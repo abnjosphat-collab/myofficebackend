@@ -7,6 +7,7 @@ from app.supabase_client import supabase, rows, one_row
 from app.auth import get_current_user, require_role
 from app.aggregation import count_by
 from app.db_helpers import get_or_404, apply_date_range, or_ilike
+from app.scope import apply_list_scope, assert_row_visible, stamp_create, viewer_scope
 from app.errors import server_error
 import logging
 from datetime import datetime
@@ -131,7 +132,8 @@ async def get_inspections(
     status: Optional[str] = Query(None, description="Filter by status"),
     inspector: Optional[str] = Query(None, description="Filter by inspector"),
     from_date: Optional[str] = Query(None, description="Start date YYYY-MM-DD"),
-    to_date: Optional[str] = Query(None, description="End date YYYY-MM-DD")
+    to_date: Optional[str] = Query(None, description="End date YYYY-MM-DD"),
+    current_user: dict = Depends(get_current_user)
 ):
     try:
         logger.info("Fetching SHEQ inspections...")
@@ -153,6 +155,7 @@ async def get_inspections(
             query = query.ilike("inspectors", f"%{inspector}%")
 
         query = apply_date_range(query, "date", from_date, to_date)
+        query = apply_list_scope(query, current_user, "sheq_inspections")
 
         # Order by most recent
         query = query.order("created_at", desc=True)
@@ -189,7 +192,7 @@ async def get_inspections(
 
 # GET stats overview
 @router.get("/stats/overview", dependencies=[Depends(get_current_user)])
-async def get_inspection_stats():
+async def get_inspection_stats(current_user: dict = Depends(get_current_user)):
     try:
         logger.info("Fetching inspection stats...")
         
@@ -200,6 +203,11 @@ async def get_inspection_stats():
         # Get all findings
         findings_response = supabase.table("sheq_findings").select("*").execute()
         findings = rows(findings_response)
+        scope = viewer_scope(current_user)
+        if scope is not None:
+            inspections = [i for i in inspections if i.get("section") == scope]
+            visible_ids = {i.get("id") for i in inspections}
+            findings = [f for f in findings if f.get("inspection_id") in visible_ids]
         
         # Calculate stats
         stats = {
@@ -218,6 +226,8 @@ async def get_inspection_stats():
             },
             "byInspector": {}
         }
+        if scope is not None and scope not in stats["bySection"]:
+            stats["bySection"][scope] = 0
         
         # Count by section
         for inspection in inspections:
@@ -265,7 +275,7 @@ async def get_inspection_stats():
 
 # GET single inspection
 @router.get("/{inspection_id}", dependencies=[Depends(get_current_user)])
-async def get_inspection(inspection_id: str):
+async def get_inspection(inspection_id: str, current_user: dict = Depends(get_current_user)):
     try:
         logger.info(f"Fetching inspection {inspection_id}")
         
@@ -278,6 +288,7 @@ async def get_inspection(inspection_id: str):
         db_inspection = one_row(inspection_response)
         if db_inspection is None:
             raise HTTPException(status_code=404, detail="Inspection not found")
+        assert_row_visible(current_user, "sheq_inspections", db_inspection, detail="Inspection not found")
 
         # Get findings
         findings_response = supabase.table("sheq_findings")\
@@ -330,6 +341,8 @@ async def create_inspection(inspection: SHEQCreate, current_user: dict = Depends
             "updated_at": now
         }
         
+        scope = viewer_scope(current_user)
+        inspection_data = stamp_create(current_user, "sheq_inspections", inspection_data)
         logger.info(f"Inserting inspection: {inspection_data}")
         
         inspection_response = supabase.table("sheq_inspections")\
@@ -353,7 +366,7 @@ async def create_inspection(inspection: SHEQCreate, current_user: dict = Depends
                     "bywhen": finding.byWhen,                  # lowercase
                     "status": finding.status,
                     "priority": finding.priority,
-                    "section": finding.section,
+                    "section": scope or finding.section,
                     "completeddate": finding.completedDate,    # lowercase
                     "remarks": finding.remarks
                 })
@@ -433,6 +446,10 @@ async def update_inspection(inspection_id: str, updated: SHEQUpdate, current_use
             elif key in ("before_photos", "after_photos") and isinstance(value, list):
                 data_to_update[key] = value
         
+        scope = viewer_scope(current_user)
+        if scope is not None:
+            merged = {**existing_row, **data_to_update}
+            assert_row_visible(current_user, "sheq_inspections", merged, detail="Inspection not found")
         data_to_update["updated_at"] = datetime.utcnow().isoformat()
         
         # Update inspection
@@ -469,7 +486,7 @@ async def update_inspection(inspection_id: str, updated: SHEQUpdate, current_use
                         "bywhen": finding.byWhen,                  # lowercase
                         "status": finding.status,
                         "priority": finding.priority,
-                        "section": finding.section,
+                        "section": scope or finding.section,
                         "completeddate": finding.completedDate,    # lowercase
                         "remarks": finding.remarks
                     })
@@ -516,8 +533,10 @@ async def delete_inspection(inspection_id: str, current_user: dict = Depends(req
             .eq("id", inspection_id)\
             .execute()
 
-        if one_row(existing) is None:
+        existing_row = one_row(existing)
+        if existing_row is None:
             raise HTTPException(status_code=404, detail="Inspection not found")
+        assert_row_visible(current_user, "sheq_inspections", existing_row, detail="Inspection not found")
 
         # Findings will be automatically deleted due to foreign key cascade
         supabase.table("sheq_inspections")\
@@ -535,9 +554,12 @@ async def delete_inspection(inspection_id: str, current_user: dict = Depends(req
 
 # GET findings for an inspection
 @router.get("/{inspection_id}/findings", dependencies=[Depends(get_current_user)])
-async def get_findings(inspection_id: str):
+async def get_findings(inspection_id: str, current_user: dict = Depends(get_current_user)):
     try:
         logger.info(f"Fetching findings for inspection {inspection_id}")
+        if viewer_scope(current_user) is not None:
+            parent = one_row(supabase.table("sheq_inspections").select("*").eq("id", inspection_id).execute())
+            assert_row_visible(current_user, "sheq_inspections", parent, detail="Inspection not found")
         
         response = supabase.table("sheq_findings")\
             .select("*")\
@@ -563,8 +585,11 @@ async def add_finding(inspection_id: str, finding: FindingCreate, current_user: 
             .eq("id", inspection_id)\
             .execute()
 
-        if one_row(inspection) is None:
+        parent_row = one_row(inspection)
+        if parent_row is None:
             raise HTTPException(status_code=404, detail="Inspection not found")
+        scope = viewer_scope(current_user)
+        assert_row_visible(current_user, "sheq_inspections", parent_row, detail="Inspection not found")
 
         finding_data = {
             "id": generate_id(),
@@ -575,7 +600,7 @@ async def add_finding(inspection_id: str, finding: FindingCreate, current_user: 
             "bywhen": finding.byWhen,                  # lowercase
             "status": finding.status,
             "priority": finding.priority,
-            "section": finding.section,
+            "section": scope or finding.section,
             "completeddate": finding.completedDate,    # lowercase
             "remarks": finding.remarks
         }
@@ -610,6 +635,7 @@ async def update_finding(finding_id: str, updated: FindingUpdate, current_user: 
         existing_row = one_row(existing)
         if existing_row is None:
             raise HTTPException(status_code=404, detail="Finding not found")
+        assert_row_visible(current_user, "sheq_findings", existing_row, supabase, detail="Finding not found")
 
         # Prepare update data
         data_to_update = {}
@@ -636,6 +662,14 @@ async def update_finding(finding_id: str, updated: FindingUpdate, current_user: 
             if key in field_mapping:
                 data_to_update[field_mapping[key]] = value
 
+        scope = viewer_scope(current_user)
+        if scope is not None and data_to_update.get("section") is not None:
+            # The finding's section is descriptive (visibility comes from
+            # the parent): it may stay as it is or become the viewer's
+            # scope — never anything else.
+            new_section = data_to_update["section"]
+            if new_section != scope and new_section != existing_row.get("section"):
+                raise HTTPException(status_code=404, detail="Finding not found")
         if not data_to_update:
             return map_db_finding_to_camel(existing_row)
 
@@ -667,8 +701,10 @@ async def delete_finding(finding_id: str, current_user: dict = Depends(require_r
             .eq("id", finding_id)\
             .execute()
 
-        if one_row(existing) is None:
+        existing_row = one_row(existing)
+        if existing_row is None:
             raise HTTPException(status_code=404, detail="Finding not found")
+        assert_row_visible(current_user, "sheq_findings", existing_row, supabase, detail="Finding not found")
 
         supabase.table("sheq_findings")\
             .delete()\

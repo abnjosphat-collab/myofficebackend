@@ -5,6 +5,7 @@ from app.crud_router import CrudRouter
 from app.supabase_client import supabase
 from app.auth import get_current_user
 from app.db_helpers import get_or_404
+from app.scope import assert_row_visible
 
 
 class HandoverCreate(BaseModel):
@@ -43,9 +44,11 @@ router = CrudRouter(
     order_by="created_at", order_desc=True,
     filters={"shift": "shift", "section": "section"},
     not_found="Handover not found",
+    scope_table="shift_handovers",
 ).router
 
 
 @router.get("/{h_id}", dependencies=[Depends(get_current_user)])
-async def get_handover(h_id: int):
-    return get_or_404(supabase, "shift_handovers", h_id, detail="Handover not found")
+async def get_handover(h_id: int, current_user: dict = Depends(get_current_user)):
+    row = get_or_404(supabase, "shift_handovers", h_id, detail="Handover not found")
+    return assert_row_visible(current_user, "shift_handovers", row, detail="Handover not found")

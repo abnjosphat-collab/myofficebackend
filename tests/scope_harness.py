@@ -42,6 +42,7 @@ class _Query:
         self._end = None
         self._pending_update = None
         self._deleting = False
+        self._single = False
 
     def select(self, *a, **k):
         return self
@@ -59,6 +60,21 @@ class _Query:
     def in_(self, col, vals):
         self._calls.append(("in", col, list(vals)))
         self._rows = [r for r in self._rows if r.get(col) in vals]
+        return self
+
+    @property
+    def not_(self):
+        outer = self
+
+        class _Not:
+            def is_(self, col, val):
+                outer._rows = [r for r in outer._rows if r.get(col) is not None]
+                return outer
+
+        return _Not()
+
+    def single(self):
+        self._single = True
         return self
 
     def or_(self, s):
@@ -92,7 +108,8 @@ class _Query:
     def insert(self, payload):
         rows = payload if isinstance(payload, list) else [payload]
         table_rows = self._store.setdefault(self._table, [])
-        new_id = max([r.get("id", 0) for r in table_rows] or [0])
+        nums = [r.get("id") for r in table_rows if isinstance(r.get("id"), int)]
+        new_id = max(nums or [0])
         inserted = []
         for p in rows:
             new_id += 1
@@ -131,9 +148,16 @@ class _Query:
                 r.update(self._pending_update)
         if self._deleting:
             doomed = {id(r) for r in self._rows}
+            # Real Supabase returns the deleted rows; routers 404 on an empty
+            # set, so the fake must too.
+            out = [dict(r) for r in self._rows[self._start:self._end]]
             self._store[self._table] = [r for r in self._store[self._table] if id(r) not in doomed]
             self._rows = []
-        return SimpleNamespace(data=[dict(r) for r in self._rows[self._start:self._end]])
+        else:
+            out = [dict(r) for r in self._rows[self._start:self._end]]
+        if self._single:
+            out = out[0] if out else None
+        return SimpleNamespace(data=out)
 
 
 class FakeSupabase:
@@ -152,10 +176,11 @@ def mount_router(monkeypatch, module, prefix, store):
     fake = FakeSupabase(store, calls)
     if hasattr(module, "supabase"):
         monkeypatch.setattr(module, "supabase", fake)
-    else:
-        # Pure-CrudRouter modules hold no client: the generic layer's does.
-        import app.crud_router as cr
-        monkeypatch.setattr(cr, "supabase", fake)
+    # The generic CrudRouter layer reads its own binding: modules that mix
+    # generic routes with hand-rolled ones (handover, job cards) need both
+    # patched, and patching it is inert for modules that never use it.
+    import app.crud_router as cr
+    monkeypatch.setattr(cr, "supabase", fake)
 
     # Direct require_role("x")(auth_header) calls (bulk gates) run past
     # dependency_overrides: fake the gate with a real role check.

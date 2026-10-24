@@ -7,6 +7,7 @@ from app.auth import get_current_user, require_role
 from app.aggregation import count_by
 from app.db_helpers import apply_date_range, get_or_404
 from app.concurrency import assert_unchanged
+from app.scope import apply_list_scope, assert_row_visible, stamp_create, viewer_scope
 from app.errors import server_error
 import logging
 
@@ -75,7 +76,8 @@ async def create_requisition(requisition: RequisitionCreate, request: Request = 
 
     try:
         # Check unique requisition_number
-        existing = supabase.table("requisitions").select("id").eq("requisition_number", requisition.requisition_number).execute()
+        num_q = supabase.table("requisitions").select("id").eq("requisition_number", requisition.requisition_number)
+        existing = apply_list_scope(num_q, current_user, "requisitions").execute()
         if one_row(existing) is not None:
             raise HTTPException(status_code=400, detail=f"Requisition number '{requisition.requisition_number}' already exists")
 
@@ -93,6 +95,7 @@ async def create_requisition(requisition: RequisitionCreate, request: Request = 
             "updated_at": now
         }
 
+        requisition_data = stamp_create(current_user, "requisitions", requisition_data)
         req_response = supabase.table("requisitions").insert(requisition_data).execute()
         new_requisition = one_row(req_response)
         if new_requisition is None:
@@ -118,7 +121,8 @@ async def create_requisition(requisition: RequisitionCreate, request: Request = 
             new_requisition['requisition_items'] = []
 
         # Add line number for UI convenience
-        all_reqs = supabase.table("requisitions").select("id").execute()
+        count_q = apply_list_scope(supabase.table("requisitions").select("id"), current_user, "requisitions")
+        all_reqs = count_q.execute()
         new_requisition['line_number'] = len(rows(all_reqs))
 
         logger.info(f"Successfully created requisition {requisition_id}")
@@ -141,7 +145,8 @@ async def get_requisitions(
     requester: Optional[str] = None,
     search: Optional[str] = None,
     date_from: Optional[date] = None,
-    date_to: Optional[date] = None
+    date_to: Optional[date] = None,
+    current_user: dict = Depends(get_current_user)
 ):
     try:
         query = supabase.table("requisitions").select("*, requisition_items(*)")
@@ -155,6 +160,7 @@ async def get_requisitions(
         if requester and requester != 'all':
             query = query.eq("requester", requester)
         query = apply_date_range(query, "date", date_from.isoformat() if date_from else None, date_to.isoformat() if date_to else None)
+        query = apply_list_scope(query, current_user, "requisitions")
 
         response = query.order("created_at", desc=True).execute()
         requisitions = rows(response)
@@ -169,13 +175,15 @@ async def get_requisitions(
 
 # ============= GET SINGLE =============
 @router.get("/{requisition_id}", dependencies=[Depends(get_current_user)])
-async def get_requisition(requisition_id: int):
+async def get_requisition(requisition_id: int, current_user: dict = Depends(get_current_user)):
     try:
         response = supabase.table("requisitions").select("*, requisition_items(*)").eq("id", requisition_id).execute()
         requisition = one_row(response)
         if requisition is None:
             raise HTTPException(status_code=404, detail="Requisition not found")
-        all_reqs = supabase.table("requisitions").select("id").execute()
+        assert_row_visible(current_user, "requisitions", requisition, detail="Requisition not found")
+        count_q = apply_list_scope(supabase.table("requisitions").select("id"), current_user, "requisitions")
+        all_reqs = count_q.execute()
         for idx, req in enumerate(sorted(rows(all_reqs), key=lambda x: x['id']), 1):
             if req['id'] == requisition_id:
                 requisition['line_number'] = idx
@@ -191,9 +199,11 @@ async def get_requisition(requisition_id: int):
 async def update_requisition(requisition_id: int, update: RequisitionUpdate, current_user: dict = Depends(get_current_user)):
     try:
         existing = get_or_404(supabase, "requisitions", requisition_id, detail="Requisition not found")
+        assert_row_visible(current_user, "requisitions", existing, detail="Requisition not found")
 
         if update.requisition_number:
-            conflict = supabase.table("requisitions").select("id").eq("requisition_number", update.requisition_number).neq("id", requisition_id).execute()
+            num_q = supabase.table("requisitions").select("id").eq("requisition_number", update.requisition_number).neq("id", requisition_id)
+            conflict = apply_list_scope(num_q, current_user, "requisitions").execute()
             if one_row(conflict) is not None:
                 raise HTTPException(status_code=400, detail=f"Requisition number '{update.requisition_number}' already exists")
 
@@ -206,6 +216,9 @@ async def update_requisition(requisition_id: int, update: RequisitionUpdate, cur
         if update_data.get('date') is not None:
             update_data['date'] = update_data['date'].isoformat()
 
+        if viewer_scope(current_user) is not None:
+            merged = {**existing, **update_data}
+            assert_row_visible(current_user, "requisitions", merged, detail="Requisition not found")
         if update_data:
             update_data['updated_at'] = datetime.utcnow().isoformat()
             supabase.table("requisitions").update(update_data).eq("id", requisition_id).execute()
@@ -240,7 +253,8 @@ async def update_requisition(requisition_id: int, update: RequisitionUpdate, cur
 @router.delete("/{requisition_id}")
 async def delete_requisition(requisition_id: int, current_user: dict = Depends(require_role('manager'))):
     try:
-        get_or_404(supabase, "requisitions", requisition_id, detail="Requisition not found")
+        doomed = get_or_404(supabase, "requisitions", requisition_id, detail="Requisition not found")
+        assert_row_visible(current_user, "requisitions", doomed, detail="Requisition not found")
         supabase.table("requisition_items").delete().eq("requisition_id", requisition_id).execute()
         supabase.table("requisitions").delete().eq("id", requisition_id).execute()
         return {"success": True, "message": "Requisition deleted successfully"}
@@ -251,9 +265,10 @@ async def delete_requisition(requisition_id: int, current_user: dict = Depends(r
 
 # ============= DAILY TOTAL =============
 @router.get("/daily-total/{date}", dependencies=[Depends(get_current_user)])
-async def get_daily_total(date: date):
+async def get_daily_total(date: date, current_user: dict = Depends(get_current_user)):
     try:
-        reqs = supabase.table("requisitions").select("id").eq("date", date.isoformat()).execute()
+        reqs_q = apply_list_scope(supabase.table("requisitions").select("id").eq("date", date.isoformat()), current_user, "requisitions")
+        reqs = reqs_q.execute()
         ids = [r['id'] for r in rows(reqs)]
         if not ids:
             return {"date": date.isoformat(), "total": 0}
@@ -266,13 +281,17 @@ async def get_daily_total(date: date):
 
 # ============= STATISTICS =============
 @router.get("/stats/summary", dependencies=[Depends(get_current_user)])
-async def get_stats():
+async def get_stats(current_user: dict = Depends(get_current_user)):
     try:
-        reqs = supabase.table("requisitions").select("id, status, section").execute()
-        items = supabase.table("requisition_items").select("cost_per_unit, quantity").execute()
+        reqs_q = apply_list_scope(supabase.table("requisitions").select("id, status, section"), current_user, "requisitions")
+        reqs = reqs_q.execute()
+        items = supabase.table("requisition_items").select("requisition_id, cost_per_unit, quantity").execute()
         items_rows = rows(items)
-        total_cost = sum(item['cost_per_unit'] * item['quantity'] for item in items_rows) if items_rows else 0
         req_rows = rows(reqs)
+        if viewer_scope(current_user) is not None:
+            visible_ids = {r["id"] for r in req_rows}
+            items_rows = [it for it in items_rows if it.get("requisition_id") in visible_ids]
+        total_cost = sum(item['cost_per_unit'] * item['quantity'] for item in items_rows) if items_rows else 0
         status_counts = count_by(req_rows, 'status')
         section_counts = count_by(req_rows, 'section')
         return {

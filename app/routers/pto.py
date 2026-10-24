@@ -10,6 +10,7 @@ from app.supabase_client import supabase, rows, one_row
 from app.auth import get_current_user, require_role
 from app.aggregation import count_by
 from app.db_helpers import get_or_404, apply_date_range, or_ilike, distinct_suggestions, status_choice_validator
+from app.scope import apply_list_scope, assert_row_visible, stamp_create, viewer_scope
 from app.errors import server_error
 import logging
 from datetime import datetime
@@ -116,7 +117,7 @@ class ActionPlanItemResponse(ActionPlanItemBase):
 class PTOReportBase(BaseModel):
     date: str = Field(..., min_length=1)
     observerName: str = Field(..., min_length=1)
-    section: str = Field(..., pattern="^(Mechanical|Electrical)$")
+    section: str = Field(..., pattern="^(Mechanical|Electrical|Projects)$")
     deptSectionContractor: Optional[str] = ""
     workerName: str = Field(..., min_length=1)
     occupation: Optional[str] = ""
@@ -266,7 +267,8 @@ async def get_pto_reports(
     from_date: Optional[str] = Query(None, description="Start date YYYY-MM-DD"),
     to_date: Optional[str] = Query(None, description="End date YYYY-MM-DD"),
     limit: int = Query(100, ge=1, le=1000),
-    offset: int = Query(0, ge=0)
+    offset: int = Query(0, ge=0),
+    current_user: dict = Depends(get_current_user)
 ):
     try:
         logger.info("Fetching PTO reports...")
@@ -288,6 +290,7 @@ async def get_pto_reports(
             query = query.eq("status", status)
 
         query = apply_date_range(query, "date", from_date, to_date)
+        query = apply_list_scope(query, current_user, "pto_reports")
 
         # Order by most recent
         query = query.order("created_at", desc=True)
@@ -320,12 +323,12 @@ async def get_pto_reports(
 
 # GET unique observers for auto-complete
 @router.get("/suggestions/observers", dependencies=[Depends(get_current_user)])
-async def get_observer_suggestions(search: Optional[str] = Query(None)):
-    return await distinct_suggestions(supabase, "pto_reports", "observer_name", search, "observer")
+async def get_observer_suggestions(search: Optional[str] = Query(None), current_user: dict = Depends(get_current_user)):
+    return await distinct_suggestions(supabase, "pto_reports", "observer_name", search, "observer", current_user)
 
 # GET stats overview
 @router.get("/stats/overview", dependencies=[Depends(get_current_user)])
-async def get_pto_stats():
+async def get_pto_stats(current_user: dict = Depends(get_current_user)):
     try:
         logger.info("Fetching PTO stats...")
         
@@ -336,6 +339,11 @@ async def get_pto_stats():
         # Get all actions
         actions_response = supabase.table("pto_action_plan").select("*").execute()
         actions = rows(actions_response)
+        scope = viewer_scope(current_user)
+        if scope is not None:
+            reports = [r for r in reports if r.get("section") == scope]
+            visible_ids = {r.get("id") for r in reports}
+            actions = [a for a in actions if a.get("report_id") in visible_ids]
         
         # Calculate stats
         total = len(reports)
@@ -345,6 +353,8 @@ async def get_pto_stats():
             "Mechanical": 0,
             "Electrical": 0
         }
+        if scope is not None and scope not in by_section:
+            by_section[scope] = 0
         
         # Count by status
         draft_count = 0
@@ -431,7 +441,7 @@ async def get_pto_stats():
 
 # GET single report
 @router.get("/{report_id}", dependencies=[Depends(get_current_user)])
-async def get_pto_report(report_id: str):
+async def get_pto_report(report_id: str, current_user: dict = Depends(get_current_user)):
     try:
         logger.info(f"Fetching PTO report {report_id}")
         
@@ -444,6 +454,7 @@ async def get_pto_report(report_id: str):
         db_report = one_row(report_response)
         if db_report is None:
             raise HTTPException(status_code=404, detail="Report not found")
+        assert_row_visible(current_user, "pto_reports", db_report, detail="Report not found")
 
         # Get action plan items
         actions_response = supabase.table("pto_action_plan")\
@@ -502,6 +513,7 @@ async def create_pto_report(report: PTOReportCreate, current_user: dict = Depend
             "submitted_at": now if report.status == "submitted" else None
         }
         
+        report_data = stamp_create(current_user, "pto_reports", report_data)
         logger.info(f"Inserting report: {report_data}")
         
         report_response = supabase.table("pto_reports")\
@@ -609,6 +621,9 @@ async def update_pto_report(report_id: str, updated: PTOReportUpdate, current_us
                     data_to_update[field_mapping[key]] = value
         
         # Always update updated_at timestamp
+        if viewer_scope(current_user) is not None:
+            merged = {**existing_row, **data_to_update}
+            assert_row_visible(current_user, "pto_reports", merged, detail="Report not found")
         data_to_update["updated_at"] = datetime.utcnow().isoformat()
         
         # If status is being set to submitted, set submitted_at
@@ -705,8 +720,10 @@ async def delete_pto_report(report_id: str, current_user: dict = Depends(require
             .eq("id", report_id)\
             .execute()
 
-        if one_row(existing) is None:
+        existing_row = one_row(existing)
+        if existing_row is None:
             raise HTTPException(status_code=404, detail="Report not found")
+        assert_row_visible(current_user, "pto_reports", existing_row, detail="Report not found")
 
         # Action plan items will be automatically deleted due to foreign key cascade
         supabase.table("pto_reports")\

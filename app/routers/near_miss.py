@@ -7,6 +7,7 @@ from app.supabase_client import supabase
 from app.auth import get_current_user, require_role
 from app.aggregation import count_by
 from app.db_helpers import get_or_404, apply_date_range, or_ilike, distinct_suggestions
+from app.scope import apply_list_scope, assert_row_visible, stamp_create, viewer_scope
 from app.errors import server_error
 import logging
 from datetime import datetime
@@ -20,7 +21,7 @@ router = APIRouter(prefix="/api/nearmiss", tags=["Near Miss Reports"])
 
 class NearMissBase(BaseModel):
     department: str = Field(..., min_length=1)
-    section: str = Field(..., pattern="^(Mechanical|Electrical|General)$")
+    section: str = Field(..., pattern="^(Mechanical|Electrical|General|Projects)$")
     date: str = Field(..., min_length=1)
     time: str = Field(..., min_length=1)
     location: str = Field(..., min_length=1)
@@ -80,7 +81,8 @@ async def get_reports(
     from_date: Optional[str] = Query(None, description="Start date YYYY-MM-DD"),
     to_date: Optional[str] = Query(None, description="End date YYYY-MM-DD"),
     limit: int = Query(100, ge=1, le=1000),
-    offset: int = Query(0, ge=0)
+    offset: int = Query(0, ge=0),
+    current_user: dict = Depends(get_current_user)
 ):
     try:
         logger.info("Fetching near miss reports...")
@@ -99,6 +101,7 @@ async def get_reports(
             query = query.ilike("reportername", f"%{reporter}%")
 
         query = apply_date_range(query, "date", from_date, to_date)
+        query = apply_list_scope(query, current_user, "nearmiss_reports")
 
         # Order by most recent
         query = query.order("submitted_at", desc=True)
@@ -121,7 +124,7 @@ async def get_reports(
 
 # GET single report
 @router.get("/{report_id}", dependencies=[Depends(get_current_user)])
-async def get_report(report_id: str):
+async def get_report(report_id: str, current_user: dict = Depends(get_current_user)):
     try:
         logger.info(f"Fetching near miss report {report_id}")
         
@@ -133,6 +136,7 @@ async def get_report(report_id: str):
         if not response.data:
             raise HTTPException(status_code=404, detail="Report not found")
         
+        assert_row_visible(current_user, "nearmiss_reports", response.data[0], detail="Report not found")
         return map_db_to_camel(response.data[0])
         
     except HTTPException:
@@ -165,6 +169,7 @@ async def create_report(report: NearMissCreate, current_user: dict = Depends(get
             "submitted_at": now
         }
         
+        report_data = stamp_create(current_user, "nearmiss_reports", report_data)
         logger.info(f"Inserting report: {report_data}")
         
         response = supabase.table("nearmiss_reports")\
@@ -223,6 +228,9 @@ async def update_report(report_id: str, updated: NearMissUpdate, current_user: d
             if key in field_mapping:
                 data_to_update[field_mapping[key]] = value
 
+        if viewer_scope(current_user) is not None:
+            merged = {**existing.data[0], **data_to_update}
+            assert_row_visible(current_user, "nearmiss_reports", merged, detail="Report not found")
         if not data_to_update:
             return map_db_to_camel(existing.data[0])
         
@@ -258,6 +266,7 @@ async def delete_report(report_id: str, current_user: dict = Depends(require_rol
         if not existing.data:
             raise HTTPException(status_code=404, detail="Report not found")
         
+        assert_row_visible(current_user, "nearmiss_reports", existing.data[0], detail="Report not found")
         supabase.table("nearmiss_reports")\
             .delete()\
             .eq("id", report_id)\
@@ -273,7 +282,7 @@ async def delete_report(report_id: str, current_user: dict = Depends(require_rol
 
 # GET stats
 @router.get("/stats/overview", dependencies=[Depends(get_current_user)])
-async def get_stats():
+async def get_stats(current_user: dict = Depends(get_current_user)):
     try:
         logger.info("Fetching near miss stats...")
         
@@ -282,6 +291,9 @@ async def get_stats():
             .execute()
         
         reports = response.data if hasattr(response, 'data') else []
+        scope = viewer_scope(current_user)
+        if scope is not None:
+            reports = [r for r in reports if r.get("section") == scope]
         
         # Calculate stats
         total = len(reports)
@@ -292,6 +304,8 @@ async def get_stats():
             "Electrical": 0,
             "General": 0
         }
+        if scope is not None and scope not in by_section:
+            by_section[scope] = 0
         
         for report in reports:
             section = report.get("section")

@@ -42,7 +42,15 @@ class _FakeQuery:
 
     def eq(self, col, val):
         self._calls.append(("eq", col, val))
-        self._rows = [r for r in self._rows if r.get(col) == val]
+        # PostgREST coerces a string id against an int column ("42" matches
+        # 42); the fake must too, or str-param routes 404 against int fixtures.
+        def _same(row):
+            current = row.get(col)
+            if current == val:
+                return True
+            return (current is not None and val is not None
+                    and str(current) == str(val))
+        self._rows = [r for r in self._rows if _same(r)]
         return self
 
     def neq(self, col, val):
@@ -275,7 +283,7 @@ SCOPED_TABLES = {
     # Batch 3 — direct section
     "nearmiss_reports", "sheq_inspections", "sheq_findings",
     "work_stoppage_reports", "pto_reports", "pto_action_plan", "requisitions",
-    "requisition_items", "safety_complaints", "lube_schedules",
+    "requisition_items", "safety_complaints", "lube_schedules", "lube_records",
     # Batch 4 — new column / inherit
     "equipment", "work_orders", "breakdowns", "notices", "sop_documents",
     "sop_revisions", "services", "service_attachments", "daily_reports",
