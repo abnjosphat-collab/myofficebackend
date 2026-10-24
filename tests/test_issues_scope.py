@@ -41,7 +41,9 @@ def _apply_or(rows, expr):
     for part in _split_top(expr):
         if ".ilike." in part:
             col, pat = part.split(".ilike.", 1)
-            term = pat.strip("%").lower()
+            # PostgREST value-quoting ("...") is stripped server-side before
+            # the LIKE match; unquoted patterns pass through unchanged.
+            term = pat.strip().strip('"').strip("%").lower()
             kept += [r for r in rows if term in str(r.get(col) or "").lower()]
         elif ".in.(" in part:
             col, rest = part.split(".in.(", 1)

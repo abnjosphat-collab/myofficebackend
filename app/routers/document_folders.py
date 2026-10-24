@@ -21,6 +21,7 @@ from app.document_structure import CUSTOM_SORT_ORDER, plan_seed, summarise
 from app.documents_support import get_folder, is_uuid, load_folders, log_activity, require_upgrade
 from app.db_helpers import response_rows
 from app.errors import server_error
+from app.scope import scope_root_id, scope_subtree_ids, viewer_scope
 from app.supabase_client import supabase
 
 logger = logging.getLogger(__name__)
@@ -56,8 +57,15 @@ async def create_folder(body: FolderCreate, current_user: dict = Depends(get_cur
         name = clean_folder_name(body.name)
         folders = await run_in_threadpool(lambda: load_folders(supabase))
         parent = body.parent_id or None
+        scope = viewer_scope(current_user)
+        if scope is not None and parent is None and name.lower() != scope.lower():
+            # Self-service root only: a scoped account may create the
+            # top-level folder named for its scope, nothing else up there.
+            detail = (f"Create a top-level folder named {scope} first."
+                      if scope_root_id(folders, scope) is None else f"New folders go inside {scope}.")
+            raise HTTPException(status_code=404, detail=detail)
         if parent:
-            get_folder(supabase, parent)
+            get_folder(supabase, parent, current_user, folders)
         check_placement(folders, None, parent)
         if name_taken(folders, parent, name):
             raise HTTPException(status_code=409, detail="A folder with this name already exists here.")
@@ -83,6 +91,11 @@ async def update_folder(folder_id: str, body: FolderUpdate, current_user: dict =
         current = next((f for f in folders if str(f["id"]) == folder_id), None)
         if current is None:
             raise HTTPException(status_code=404, detail="That folder no longer exists. Reload the page.")
+        scope = viewer_scope(current_user)
+        sub = scope_subtree_ids(folders, scope) if scope is not None else []
+        if scope is not None and str(current["id"]) not in sub:
+            raise HTTPException(status_code=404, detail="That folder no longer exists. Reload the page.")
+        root = scope is not None and str(current["id"]) == scope_root_id(folders, scope)
 
         changes: Dict[str, Any] = {}
         name = clean_folder_name(body.name) if body.name is not None else current["name"]
@@ -90,9 +103,18 @@ async def update_folder(folder_id: str, body: FolderUpdate, current_user: dict =
         moved = parent != (str(current["parent_id"]) if current.get("parent_id") else None)
         if name != current["name"]:
             changes["name"] = name
+        if scope is not None and root and name.lower() != scope.lower():
+            # The root keeps the scope's name: renaming it away would orphan
+            # the whole subtree from its viewers.
+            raise HTTPException(status_code=404, detail=f"The {scope} folder keeps its name.")
         if moved:
             if parent:
-                get_folder(supabase, parent)
+                get_folder(supabase, parent, current_user, folders)
+            if scope is not None and (root or parent is None or parent not in sub):
+                # Stay-or-scope: a scoped move lands inside the subtree, and
+                # the root itself stays where the scope can find it.
+                detail = f"The {scope} folder stays at the top level." if root else "That folder no longer exists. Reload the page."
+                raise HTTPException(status_code=404, detail=detail)
             check_placement(folders, folder_id, parent)
             changes["parent_id"] = parent
         if body.description is not None:
@@ -127,7 +149,7 @@ def _count_files(folder_id: str, trashed: bool) -> int:
 async def delete_folder(folder_id: str, current_user: dict = Depends(require_role("manager"))):
     require_upgrade(supabase)
     try:
-        folder = get_folder(supabase, folder_id)
+        folder = get_folder(supabase, folder_id, current_user)
         folders = await run_in_threadpool(lambda: load_folders(supabase))
         subfolders = [f for f in folders if str(f.get("parent_id")) == folder_id]
         if subfolders:
@@ -150,6 +172,8 @@ async def seed_ams_folders(current_user: dict = Depends(require_role("manager"))
     a renamed one is still recognised); a folder made by hand under the same name is adopted with its files. Safe to press
     again: the second time, nothing is created."""
     require_upgrade(supabase)
+    if viewer_scope(current_user) is not None:
+        raise HTTPException(status_code=403, detail="Setting up the AMS folders is not available to section-limited accounts.")
     try:
         folders = await run_in_threadpool(lambda: load_folders(supabase))
         steps = plan_seed(folders)

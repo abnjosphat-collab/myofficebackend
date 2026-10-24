@@ -90,9 +90,14 @@ TABLES: dict[str, dict[str, Any]] = {
     "lube_schedules": {"rule": "section", "column": "section"},
     "lube_records": {"rule": "inherits", "parent": "lube_schedules", "via": "schedule_id"},
     # -- documents subtree (Batch 5) ---------------------------------------
-    "documents": {"rule": "subtree"},
-    "document_folders": {"rule": "subtree"},
-    "document_activities": {"rule": "subtree"},
+    # Visible iff at or under the scope's root folder: the top-level folder
+    # named for the scope. Unfiled rows (NULL link) are hidden from scoped
+    # viewers, same as the NULL rule. Activities resolve through their
+    # document and are never listed standalone (the router guards the doc).
+    "documents": {"rule": "subtree", "via": "folder_ref"},
+    "document_folders": {"rule": "subtree", "via": "id"},
+    "document_activities": {"rule": "subtree", "via": "document_id",
+                            "parent": "documents", "parent_via": "folder_ref"},
 }
 
 
@@ -133,6 +138,40 @@ def person_ids_for(db: Any, user: Optional[dict]) -> Optional[dict]:
     short-circuits on None). Routers call this once per request."""
     scope = viewer_scope(user)
     return scope_person_ids(db, scope) if scope is not None else None
+
+
+def scope_root_id(folders: list, scope: str) -> Optional[str]:
+    """The scope's root folder: the top-level folder named for the scope.
+
+    Case-insensitive (name_taken() already forbids two top-level folders
+    that differ only by case, so the match is unambiguous); exact match
+    wins for determinism. None when nobody has made the root yet — the
+    scoped library is then honestly empty.
+    """
+    tops = [f for f in folders if not f.get("parent_id")]
+    for folder in tops:
+        if (folder.get("name") or "") == scope:
+            return str(folder["id"])
+    lowered = scope.lower()
+    for folder in tops:
+        if str(folder.get("name") or "").lower() == lowered:
+            return str(folder["id"])
+    return None
+
+
+def scope_subtree_ids(folders: list, scope: str) -> list:
+    """Root + descendants as strings, [] when there is no root yet. Pure:
+    routers that already loaded the folders pass them in."""
+    from app.document_rules import descendant_ids
+
+    root = scope_root_id(folders, scope)
+    return descendant_ids(folders, root) if root else []
+
+
+def load_scope_subtree_ids(db: Any, scope: str) -> list:
+    """scope_subtree_ids() with the folders fetched (minimal columns)."""
+    resp = db.table("document_folders").select("id,parent_id,name").execute()
+    return scope_subtree_ids(resp.data or [], scope)
 
 
 def _rule(table: str, scope: str) -> dict:
@@ -226,6 +265,10 @@ def apply_list_scope(query: Any, user: Optional[dict], table: str, db: Any = Non
         return _in_or_empty(query, rule["via"], [r["id"] for r in (resp.data or [])], True)
     if kind == "members":
         raise RuntimeError(f"Table {table!r} filters in Python (filter_rows), not in the query")
+    if kind == "subtree":
+        if "parent" in rule:
+            raise RuntimeError(f"Table {table!r} is visible through its parent — guard the document, never list it standalone")
+        return _in_or_empty(query, rule["via"], load_scope_subtree_ids(db, scope), False)
     raise RuntimeError(f"Table {table!r} uses rule {kind!r}, which has no list predicate")
 
 
@@ -276,6 +319,19 @@ def row_visible(user: Optional[dict], table: str, row: dict, db: Any = None,
         if not rows:
             return False
         return row_visible(user, parent, rows[0], db, person_ids)
+    if kind == "subtree":
+        link = row.get(rule["via"])
+        if "parent" in rule:
+            if link is None:
+                return False
+            resp = db.table(rule["parent"]).select("id," + rule["parent_via"]).eq("id", link).execute()
+            grows = resp.data or []
+            if not grows:
+                return False
+            link = grows[0].get(rule["parent_via"])
+        if link is None:
+            return False
+        return str(link) in load_scope_subtree_ids(db, scope)
     raise RuntimeError(f"Table {table!r} uses rule {kind!r}, which has no row check yet")
 
 

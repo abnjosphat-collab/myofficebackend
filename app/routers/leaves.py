@@ -5,13 +5,13 @@ from typing import Optional, List, Dict, Any
 from datetime import date, datetime
 from app.clock import today_harare
 from app.supabase_client import supabase, rows, one_row
-from app.auth import get_current_user, require_role, require_role_if_status_in
+from app.auth import get_current_user, get_current_user_optional, require_role, require_role_if_status_in
 from app.db_helpers import fetch_all_pages, get_or_404
 from app.leave_days import calculate_total_days
 from app.errors import server_error
 from app.audit import decision_stamp, has_columns
 from app.concurrency import assert_unchanged, touch
-from app.scope import apply_list_scope, assert_row_visible, person_ids_for, row_visible, stamp_create, viewer_scope
+from app.scope import apply_list_scope, assert_row_visible, filter_rows, person_ids_for, row_visible, stamp_create, viewer_scope
 from app.leave_conflicts import INACTIVE_STATUSES as LEAVE_INACTIVE, conflict_message as leave_conflict_message, overlapping_leave
 import logging
 import traceback
@@ -197,10 +197,12 @@ async def get_leaves(status: Optional[str] = None, leave_type: Optional[str] = N
 
 # ---------- GET leave stats ----------
 @router.get("/stats/summary")  # deliberately open — aggregate counts, not individual records
-async def get_leave_stats():
+async def get_leave_stats(current_user: Optional[dict] = Depends(get_current_user_optional)):
+    # Open as before; a signed-in scoped viewer counts their people only.
     try:
         response = supabase.table("leaves").select("*").execute()
-        data = rows(response)
+        data = filter_rows(current_user, "leaves", rows(response), supabase,
+                           person_ids_for(supabase, current_user))
         today = today_harare().isoformat()
         total = len(data)
         pending = sum(1 for l in data if l.get('status') == 'pending')

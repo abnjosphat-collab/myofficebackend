@@ -3,13 +3,13 @@ from pydantic import BaseModel
 from typing import Optional, List, Dict, Any
 from datetime import datetime, date
 from app.supabase_client import supabase, one_row
-from app.auth import get_current_user, require_role
+from app.auth import get_current_user, get_current_user_optional, require_role
 from app.aggregation import count_by
 from app.db_helpers import apply_date_range, fetch_all_pages, get_or_404
 from app.serialization import encode_json_fields, decode_json_fields
 from app.errors import server_error
 from app.concurrency import assert_unchanged
-from app.scope import apply_list_scope, assert_row_visible, person_ids_for, stamp_create, viewer_scope
+from app.scope import apply_list_scope, assert_row_visible, filter_rows, person_ids_for, stamp_create, viewer_scope
 import logging
 
 logger = logging.getLogger(__name__)
@@ -207,9 +207,12 @@ async def delete_timesheet_entry(entry_id: int, current_user: dict = Depends(req
 @router.get("/stats/summary")  # deliberately open — aggregate counts, not individual records
 async def get_timesheet_stats(
     start_date: Optional[date] = Query(None),
-    end_date: Optional[date] = Query(None)
+    end_date: Optional[date] = Query(None),
+    current_user: Optional[dict] = Depends(get_current_user_optional),
 ):
-    """Get summary statistics for timesheets"""
+    """Get summary statistics for timesheets.
+
+    Open as before; a signed-in scoped viewer counts their people only."""
     try:
         def _base_query():
             q = supabase.table("timesheets").select("*")
@@ -220,6 +223,8 @@ async def get_timesheet_stats(
             ).order("date", desc=False).order("id", desc=False)
 
         records = fetch_all_pages(lambda s, e: _base_query().range(s, e).execute())
+        records = filter_rows(current_user, "timesheets", records, supabase,
+                              person_ids_for(supabase, current_user))
         
         # Simple calculations
         total_entries = len(records)
