@@ -291,3 +291,18 @@ Plumbing + obvious UI; no per-module filtering yet (Batches 2–5).
   documents suites 140 green; full backend 2567 passed, zero failures;
   pyright 181/196. Frontend: tsc/eslint clean, vitest 1957 passed,
   docs:check clean.
+
+## Batch 6 — decided (branch projects-scope-6, doc only, no build)
+
+- Owner chose: Tools workspace stays whole-mine for section-limited
+  accounts. A scoped user with a Tools account sees all of Tools.
+- Why it was a real choice: Tools is a separate app sharing the
+  deployment — own tools_workspace_* tables, own username/password
+  login with own session tokens, own employee mirror; a MyOffice scope
+  never reaches it. The register does carry section/department, so
+  slicing the data was possible, but scoping would need a Tools
+  account <-> MyOffice user/scope link plus enforcement across
+  issue/return/history/gate-passes — the highest-risk subsystem to
+  touch (atomic RPCs, undo/redo). Nav-hiding alone would have been
+  obscurity, not enforcement, so it was offered and declined.
+- No code changed in this batch; this entry is the record.
