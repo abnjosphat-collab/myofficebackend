@@ -48,4 +48,5 @@ router = CrudRouter(
     order_by="sampled_date", order_desc=True,
     filters={"monitoring_type": "monitoring_type", "result": "result", "equipment_id": "equipment_id"},
     not_found="Reading not found",
+    scope_table="condition_monitoring",
 ).router

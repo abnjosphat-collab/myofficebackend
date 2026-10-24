@@ -32,6 +32,7 @@ from app.aggregation import count_by
 from app.db_helpers import fetch_all_pages, get_or_404
 from app.crud_router import CrudRouter
 from app.uploads import read_and_validate_upload, storage_content_type, NOTICE_ATTACHMENT_EXTS
+from app.scope import assert_row_visible, viewer_scope
 from app.errors import server_error
 import logging, uuid as uuid_module
 
@@ -66,6 +67,7 @@ class NoticeCreate(BaseModel):
     requires_acknowledgment: bool = False
     author: Optional[str] = None
     department: Optional[str] = "General"
+    section: Optional[str] = None
     expires_at: Optional[DateType] = None
     target_audience: Optional[str] = "All Employees"
     notification_type: Optional[str] = "General Announcement"
@@ -82,6 +84,7 @@ class NoticeUpdate(BaseModel):
     requires_acknowledgment: Optional[bool] = None
     author: Optional[str] = None
     department: Optional[str] = None
+    section: Optional[str] = None
     expires_at: Optional[DateType] = None
     target_audience: Optional[str] = None
     notification_type: Optional[str] = None
@@ -110,6 +113,7 @@ router = CrudRouter(
     before_create=_dates_to_iso,
     before_update=_dates_to_iso,
     id_type=str,
+    scope_table="notices",
 ).router
 
 
@@ -155,9 +159,10 @@ async def upload_notice_attachment(file: UploadFile = File(...)):
 
 # GET single notice — no generic-base equivalent (CrudRouter has no get-by-id).
 @router.get("/{notice_id}", dependencies=[Depends(get_current_user)])
-async def get_notice(notice_id: str):
+async def get_notice(notice_id: str, current_user: dict = Depends(get_current_user)):
     try:
-        return get_or_404(supabase, "notices", notice_id, detail="Notice not found")
+        row = get_or_404(supabase, "notices", notice_id, detail="Notice not found")
+        return assert_row_visible(current_user, "notices", row, detail="Notice not found")
     except HTTPException:
         raise
     except Exception as e:
@@ -166,12 +171,15 @@ async def get_notice(notice_id: str):
 
 # GET statistics
 @router.get("/stats/summary", dependencies=[Depends(get_current_user)])
-async def get_stats():
+async def get_stats(current_user: dict = Depends(get_current_user)):
     try:
         notices = await run_in_threadpool(lambda: fetch_all_pages(
             lambda start, end: supabase.table("notices").select("*")
             .order("id", desc=False).range(start, end).execute()
         ))
+        scope = viewer_scope(current_user)
+        if scope is not None:
+            notices = [n for n in notices if n.get("section") == scope]
 
         stats = {
             "total_notices": len(notices),

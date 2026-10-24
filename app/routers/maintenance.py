@@ -4,7 +4,7 @@ from pydantic import BaseModel, Field, field_validator
 from typing import Optional, List, Dict, Any
 from datetime import datetime, date
 from app.supabase_client import supabase, rows, one_row
-from app.auth import get_current_user, require_role
+from app.auth import get_current_user, get_current_user_optional, require_role
 from app.cache import cached, cache_get, cache_set, build_key, invalidate_namespace
 from app.serialization import convert_dates_to_iso
 from app.aggregation import count_by
@@ -12,7 +12,7 @@ from app.db_helpers import fetch_all_pages, get_or_404
 from app.concurrency import assert_unchanged
 from app.maintenance_events import append_event, diff_changes
 from app.errors import server_error
-from app.scope import apply_list_scope, person_ids_for, stamp_create, viewer_scope
+from app.scope import apply_list_scope, assert_row_visible, person_ids_for, stamp_create, viewer_scope
 from app.clock import today_harare
 import logging
 import json
@@ -90,6 +90,7 @@ class WorkOrderCreate(BaseModel):
     status: str = "pending"
     priority: str = "medium"
     department: Optional[str] = None
+    section: Optional[str] = None
     equipment: Optional[str] = None
     due_date: Optional[date] = None
     progress: int = 0
@@ -156,6 +157,7 @@ class WorkOrderUpdate(BaseModel):
     status: Optional[str] = None
     priority: Optional[str] = None
     department: Optional[str] = None
+    section: Optional[str] = None
     equipment: Optional[str] = None
     due_date: Optional[date] = None
     progress: Optional[int] = None
@@ -282,9 +284,10 @@ async def get_work_orders(
     # feed) can ask for them directly instead of downloading the entire table
     # and slicing client-side.
     limit: Optional[int] = None,
+    current_user: dict = Depends(get_current_user),
 ):
     cache_key = build_key(
-        "work_orders", status=status, priority=priority, department=department,
+        "work_orders", scope=viewer_scope(current_user), status=status, priority=priority, department=department,
         allocated_to=allocated_to, to_department=to_department, limit=limit,
     )
     cached_result = await cache_get(cache_key)
@@ -303,6 +306,7 @@ async def get_work_orders(
             query = query.eq("allocated_to", allocated_to)
         if to_department and to_department != 'all':
             query = query.eq("to_department", to_department)
+        query = apply_list_scope(query, current_user, "work_orders")
 
         query = query.order("created_at", desc=True).order("id", desc=True)
         if limit:
@@ -366,6 +370,7 @@ async def create_work_order(work_order: WorkOrderCreate, current_user: dict = De
 
         # Prepare data for database
         data_to_insert = prepare_data_for_db(data_to_insert)
+        data_to_insert = stamp_create(current_user, "work_orders", data_to_insert)
         data_to_insert["created_at"] = datetime.utcnow().isoformat()
         data_to_insert["updated_at"] = datetime.utcnow().isoformat()
 
@@ -410,9 +415,10 @@ async def create_work_order(work_order: WorkOrderCreate, current_user: dict = De
         raise server_error(e, "Creating work order")
 
 @router.get("/work-orders/{work_order_id}", dependencies=[Depends(get_current_user)])
-async def get_work_order(work_order_id: int):
+async def get_work_order(work_order_id: int, current_user: dict = Depends(get_current_user)):
     try:
         row = get_or_404(supabase, "work_orders", work_order_id, detail="Work order not found")
+        assert_row_visible(current_user, "work_orders", row, detail="Work order not found")
         return prepare_data_for_response(row)
 
 
@@ -433,6 +439,9 @@ async def update_work_order(work_order_id: int, updated: WorkOrderUpdate, curren
         # being silently ignored. Without this there is no way to clear a due date —
         # the save would report success and change nothing.
         data_to_update = updated.model_dump(exclude_unset=True)
+        if viewer_scope(current_user) is not None:
+            merged = {**before, **data_to_update}
+            assert_row_visible(current_user, "work_orders", merged, detail="Work order not found")
         # The version is a precondition, not a value to store.
         expected_version = data_to_update.pop("version", None)
         assert_unchanged(before, data_to_update.pop("expected_updated_at", None))
@@ -495,6 +504,7 @@ def _version_conflict(current: dict) -> HTTPException:
 async def delete_work_order(work_order_id: int, current_user: dict = Depends(require_role('manager'))):
     try:
         existing = get_or_404(supabase, "work_orders", work_order_id, detail="Work order not found")
+        assert_row_visible(current_user, "work_orders", existing, detail="Work order not found")
 
         supabase.table("work_orders").delete().eq("id", work_order_id).execute()
         append_event(
@@ -512,13 +522,16 @@ async def delete_work_order(work_order_id: int, current_user: dict = Depends(req
         raise server_error(e, "Deleting work order")
 
 @router.get("/work-orders/{work_order_id}/events", dependencies=[Depends(get_current_user)])
-async def get_work_order_events(work_order_id: int):
+async def get_work_order_events(work_order_id: int, current_user: dict = Depends(get_current_user)):
     """The audit trail of one work order, newest first.
 
     A work order created before the trail began simply has no rows; the screen says so. A failed read is a
     real error (500 or the upstream status), never an empty list.
     """
     try:
+        if viewer_scope(current_user) is not None:
+            parent = one_row(supabase.table("work_orders").select("*").eq("id", work_order_id).execute())
+            assert_row_visible(current_user, "work_orders", parent, detail="Work order not found")
         resp = (
             supabase.table("maintenance_events").select("*")
             .eq("entity", "work_order").eq("entity_id", work_order_id)
@@ -532,9 +545,12 @@ async def get_work_order_events(work_order_id: int):
 
 
 @router.get("/work-orders/{work_order_id}/comments", dependencies=[Depends(get_current_user)])
-async def get_work_order_comments(work_order_id: int):
+async def get_work_order_comments(work_order_id: int, current_user: dict = Depends(get_current_user)):
     """Comments on a work order, oldest first (a conversation reads downwards)."""
     try:
+        if viewer_scope(current_user) is not None:
+            parent = one_row(supabase.table("work_orders").select("*").eq("id", work_order_id).execute())
+            assert_row_visible(current_user, "work_orders", parent, detail="Work order not found")
         resp = (
             supabase.table("work_order_comments").select("*")
             .eq("work_order_id", work_order_id)
@@ -556,6 +572,7 @@ async def add_work_order_comment(
     """Add a comment to a work order. Any signed-in user above viewer may comment."""
     try:
         wo = get_or_404(supabase, "work_orders", work_order_id, detail="Work order not found")
+        assert_row_visible(current_user, "work_orders", wo, detail="Work order not found")
         resp = supabase.table("work_order_comments").insert({
             "work_order_id": work_order_id,
             "body": comment.body,
@@ -578,9 +595,10 @@ async def add_work_order_comment(
 
 
 @router.get("/work-orders/allocated/{allocated_to}", dependencies=[Depends(get_current_user)])
-async def get_work_orders_by_allocated(allocated_to: str):
+async def get_work_orders_by_allocated(allocated_to: str, current_user: dict = Depends(get_current_user)):
     try:
-        response = supabase.table("work_orders").select("*").eq("allocated_to", allocated_to).order("created_at", desc=True).execute()
+        _q = apply_list_scope(supabase.table("work_orders").select("*").eq("allocated_to", allocated_to), current_user, "work_orders")
+        response = _q.order("created_at", desc=True).execute()
 
         records = rows(response)
         processed_records = []
@@ -597,21 +615,24 @@ async def get_work_orders_by_allocated(allocated_to: str):
 # ==================== WORK ORDERS STATISTICS ====================
 @router.get("/work-orders/stats/summary")
 @cached("work_orders", ttl=60)
-async def get_work_order_stats():
+async def get_work_order_stats(current_user: Optional[dict] = Depends(get_current_user_optional)):
     try:
         # Get total records count
-        records_response = supabase.table("work_orders").select("id", count="exact").execute()
+        _q = apply_list_scope(supabase.table("work_orders").select("id", count="exact"), current_user, "work_orders")
+        records_response = _q.execute()
         total_records = len(rows(records_response))
 
         # Get records by status + priority (one query — both come off the same rows)
-        status_priority_response = supabase.table("work_orders").select("status, priority").execute()
+        _q = apply_list_scope(supabase.table("work_orders").select("status, priority"), current_user, "work_orders")
+        status_priority_response = _q.execute()
         status_priority_rows = rows(status_priority_response)
         status_counts = count_by(status_priority_rows, 'status')
         priority_counts = count_by(status_priority_rows, 'priority')
 
         # Count overdue work orders ("today" in Africa/Harare, not server-local).
         today = today_harare()
-        records_all = supabase.table("work_orders").select("due_date, status").execute()
+        _q = apply_list_scope(supabase.table("work_orders").select("due_date, status"), current_user, "work_orders")
+        records_all = _q.execute()
         overdue_count = 0
 
         for record in rows(records_all):
@@ -627,7 +648,8 @@ async def get_work_order_stats():
                     continue
 
         # Calculate average progress
-        progress_response = supabase.table("work_orders").select("progress").execute()
+        _q = apply_list_scope(supabase.table("work_orders").select("progress"), current_user, "work_orders")
+        progress_response = _q.execute()
         total_progress = 0
         count_with_progress = 0
 
@@ -727,14 +749,17 @@ async def create_ppe_record(record: PPEIssueCreate, current_user: dict = Depends
 
 # ==================== MAINTENANCE DASHBOARD STATS ====================
 @router.get("/dashboard/stats", dependencies=[Depends(get_current_user)])
-async def get_maintenance_dashboard_stats():
+async def get_maintenance_dashboard_stats(current_user: dict = Depends(get_current_user)):
     """Combined stats for maintenance dashboard"""
     try:
         # Get work order stats
-        work_order_stats = await get_work_order_stats()
+        work_order_stats = await get_work_order_stats(current_user=current_user)
         
         # Get PPE stats (you can add PPE stats here too)
-        ppe_response = supabase.table("ppe_records").select("id", count="exact").execute()
+        _ppe_q = supabase.table("ppe_records").select("id", count="exact")
+        if viewer_scope(current_user) is not None:
+            _ppe_q = apply_list_scope(_ppe_q, current_user, "ppe_records", supabase, person_ids_for(supabase, current_user))
+        ppe_response = _ppe_q.execute()
         total_ppe = len(rows(ppe_response))
         
         # Calculate overall efficiency

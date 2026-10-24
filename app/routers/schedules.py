@@ -17,9 +17,10 @@ from fastapi import APIRouter, HTTPException, Depends, Header
 from pydantic import BaseModel, Field, field_validator
 
 from app.clock import today_harare
-from app.supabase_client import supabase
+from app.supabase_client import one_row, supabase
 from app.auth import get_current_user, require_role
 from app.routers.compressors import ensure_weekly_routine_schedules
+from app.scope import apply_list_scope, assert_row_visible, stamp_create, viewer_scope
 from app.errors import server_error
 import logging
 
@@ -57,6 +58,7 @@ class ScheduleBase(BaseModel):
     advance_days: int = 0
     active: bool = True
     next_due_date: Optional[date] = None
+    section: Optional[str] = None
 
     @field_validator('priority')
     @classmethod
@@ -95,6 +97,7 @@ class ScheduleUpdate(BaseModel):
     advance_days: Optional[int] = None
     active: Optional[bool] = None
     next_due_date: Optional[date] = None
+    section: Optional[str] = None
 
 
 # ---------- Recurrence ----------
@@ -191,7 +194,8 @@ def _next_work_order_number() -> str:
 @router.get("")
 async def list_schedules(user: dict = Depends(get_current_user)):
     try:
-        resp = supabase.table('maintenance_schedules').select('*').order('created_at', desc=True).execute()
+        _q = apply_list_scope(supabase.table('maintenance_schedules').select('*'), user, 'maintenance_schedules')
+        resp = _q.order('created_at', desc=True).execute()
         return _rows(resp)
     except Exception as e:
         logger.error(f"list_schedules failed: {e}")
@@ -202,6 +206,7 @@ async def list_schedules(user: dict = Depends(get_current_user)):
 async def create_schedule(payload: ScheduleCreate, user: dict = Depends(require_role('manager'))):
     body = payload.model_dump(mode='json')
     body['created_by'] = user['user_id']
+    body = stamp_create(user, 'maintenance_schedules', body)
     if not body.get('next_due_date'):
         body['next_due_date'] = next_occurrence(body, today_harare()).isoformat()
     try:
@@ -219,6 +224,10 @@ async def update_schedule(schedule_id: int, payload: ScheduleUpdate, user: dict 
     body = payload.model_dump(mode='json', exclude_unset=True)
     if not body:
         raise HTTPException(status_code=400, detail="No fields to update.")
+    if viewer_scope(user) is not None:
+        found = (supabase.table('maintenance_schedules').select('*').eq('id', schedule_id).execute()).data or []
+        merged = {**(found[0] if found else {}), **body}
+        assert_row_visible(user, 'maintenance_schedules', merged, detail="Schedule not found.")
     try:
         resp = supabase.table('maintenance_schedules').update(body).eq('id', schedule_id).execute()
         rows = _rows(resp)
@@ -235,6 +244,9 @@ async def update_schedule(schedule_id: int, payload: ScheduleUpdate, user: dict 
 @router.delete("/{schedule_id}")
 async def delete_schedule(schedule_id: int, user: dict = Depends(require_role('manager'))):
     try:
+        if viewer_scope(user) is not None:
+            found = (supabase.table('maintenance_schedules').select('*').eq('id', schedule_id).execute()).data or []
+            assert_row_visible(user, 'maintenance_schedules', found[0] if found else None, detail="Schedule not found.")
         supabase.table('maintenance_schedules').delete().eq('id', schedule_id).execute()
         return {"ok": True}
     except Exception as e:
@@ -245,6 +257,9 @@ async def delete_schedule(schedule_id: int, user: dict = Depends(require_role('m
 @router.get("/{schedule_id}/runs")
 async def schedule_runs(schedule_id: int, user: dict = Depends(get_current_user)):
     """What this schedule has raised so far."""
+    if viewer_scope(user) is not None:
+        parent = one_row(supabase.table('maintenance_schedules').select('*').eq('id', schedule_id).execute())
+        assert_row_visible(user, 'maintenance_schedules', parent, detail="Schedule not found.")
     try:
         resp = (
             supabase.table('maintenance_schedule_runs')
@@ -284,6 +299,7 @@ def _generate_one(s: dict, today: date) -> Optional[dict]:
     work_order = {
         'work_order_number': _next_work_order_number(),
         'title': s['name'],
+        'section': s.get('section'),
         'equipment_info': s.get('equipment_info') or '',
         'to_department': s.get('to_department') or '',
         'allocated_to': s.get('allocated_to') or '',

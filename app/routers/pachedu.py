@@ -9,6 +9,7 @@ from app.supabase_client import supabase, rows, one_row
 from app.auth import get_current_user, require_role
 from app.aggregation import count_by
 from app.db_helpers import fetch_all_pages, get_or_404, apply_date_range, or_ilike, distinct_suggestions, status_choice_validator
+from app.scope import apply_list_scope, assert_row_visible, stamp_create, viewer_scope
 from app.errors import server_error
 import logging
 from datetime import datetime
@@ -32,7 +33,7 @@ class PacheduReportBase(BaseModel):
     observerName: Optional[str] = ""
     dept: Optional[str] = ""
     sdwt: Optional[str] = ""
-    sectionChoice: str = Field(..., pattern="^(Mechanical|Electrical)$")
+    sectionChoice: str = Field(..., pattern="^(Mechanical|Electrical|Projects)$")
     checklist: List[str] = []
     status: str = "draft"
 
@@ -118,7 +119,8 @@ async def get_pachedu_reports(
     from_date: Optional[str] = Query(None, description="Start date YYYY-MM-DD"),
     to_date: Optional[str] = Query(None, description="End date YYYY-MM-DD"),
     limit: int = Query(100, ge=1, le=1000),
-    offset: int = Query(0, ge=0)
+    offset: int = Query(0, ge=0),
+    current_user: dict = Depends(get_current_user)
 ):
     try:
         logger.info("Fetching Pachedu reports...")
@@ -140,6 +142,7 @@ async def get_pachedu_reports(
             query = query.eq("status", status)
 
         query = apply_date_range(query, "date", from_date, to_date)
+        query = apply_list_scope(query, current_user, "pachedu_reports")
 
         # Order by most recent
         query = query.order("created_at", desc=True).order("id", desc=True)
@@ -157,17 +160,17 @@ async def get_pachedu_reports(
 
 # GET unique departments for auto-complete
 @router.get("/suggestions/departments", dependencies=[Depends(get_current_user)])
-async def get_department_suggestions(search: Optional[str] = Query(None)):
-    return await distinct_suggestions(supabase, "pachedu_reports", "dept", search, "department")
+async def get_department_suggestions(search: Optional[str] = Query(None), current_user: dict = Depends(get_current_user)):
+    return await distinct_suggestions(supabase, "pachedu_reports", "dept", search, "department", current_user)
 
 # GET stats overview
 @router.get("/stats/overview", dependencies=[Depends(get_current_user)])
-async def get_pachedu_stats():
+async def get_pachedu_stats(current_user: dict = Depends(get_current_user)):
     try:
         logger.info("Fetching Pachedu stats...")
         
         # Get all reports
-        query = supabase.table("pachedu_reports").select("*").order("id")
+        query = apply_list_scope(supabase.table("pachedu_reports").select("*").order("id"), current_user, "pachedu_reports")
         reports = await run_in_threadpool(lambda: fetch_all_pages(lambda start,end:query.range(start,end).execute(),extract_rows=rows))
         
         # Calculate stats
@@ -178,6 +181,9 @@ async def get_pachedu_stats():
             "Mechanical": 0,
             "Electrical": 0
         }
+        scope = viewer_scope(current_user)
+        if scope is not None and scope not in by_section:
+            by_section[scope] = 0
         
         # Count by behaviour
         by_behaviour = {
@@ -249,7 +255,7 @@ async def get_pachedu_stats():
 
 # GET single report
 @router.get("/{report_id}", dependencies=[Depends(get_current_user)])
-async def get_pachedu_report(report_id: str):
+async def get_pachedu_report(report_id: str, current_user: dict = Depends(get_current_user)):
     try:
         logger.info(f"Fetching Pachedu report {report_id}")
         
@@ -262,6 +268,7 @@ async def get_pachedu_report(report_id: str):
         db_report = one_row(report_response)
         if db_report is None:
             raise HTTPException(status_code=404, detail="Report not found")
+        assert_row_visible(current_user, "pachedu_reports", db_report, detail="Report not found")
 
         camel_report = map_db_pachedu_to_camel(db_report)
         
@@ -305,6 +312,7 @@ async def create_pachedu_report(report: PacheduReportCreate, current_user: dict 
             "submitted_at": now if report.status == "submitted" else None
         }
         
+        report_data = stamp_create(current_user, "pachedu_reports", report_data)
         logger.info(f"Inserting report: {report_data}")
         
         report_response = supabase.table("pachedu_reports")\
@@ -372,6 +380,9 @@ async def update_pachedu_report(report_id: str, updated: PacheduReportUpdate, cu
                 data_to_update[field_mapping[key]] = value
 
         # Always update updated_at timestamp
+        if viewer_scope(current_user) is not None:
+            merged = {**existing_row, **data_to_update}
+            assert_row_visible(current_user, "pachedu_reports", merged, detail="Report not found")
         data_to_update["updated_at"] = datetime.utcnow().isoformat()
         
         # If status is being set to submitted, set submitted_at
@@ -413,8 +424,10 @@ async def delete_pachedu_report(report_id: str, current_user: dict = Depends(req
             .eq("id", report_id)\
             .execute()
 
-        if one_row(existing) is None:
+        existing_row = one_row(existing)
+        if existing_row is None:
             raise HTTPException(status_code=404, detail="Report not found")
+        assert_row_visible(current_user, "pachedu_reports", existing_row, detail="Report not found")
 
         supabase.table("pachedu_reports")\
             .delete()\

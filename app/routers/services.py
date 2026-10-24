@@ -3,10 +3,11 @@ from fastapi import APIRouter, HTTPException, UploadFile, File, Depends
 from pydantic import BaseModel
 from typing import Any, Optional, cast
 from datetime import datetime, date
-from app.supabase_client import supabase
+from app.supabase_client import one_row, supabase
 from app.auth import get_current_user, require_role
 from app.uploads import read_and_validate_upload, storage_content_type, DOCUMENT_EXTS
 from app.db_helpers import fetch_all_pages
+from app.scope import apply_list_scope, assert_row_visible, stamp_create, viewer_scope
 from app.errors import server_error
 from starlette.concurrency import run_in_threadpool
 
@@ -48,6 +49,7 @@ class ServiceIn(BaseModel):
     amount: str = ''
     category: str = ''
     general_comments: str = ''
+    section: Optional[str] = None
     # Stage 1: Planning
     planning_signed: bool = False
     planning_signed_by: str = ''
@@ -106,13 +108,13 @@ def _serialize(data: dict) -> dict:
 
 @router.get("", dependencies=[Depends(get_current_user)])
 @router.get("/", dependencies=[Depends(get_current_user)])
-async def list_services():
+async def list_services(current_user: dict = Depends(get_current_user)):
     try:
         # Paged: PostgREST cuts a plain select at 1,000 rows, which would silently drop the oldest records.
-        return await run_in_threadpool(lambda: fetch_all_pages(
-            lambda start, end: supabase.table("services").select(LIST_COLUMNS)
-            .order("created_at", desc=True).order("id", desc=True).range(start, end).execute()
-        ))
+        def _page(start, end):
+            q = apply_list_scope(supabase.table("services").select(LIST_COLUMNS), current_user, "services")
+            return q.order("created_at", desc=True).order("id", desc=True).range(start, end).execute()
+        return await run_in_threadpool(lambda: fetch_all_pages(_page))
     except Exception as e:
         logger.error(f"list_services error: {e}")
         raise server_error(e, "Loading services")
@@ -123,6 +125,7 @@ async def list_services():
 async def create_service(body: ServiceIn, current_user: dict = Depends(get_current_user)):
     try:
         data = _serialize(body.model_dump())
+        data = stamp_create(current_user, "services", data)
         now = datetime.utcnow().isoformat()
         data['created_at'] = now
         data['updated_at'] = now
@@ -267,6 +270,10 @@ async def ocr_document(file: UploadFile = File(...), current_user: dict = Depend
 async def update_service(service_id: str, body: ServiceIn, current_user: dict = Depends(get_current_user)):
     try:
         data = _serialize(body.model_dump(exclude_none=False))
+        if viewer_scope(current_user) is not None:
+            found = (supabase.table("services").select("*").eq("id", service_id).execute()).data or []
+            merged = {**(found[0] if found else {}), **data}
+            assert_row_visible(current_user, "services", merged, detail="Service record not found")
         data['updated_at'] = datetime.utcnow().isoformat()
         r = supabase.table("services").update(data).eq("id", service_id).execute()
         if not r.data:
@@ -280,16 +287,17 @@ async def update_service(service_id: str, body: ServiceIn, current_user: dict = 
 
 
 @router.get("/{service_id}/signatures", dependencies=[Depends(get_current_user)])
-async def get_stage_signatures(service_id: str):
+async def get_stage_signatures(service_id: str, current_user: dict = Depends(get_current_user)):
     """The signature images of one record, as {stage: data URL}."""
     try:
-        r = supabase.table("services").select("stage_signatures").eq("id", service_id).execute()
+        r = supabase.table("services").select("stage_signatures,section").eq("id", service_id).execute()
     except Exception as e:
         logger.error(f"get_stage_signatures error: {e}")
         raise server_error(e, "Loading stage signatures")
     rows = cast(list[dict[str, Any]], r.data)
     if not rows:
         raise HTTPException(404, "Service record not found")
+    assert_row_visible(current_user, "services", rows[0], detail="Service record not found")
     return rows[0].get("stage_signatures") or {}
 
 
@@ -301,10 +309,11 @@ async def put_stage_signature(service_id: str, stage: str, body: StageSignatureI
     if not body.image_data.startswith("data:image/") or len(body.image_data) > MAX_SIGNATURE_CHARS:
         raise HTTPException(422, "The signature must be an image no larger than about 500 KB.")
     try:
-        current = supabase.table("services").select("stage_signatures").eq("id", service_id).execute()
+        current = supabase.table("services").select("stage_signatures,section").eq("id", service_id).execute()
         rows = cast(list[dict[str, Any]], current.data)
         if not rows:
             raise HTTPException(404, "Service record not found")
+        assert_row_visible(current_user, "services", rows[0], detail="Service record not found")
         signatures = {**(rows[0].get("stage_signatures") or {}), stage: body.image_data}
         supabase.table("services").update({"stage_signatures": signatures, "updated_at": datetime.utcnow().isoformat()}).eq("id", service_id).execute()
         return {"ok": True}
@@ -318,6 +327,9 @@ async def put_stage_signature(service_id: str, stage: str, body: StageSignatureI
 @router.delete("/{service_id}")
 async def delete_service(service_id: str, current_user: dict = Depends(require_role('manager'))):
     try:
+        if viewer_scope(current_user) is not None:
+            found = (supabase.table("services").select("*").eq("id", service_id).execute()).data or []
+            assert_row_visible(current_user, "services", found[0] if found else None, detail="Service record not found")
         supabase.table("services").delete().eq("id", service_id).execute()
         return {"ok": True}
     except Exception as e:
@@ -331,8 +343,11 @@ BUCKET = "service-attachments"
 
 
 @router.get("/{service_id}/attachments", dependencies=[Depends(get_current_user)])
-async def list_attachments(service_id: str):
+async def list_attachments(service_id: str, current_user: dict = Depends(get_current_user)):
     try:
+        if viewer_scope(current_user) is not None:
+            parent = one_row(supabase.table("services").select("*").eq("id", service_id).execute())
+            assert_row_visible(current_user, "services", parent, detail="Service record not found")
         r = (supabase.table("service_attachments")
              .select("*")
              .eq("service_id", service_id)
@@ -345,6 +360,9 @@ async def list_attachments(service_id: str):
 
 @router.post("/{service_id}/attachments")
 async def upload_attachment(service_id: str, file: UploadFile = File(...), current_user: dict = Depends(get_current_user)):
+    if viewer_scope(current_user) is not None:
+        parent = one_row(supabase.table("services").select("*").eq("id", service_id).execute())
+        assert_row_visible(current_user, "services", parent, detail="Service record not found")
     content = await read_and_validate_upload(file, max_bytes=50 * 1024 * 1024, allowed_exts=DOCUMENT_EXTS)
 
     original_name = file.filename or "upload"
@@ -387,10 +405,14 @@ async def upload_attachment(service_id: str, file: UploadFile = File(...), curre
 async def delete_attachment(service_id: str, attachment_id: str, current_user: dict = Depends(require_role('manager'))):
     try:
         row = (supabase.table("service_attachments")
-               .select("storage_path")
+               .select("storage_path,service_id")
                .eq("id", attachment_id)
                .maybe_single()
                .execute())
+        # Scoped only: unscoped deletes stay idempotent (a missing row still
+        # answers ok), exactly as before.
+        if viewer_scope(current_user) is not None:
+            assert_row_visible(current_user, "service_attachments", row.data if row else None, supabase, detail="Attachment not found")
         if row.data and row.data.get("storage_path"):
             try:
                 supabase.storage.from_(BUCKET).remove([row.data["storage_path"]])

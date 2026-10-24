@@ -1,7 +1,7 @@
 # app/routers/breakdowns.py
 from fastapi import APIRouter, HTTPException, Query, Depends
 from starlette.concurrency import run_in_threadpool
-from app.auth import get_current_user, require_role
+from app.auth import get_current_user, get_current_user_optional, require_role
 from pydantic import BaseModel, Field, validator
 from typing import Optional, List
 from datetime import datetime
@@ -13,6 +13,7 @@ from app.cache import cached, cache_get, cache_set, build_key, invalidate_namesp
 from app.serialization import encode_json_fields, decode_json_fields
 from app.supabase_client import rows, one_row
 from app.db_helpers import fetch_all_pages
+from app.scope import apply_list_scope, assert_row_visible, stamp_create, viewer_scope
 from app.errors import server_error
 from app.clock import today_harare, week_start_harare
 
@@ -54,6 +55,7 @@ class BreakdownCreate(BaseModel):
     machine_name: str = Field(..., min_length=1)
     artisan_name: str = Field(..., min_length=1)
     department: str = Field(..., min_length=1)
+    section: Optional[str] = None
     location: str = Field(..., min_length=1)
     breakdown_date: str  # Changed from 'date' to 'breakdown_date'
     breakdown_type: str = Field(..., min_length=1)
@@ -105,6 +107,7 @@ class BreakdownUpdate(BaseModel):
     machine_name: Optional[str] = None
     artisan_name: Optional[str] = None
     department: Optional[str] = None
+    section: Optional[str] = None
     location: Optional[str] = None
     breakdown_date: Optional[str] = None
     breakdown_type: Optional[str] = None
@@ -255,12 +258,13 @@ async def get_breakdowns(
     location: Optional[str] = None,
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
+    current_user: dict = Depends(get_current_user),
 ):
     """Get breakdowns with filtering"""
     db = check_supabase()
 
     cache_key = build_key(
-        "breakdowns", _fn="get_breakdowns", status=status, breakdown_type=breakdown_type,
+        "breakdowns", scope=viewer_scope(current_user), _fn="get_breakdowns", status=status, breakdown_type=breakdown_type,
         department=department, priority=priority, location=location,
         start_date=start_date, end_date=end_date, limit=limit, offset=offset,
     )
@@ -285,6 +289,7 @@ async def get_breakdowns(
             query = query.gte("breakdown_date", start_date)
         if end_date:
             query = query.lte("breakdown_date", end_date)
+        query = apply_list_scope(query, current_user, "breakdowns")
         
         response = await run_in_threadpool(
             lambda: query.order("created_at", desc=True).order("id", desc=True).range(offset, offset + limit - 1).execute()
@@ -325,6 +330,7 @@ async def create_breakdown(breakdown: BreakdownCreate, current_user: dict = Depe
         else:
             data['spares_used'] = []
             data['total_spare_cost'] = 0.0
+        data = stamp_create(current_user, "breakdowns", data)
         data = encode_json_fields(data, ['spares_used'])
         
         # Add timestamps
@@ -341,7 +347,7 @@ async def create_breakdown(breakdown: BreakdownCreate, current_user: dict = Depe
             'breakdown_start', 'breakdown_end', 'work_start', 'work_end',
             'response_time_minutes', 'repair_time_minutes', 'downtime_minutes',
             'net_downtime_minutes', 'total_spare_cost', 'spares_used',
-            'created_at', 'updated_at', 'breakdown_description'
+            'created_at', 'updated_at', 'breakdown_description', 'section'
         ]
         
         # Filter out any unexpected keys
@@ -375,7 +381,7 @@ async def create_breakdown(breakdown: BreakdownCreate, current_user: dict = Depe
         raise server_error(e, "Creating breakdown")
 
 @router.get("/{breakdown_id}", dependencies=[Depends(get_current_user)])
-async def get_breakdown(breakdown_id: str):
+async def get_breakdown(breakdown_id: str, current_user: dict = Depends(get_current_user)):
     """Get breakdown by ID"""
     db = check_supabase()
 
@@ -385,6 +391,7 @@ async def get_breakdown(breakdown_id: str):
 
         if db_breakdown is None:
             raise HTTPException(status_code=404, detail="Breakdown not found")
+        assert_row_visible(current_user, "breakdowns", db_breakdown, detail="Breakdown not found")
 
         return decode_json_fields(db_breakdown, ['spares_used'])
 
@@ -439,6 +446,9 @@ async def update_breakdown(breakdown_id: str, breakdown_update: BreakdownUpdate,
             time_metrics = calculate_time_metrics(full_data)
             update_data.update(time_metrics)
         
+        if viewer_scope(current_user) is not None:
+            merged = {**existing_row, **update_data}
+            assert_row_visible(current_user, "breakdowns", merged, detail="Breakdown not found")
         # Update timestamp
         update_data['updated_at'] = datetime.utcnow().isoformat()
         
@@ -450,7 +460,7 @@ async def update_breakdown(breakdown_id: str, breakdown_update: BreakdownUpdate,
             'breakdown_start', 'breakdown_end', 'work_start', 'work_end',
             'response_time_minutes', 'repair_time_minutes', 'downtime_minutes',
             'net_downtime_minutes', 'total_spare_cost', 'spares_used',
-            'updated_at', 'breakdown_description'
+            'updated_at', 'breakdown_description', 'section'
         ]
         
         update_data = {k: v for k, v in update_data.items() if k in expected_columns}
@@ -484,8 +494,10 @@ async def delete_breakdown(breakdown_id: str, current_user: dict = Depends(requi
     try:
         # Check if exists
         existing = db.table("breakdowns").select("*").eq("id", breakdown_id).execute()
-        if one_row(existing) is None:
+        existing_row = one_row(existing)
+        if existing_row is None:
             raise HTTPException(status_code=404, detail="Breakdown not found")
+        assert_row_visible(current_user, "breakdowns", existing_row, detail="Breakdown not found")
 
         # Delete
         db.table("breakdowns").delete().eq("id", breakdown_id).execute()
@@ -501,13 +513,19 @@ async def delete_breakdown(breakdown_id: str, current_user: dict = Depends(requi
 
 @router.get("/dashboard/overview")
 @cached("breakdowns", ttl=60)
-async def get_dashboard_overview():
-    """Get dashboard metrics"""
+async def get_dashboard_overview(current_user: Optional[dict] = Depends(get_current_user_optional)):
+    """Get dashboard metrics.
+
+    Stays open (homepage KPIs): anonymous callers see whole-mine totals,
+    signed-in scoped viewers see their own slice."""
     db = check_supabase()
     
     try:
         response = db.table("breakdowns").select("*").execute()
         records = rows(response)
+        scope = viewer_scope(current_user)
+        if scope is not None:
+            records = [r for r in records if r.get("section") == scope]
         
         total = len(records)
         open_count = sum(1 for r in records if r.get('status') in ['logged', 'in_progress'])
@@ -589,6 +607,7 @@ async def get_breakdown_heatmap(
     breakdown_type: Optional[str] = Query(None),
     priority: Optional[str] = Query(None),
     location: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
 ):
     """Get comprehensive breakdown analytics with multiple visualizations"""
     db = check_supabase()
@@ -616,7 +635,8 @@ async def get_breakdown_heatmap(
             query = query.eq("priority", priority)
         if location and location != "all":
             query = query.eq("location", location)
-        
+        query = apply_list_scope(query, current_user, "breakdowns")
+
         # An unpaged read silently stops at PostgREST's default first 1,000 rows.
         # Apply a stable order before paging so the charts include the full range.
         query = query.order("breakdown_date", desc=True).order("id", desc=True)
