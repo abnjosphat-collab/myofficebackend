@@ -31,6 +31,7 @@ from app.documents_support import (
     LIST_COLUMNS, apply_filters, found_inside, get_folder, is_uuid, load_folders, log_activity, relevance, require_upgrade, shown,
 )
 from app.errors import server_error
+from app.scope import assert_row_visible, scope_subtree_ids, viewer_scope
 from app.supabase_client import supabase
 from app.uploads import read_and_validate_upload
 
@@ -100,6 +101,12 @@ async def overview(current_user: dict = Depends(get_current_user)):
     except Exception as e:
         raise server_error(e, "Loading the document library")
 
+    scope = viewer_scope(current_user)
+    if scope is not None:
+        ids = set(scope_subtree_ids(folders, scope))
+        folders = [f for f in folders if str(f["id"]) in ids]
+        docs = [d for d in docs if d.get("folder_ref") and str(d["folder_ref"]) in ids]
+
     live = [d for d in docs if not d.get("deleted_at")]
     direct = Counter(str(d["folder_ref"]) for d in live if d.get("folder_ref"))
     total = {str(f["id"]): sum(direct[i] for i in descendant_ids(folders, str(f["id"]))) for f in folders}
@@ -118,9 +125,12 @@ async def overview(current_user: dict = Depends(get_current_user)):
             "tags": [{"tag": k, "count": v} for k, v in tags.most_common()],
             "uploaders": [{"name": k, "count": v} for k, v in people.most_common()],
         },
-        "seeded": any(f.get("seed_key") == "ams" for f in folders),
+        # A scoped viewer can neither seed nor reindex (both are whole-library
+        # jobs, refused with 403): their slice reports itself complete so no
+        # setup banner invites them to press a button that cannot work.
+        "seeded": True if scope is not None else any(f.get("seed_key") == "ams" for f in folders),
         # How many folders of the AMS structure do not exist yet (0 once "Set up the AMS folders" has been pressed).
-        "ams_missing": summarise(plan_seed(folders))["created"],
+        "ams_missing": 0 if scope is not None else summarise(plan_seed(folders))["created"],
     }
 
 
@@ -138,6 +148,14 @@ async def search_documents(
     require_upgrade(supabase)
     terms = search_terms(q)
     added_from, added_to = _check_date(added_from, "From date"), _check_date(added_to, "To date")
+    scope = viewer_scope(current_user)
+    sub_ids: Optional[List[str]] = None
+    if scope is not None:
+        if unfiled:
+            # Unfiled files sit outside every subtree: a scoped search of
+            # them is honestly empty.
+            return {"items": [], "total": 0, "limit": limit, "truncated": False, "terms": terms}
+        sub_ids = scope_subtree_ids(await run_in_threadpool(lambda: load_folders(supabase)), scope)
     try:
         folder_ids: Optional[List[str]] = None
         if folder_id and not unfiled:
@@ -147,6 +165,13 @@ async def search_documents(
                 folder_ids = [folder_id]
             if not all(is_uuid(i) for i in folder_ids):
                 raise HTTPException(status_code=422, detail="Choose a folder from the list.")
+        if sub_ids is not None:
+            if folder_ids is None:
+                folder_ids = sub_ids
+            else:
+                if folder_id not in sub_ids:
+                    raise HTTPException(status_code=404, detail="That folder no longer exists. Reload the page.")
+                folder_ids = [i for i in folder_ids if i in sub_ids]
 
         by_relevance = sort == "relevance" or (sort is None and bool(terms))
         column, descending = sort_spec(None if by_relevance else sort, dir)
@@ -181,8 +206,11 @@ async def upload_document(
     tags: str = Form(""), current_user: dict = Depends(get_current_user),
 ):
     require_upgrade(supabase)
+    scope = viewer_scope(current_user)
     folders = await run_in_threadpool(lambda: load_folders(supabase))
-    folder = get_folder(supabase, folder_id.strip()) if folder_id.strip() else None
+    folder = get_folder(supabase, folder_id.strip(), current_user, folders) if folder_id.strip() else None
+    if scope is not None and folder is None:
+        raise HTTPException(status_code=404, detail=f"Choose a folder inside {scope}.")
     try:
         wanted_tags = normalise_tags(t for t in tags.split(","))
     except ValueError as e:
@@ -233,7 +261,12 @@ async def upload_document(
         raise server_error(e, "Saving the document")
 
     log_activity(supabase, current_user, "upload", saved["id"], name=display_name, folder=row["folder_path"], size=len(content))
-    elsewhere = [r for r in response_rows(supabase.table("documents").select("id,name,folder_path").eq("content_hash", digest).is_("deleted_at", "null").limit(4).execute()) if r["id"] != saved["id"]]
+    elsewhere = [r for r in response_rows(supabase.table("documents").select("id,name,folder_path,folder_ref").eq("content_hash", digest).is_("deleted_at", "null").limit(4).execute()) if r["id"] != saved["id"]]
+    if scope is not None:
+        # "Also in" must not name files outside the viewer's subtree; the
+        # limit(4) above can only under-report, never leak.
+        ids = set(scope_subtree_ids(folders, scope))
+        elsewhere = [r for r in elsewhere if r.get("folder_ref") and str(r["folder_ref"]) in ids]
     return {**shown(saved), "also_in": [{"id": r["id"], "name": r["name"], "folder_path": r["folder_path"]} for r in elsewhere[:3]]}
 
 
@@ -248,10 +281,12 @@ class DocUpdate(BaseModel):
     expected_updated_at: Optional[str] = None
 
 
-def _move_changes(doc: Dict[str, Any], folders: List[Dict[str, Any]], target_id: Optional[str]) -> Dict[str, Any]:
+def _move_changes(doc: Dict[str, Any], folders: List[Dict[str, Any]], target_id: Optional[str], user: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """The changes that put `doc` in another folder: its path, and a number on its name if the folder already has one."""
     if target_id is not None:
-        get_folder(supabase, target_id)
+        get_folder(supabase, target_id, user, folders)
+    elif viewer_scope(user) is not None:
+        raise HTTPException(status_code=404, detail=f"Choose a folder inside {viewer_scope(user)}.")
     if (str(doc.get("folder_ref")) if doc.get("folder_ref") else None) == target_id:
         return {}
     same = _copy_in(target_id, doc.get("content_hash"), doc["id"])
@@ -268,6 +303,8 @@ async def update_document(doc_id: str, body: DocUpdate, current_user: dict = Dep
     require_upgrade(supabase)
     try:
         doc = _get_doc(doc_id)
+        if viewer_scope(current_user) is not None:
+            assert_row_visible(current_user, "documents", doc, supabase, detail="Document not found")
         assert_unchanged(doc, body.expected_updated_at)
         changes: Dict[str, Any] = {}
         if body.name is not None:
@@ -286,7 +323,7 @@ async def update_document(doc_id: str, body: DocUpdate, current_user: dict = Dep
                 raise HTTPException(status_code=422, detail=str(e))
         if "folder_id" in body.model_fields_set:
             folders = await run_in_threadpool(lambda: load_folders(supabase))
-            changes.update(_move_changes({**doc, **changes}, folders, body.folder_id or None))
+            changes.update(_move_changes({**doc, **changes}, folders, body.folder_id or None, current_user))
         if not changes:
             return shown(doc)
         touch(doc, changes)
@@ -332,13 +369,20 @@ async def bulk_action(body: BulkAction, current_user: dict = Depends(get_current
         rows = {r["id"]: r for r in response_rows(supabase.table("documents").select(LIST_COLUMNS + ",content_hash,storage_path").in_("id", ids).execute())}
         done: List[str] = []
         failed: List[Dict[str, str]] = []
-        folders = await run_in_threadpool(lambda: load_folders(supabase)) if body.action == "move" else []
+        scope = viewer_scope(current_user)
+        folders = await run_in_threadpool(lambda: load_folders(supabase)) if body.action == "move" or scope is not None else []
         wanted_tags = normalise_tags(body.tags) if body.action in ("tag_add", "tag_remove") else []
         target = body.folder_id or None
+        sub = set(scope_subtree_ids(folders, scope)) if scope is not None else set()
+        if scope is not None and body.action == "move" and (target is None or target not in sub):
+            raise HTTPException(status_code=404, detail=f"Choose a folder inside {scope}.")
 
         for doc_id in ids:
             doc = rows.get(doc_id)
             if doc is None:
+                failed.append({"id": doc_id, "error": "It no longer exists."})
+                continue
+            if scope is not None and str(doc.get("folder_ref") or "") not in sub:
                 failed.append({"id": doc_id, "error": "It no longer exists."})
                 continue
             try:
@@ -366,7 +410,7 @@ def _apply_one(action: str, doc: Dict[str, Any], folders: List[Dict[str, Any]], 
     if action in ("star", "unstar"):
         changes: Dict[str, Any] = {"starred": action == "star"}
     elif action == "move":
-        changes = _move_changes(doc, folders, target)
+        changes = _move_changes(doc, folders, target, user)
     elif action in ("tag_add", "tag_remove"):
         current = list(doc.get("tags") or [])
         changes = {"tags": normalise_tags([*current, *tags] if action == "tag_add" else [t for t in current if t not in tags])}
@@ -409,6 +453,8 @@ async def delete_document(doc_id: str, permanent: bool = False, current_user: di
     require_upgrade(supabase)
     try:
         doc = _get_doc(doc_id)
+        if viewer_scope(current_user) is not None:
+            assert_row_visible(current_user, "documents", doc, supabase, detail="Document not found")
         if permanent:
             _purge(doc, current_user)
         else:
@@ -425,6 +471,8 @@ async def document_activity(doc_id: str, current_user: dict = Depends(get_curren
     require_upgrade(supabase)
     if not is_uuid(doc_id):
         raise HTTPException(status_code=404, detail="Document not found")
+    if viewer_scope(current_user) is not None:
+        assert_row_visible(current_user, "documents", _get_doc(doc_id), supabase, detail="Document not found")
     try:
         rows = response_rows(supabase.table("document_activities").select("id,action,details,created_at").eq("document_id", doc_id).order("created_at", desc=True).limit(50).execute())
         return rows
@@ -439,6 +487,8 @@ async def reindex_documents(limit: int = Query(5, ge=1, le=20), current_user: di
     """Read the text of a few files that have not been read yet, so they can be found by what they say. The page calls this
     until `remaining` is 0. A file that cannot be read is marked done anyway and found by its name and details."""
     require_upgrade(supabase)
+    if viewer_scope(current_user) is not None:
+        raise HTTPException(status_code=403, detail="Reindexing is not available to section-limited accounts.")
     try:
         pending = supabase.table("documents").select("id,storage_path,ext,file_size", count=CountMethod.exact).is_("text_indexed_at", "null").is_("deleted_at", "null").order("id").limit(limit).execute()
         processed = 0

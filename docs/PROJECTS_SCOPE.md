@@ -253,3 +253,41 @@ Plumbing + obvious UI; no per-module filtering yet (Batches 2–5).
   the Batch 5 documents tables; test_scope_batch4a/b.py 39 + 42 green;
   full backend 2514 passed; endpoint auth 68 passed; pyright 184/196.
   Frontend: tsc/eslint clean, vitest 1952 passed, docs:check clean.
+
+## Batch 5 — done (branch projects-scope-5, both repos)
+
+- Documents subtree rule (scope.py): the scope's root is the top-level
+  folder named for the scope (case-insensitive; name_taken() already
+  forbids same-level lookalikes). Visible = at or under the root; unfiled
+  rows hidden. Registry: documents (via folder_ref), document_folders
+  (via id), document_activities (resolves through its document; never
+  listed standalone — the router guards the doc).
+- Enforced: overview + search slice to the subtree (unfiled search is
+  honestly empty; trashed keeps working via folder_ref); upload requires
+  an in-subtree folder and "also in" names subtree files only; update /
+  move / bulk / delete / history guard the doc and the target; folders
+  create/move/rename/delete stay in-subtree. Q10 decided: seed-ams and
+  reindex refuse section-limited accounts with 403 (whole-library jobs;
+  a Projects-only run would misreport). Self-service root: a scoped
+  account may create the top-level folder named for its scope when none
+  exists; the root afterwards keeps its name and place (clear 404s, and
+  the folder menu hides root rename/move when scoped).
+- Summaries sweep: every stats/overview/dashboard/analytics/trends/
+  reports endpoint on a scoped table verified slicing. Two gaps fixed:
+  leaves and timesheets /stats/summary were open with no user at all —
+  now optional-user (anonymous whole-mine as before, signed-in scoped
+  counts their people). Daily exports are placeholders (no data);
+  no job-cards export endpoint exists; usage/events stays manager-only.
+- Harness: fake responses always carry .count (exact pre-page total when
+  asked, else None); or_() strips PostgREST value-quoting; contains()
+  added for tag filters.
+- Frontend: documents header + empties, SetupBanner hidden when scoped,
+  upload/move/new-folder pickers drop the Unfiled/top-level choices as
+  the rules require (self-service top-level labelled with the scope
+  name), root rename/move hidden from the folder menu, home view text
+  scoped. scoped.test.tsx (5) proves the picker/menu gating.
+- Suite: test_projects_scope.py 19/19 — the Batch 0 acceptance suite is
+  fully green for the first time; test_scope_batch5.py 34 green;
+  documents suites 140 green; full backend 2567 passed, zero failures;
+  pyright 181/196. Frontend: tsc/eslint clean, vitest 1957 passed,
+  docs:check clean.

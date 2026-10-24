@@ -10,6 +10,7 @@ from fastapi import HTTPException
 from app.audit import has_columns
 from app.db_helpers import fetch_all_pages, response_rows
 from app.errors import server_error
+from app.scope import load_scope_subtree_ids, scope_subtree_ids, viewer_scope
 from app.document_rules import (
     csv_values, ilike_value, valid_types,
 )
@@ -80,13 +81,23 @@ def load_folders(db) -> List[Dict[str, Any]]:
     )
 
 
-def get_folder(db, folder_id: Optional[str]) -> Dict[str, Any]:
-    """The folder row, or 404/422. A folder id from the browser is checked here, never trusted."""
+def get_folder(db, folder_id: Optional[str], user: Optional[Dict[str, Any]] = None,
+             folders: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
+    """The folder row, or 404/422. A folder id from the browser is checked here, never trusted.
+
+    For a scoped viewer the folder must also sit inside their subtree — a
+    missing folder and an out-of-scope one answer identically. Pass the
+    already-loaded `folders` to skip re-reading the tree."""
     if not is_uuid(folder_id):
         raise HTTPException(status_code=422, detail="Choose a folder from the list.")
     found = response_rows(db.table("document_folders").select(FOLDER_COLUMNS).eq("id", folder_id).execute())
     if not found:
         raise HTTPException(status_code=404, detail="That folder no longer exists. Reload the page.")
+    scope = viewer_scope(user)
+    if scope is not None:
+        ids = scope_subtree_ids(folders, scope) if folders is not None else load_scope_subtree_ids(db, scope)
+        if str(found[0]["id"]) not in ids:
+            raise HTTPException(status_code=404, detail="That folder no longer exists. Reload the page.")
     return found[0]
 
 

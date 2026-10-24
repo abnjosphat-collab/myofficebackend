@@ -43,8 +43,10 @@ class _Query:
         self._pending_update = None
         self._deleting = False
         self._single = False
+        self._count = None
 
     def select(self, *a, **k):
+        self._count = k.get("count")
         return self
 
     def eq(self, col, val):
@@ -151,6 +153,13 @@ class _Query:
         self._rows = [r for r in self._rows if term in str(r.get(col) or "").lower()]
         return self
 
+    def contains(self, col, vals):
+        self._calls.append(("contains", col, list(vals)))
+        wanted = [str(v).lower() for v in vals]
+        self._rows = [r for r in self._rows
+                      if all(w in [str(t).lower() for t in (r.get(col) or [])] for w in wanted)]
+        return self
+
     def order(self, col, desc=False):
         self._rows.sort(key=lambda r: (r.get(col) is None, str(r.get(col) or "")),
                         reverse=bool(desc))
@@ -209,6 +218,9 @@ class _Query:
         if self._pending_update is not None:
             for r in self._rows:
                 r.update(self._pending_update)
+        # Real responses always carry .count: the pre-page total when the
+        # query asked for an exact count, else None.
+        total = len(self._rows) if self._count else None
         if self._deleting:
             doomed = {id(r) for r in self._rows}
             # Real Supabase returns the deleted rows; routers 404 on an empty
@@ -220,7 +232,7 @@ class _Query:
             out = [dict(r) for r in self._rows[self._start:self._end]]
         if self._single:
             out = out[0] if out else None
-        return SimpleNamespace(data=out)
+        return SimpleNamespace(data=out, count=total)
 
 
 class FakeSupabase:
