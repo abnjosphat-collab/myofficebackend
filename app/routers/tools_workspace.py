@@ -177,16 +177,21 @@ class PasswordResetRequest(BaseModel):
 class PasswordChange(BaseModel):
     current_password:str; new_password:str=Field(min_length=6,max_length=128)
 class EmployeeInput(BaseModel):
-    employee_number:Optional[str]=Field(default=None,max_length=60); name:str=Field(min_length=2,max_length=120); department:str=Field(min_length=1,max_length=100); job_title:Optional[str]=Field(default=None,max_length=100); supervisor_name:Optional[str]=Field(default=None,max_length=120)
+    employee_number:Optional[str]=Field(default=None,max_length=60); name:str=Field(min_length=2,max_length=120); department:str=Field(min_length=1,max_length=100); job_title:Optional[str]=Field(default=None,max_length=100); supervisor_name:Optional[str]=Field(default=None,max_length=120); section:Optional[str]=Field(default=None,max_length=100)
     @field_validator("employee_number",mode="before")
     @classmethod
     def _blank_number_is_unknown(cls,value):
         if value is None: return None
         text=str(value).strip(); return text or None
+    @field_validator("section",mode="before")
+    @classmethod
+    def _blank_section_is_unknown(cls,value):
+        if value is None: return None
+        text=str(value).strip(); return text or None
 class ToolInput(BaseModel):
-    register_number:Optional[str]=Field(default=None,max_length=80); name:str=Field(min_length=2,max_length=160); make_model:Optional[str]=Field(default=None,max_length=200); serial_number:Optional[str]=Field(default=None,max_length=120); category:Optional[str]=Field(default=None,max_length=100); equipment_kind:str=Field(default="other-equipment",max_length=80); storage_location:str=Field(min_length=1,max_length=240); department:str=Field(default="Engineering",max_length=100); section:Optional[str]=Field(default=None,max_length=100); condition:str=Field(default="Good",max_length=60); notes:Optional[str]=Field(default=None,max_length=2000); approval_ref:Optional[str]=Field(default=None,max_length=160); calibration:Optional[str]=Field(default=None,max_length=160); specifications:dict[str,str]=Field(default_factory=dict); site_code:str=Field(default="PP",min_length=2,max_length=8,pattern=r"^[A-Za-z0-9]+$"); area_code:str=Field(default="UG",min_length=1,max_length=8,pattern=r"^[A-Za-z0-9]+$"); department_code:Optional[str]=Field(default=None,max_length=8,pattern=r"^[A-Za-z0-9]+$"); activity_code:Optional[str]=Field(default=None,max_length=8,pattern=r"^[A-Za-z0-9]+$"); home_storage_location:Optional[str]=Field(default=None,max_length=240); storage_conditions:Optional[str]=Field(default=None,max_length=1000); maintenance_requirements:Optional[str]=Field(default=None,max_length=2000); pre_use_check_required:bool=True; competency_required:bool=True; weekly_inspection_required:bool=False; monthly_inspection_required:bool=True; quarterly_inspection_required:bool=True; calibration_required:bool=False; calibration_frequency_days:Optional[int]=Field(default=None,ge=1,le=3650); replacement_value:Optional[float]=Field(default=None,ge=0); criticality:Literal["standard","high","safety_critical"]="standard"; cctv_required:bool=False; gps_required:bool=False; required_ppe:list[str]=Field(default_factory=list,max_length=20); ownership_type:Literal["company","contractor"]="company"; contractor_name:Optional[str]=Field(default=None,max_length=200); oem_manual_ref:Optional[str]=Field(default=None,max_length=240); purchase_date:Optional[str]=Field(default=None,pattern=r"^\d{4}-\d{2}-\d{2}$"); procurement_cost:Optional[float]=Field(default=None,ge=0); insured:Optional[bool]=None; last_verified:Optional[str]=Field(default=None,max_length=40); working_status:Optional[Literal["working","not_working"]]=None
+    register_number:Optional[str]=Field(default=None,max_length=80); name:str=Field(min_length=2,max_length=160); make_model:Optional[str]=Field(default=None,max_length=200); serial_number:Optional[str]=Field(default=None,max_length=120); category:Optional[str]=Field(default=None,max_length=100); equipment_kind:str=Field(default="other-equipment",max_length=80); storage_location:str=Field(min_length=1,max_length=240); department:str=Field(default="Engineering",max_length=100); section:Optional[str]=Field(default=None,max_length=100); condition:str=Field(default="Good",max_length=60); notes:Optional[str]=Field(default=None,max_length=2000); approval_ref:Optional[str]=Field(default=None,max_length=160); calibration:Optional[str]=Field(default=None,max_length=160); specifications:dict[str,str]=Field(default_factory=dict); site_code:str=Field(default="PP",min_length=2,max_length=8,pattern=r"^[A-Za-z0-9]+$"); area_code:str=Field(default="UG",min_length=1,max_length=8,pattern=r"^[A-Za-z0-9]+$"); department_code:Optional[str]=Field(default=None,max_length=8,pattern=r"^[A-Za-z0-9]+$"); activity_code:Optional[str]=Field(default=None,max_length=8,pattern=r"^[A-Za-z0-9]+$"); home_storage_location:Optional[str]=Field(default=None,max_length=240); storage_conditions:Optional[str]=Field(default=None,max_length=1000); maintenance_requirements:Optional[str]=Field(default=None,max_length=2000); pre_use_check_required:bool=True; competency_required:bool=True; weekly_inspection_required:bool=False; monthly_inspection_required:bool=True; quarterly_inspection_required:bool=True; calibration_required:bool=False; calibration_frequency_days:Optional[int]=Field(default=None,ge=1,le=3650); replacement_value:Optional[float]=Field(default=None,ge=0); criticality:Literal["standard","high","safety_critical"]="standard"; cctv_required:bool=False; gps_required:bool=False; required_ppe:list[str]=Field(default_factory=list,max_length=20); ownership_type:Literal["company","contractor"]="company"; contractor_name:Optional[str]=Field(default=None,max_length=200); oem_manual_ref:Optional[str]=Field(default=None,max_length=240); purchase_date:Optional[str]=Field(default=None,pattern=r"^\d{4}-\d{2}-\d{2}$"); procurement_cost:Optional[float]=Field(default=None,ge=0); insured:Optional[bool]=None; last_verified:Optional[str]=Field(default=None,max_length=40); working_status:Optional[Literal["working","not_working"]]=None; trade_sections:Optional[list[str]]=Field(default=None,max_length=10)
 class ToolUpdate(BaseModel):
-    register_number:Optional[str]=Field(default=None,min_length=1,max_length=80); name:Optional[str]=Field(default=None,min_length=2,max_length=160); make_model:Optional[str]=Field(default=None,max_length=200); serial_number:Optional[str]=Field(default=None,max_length=120); category:Optional[str]=Field(default=None,max_length=100); equipment_kind:Optional[str]=Field(default=None,max_length=80); storage_location:Optional[str]=Field(default=None,min_length=1,max_length=240); department:Optional[str]=Field(default=None,max_length=100); section:Optional[str]=Field(default=None,max_length=100); condition:Optional[str]=Field(default=None,max_length=60); notes:Optional[str]=Field(default=None,max_length=2000); approval_ref:Optional[str]=Field(default=None,max_length=160); calibration:Optional[str]=Field(default=None,max_length=160); specifications:Optional[dict[str,str]]=None; home_storage_location:Optional[str]=Field(default=None,max_length=240); storage_conditions:Optional[str]=Field(default=None,max_length=1000); maintenance_requirements:Optional[str]=Field(default=None,max_length=2000); pre_use_check_required:Optional[bool]=None; competency_required:Optional[bool]=None; weekly_inspection_required:Optional[bool]=None; monthly_inspection_required:Optional[bool]=None; quarterly_inspection_required:Optional[bool]=None; calibration_required:Optional[bool]=None; calibration_frequency_days:Optional[int]=Field(default=None,ge=1,le=3650); replacement_value:Optional[float]=Field(default=None,ge=0); criticality:Optional[Literal["standard","high","safety_critical"]]=None; cctv_required:Optional[bool]=None; gps_required:Optional[bool]=None; required_ppe:Optional[list[str]]=Field(default=None,max_length=20); ownership_type:Optional[Literal["company","contractor"]]=None; contractor_name:Optional[str]=Field(default=None,max_length=200); oem_manual_ref:Optional[str]=Field(default=None,max_length=240); purchase_date:Optional[str]=Field(default=None,pattern=r"^\d{4}-\d{2}-\d{2}$"); procurement_cost:Optional[float]=Field(default=None,ge=0); insured:Optional[bool]=None; last_verified:Optional[str]=Field(default=None,max_length=40); working_status:Optional[Literal["working","not_working"]]=None
+    register_number:Optional[str]=Field(default=None,min_length=1,max_length=80); name:Optional[str]=Field(default=None,min_length=2,max_length=160); make_model:Optional[str]=Field(default=None,max_length=200); serial_number:Optional[str]=Field(default=None,max_length=120); category:Optional[str]=Field(default=None,max_length=100); equipment_kind:Optional[str]=Field(default=None,max_length=80); storage_location:Optional[str]=Field(default=None,min_length=1,max_length=240); department:Optional[str]=Field(default=None,max_length=100); section:Optional[str]=Field(default=None,max_length=100); condition:Optional[str]=Field(default=None,max_length=60); notes:Optional[str]=Field(default=None,max_length=2000); approval_ref:Optional[str]=Field(default=None,max_length=160); calibration:Optional[str]=Field(default=None,max_length=160); specifications:Optional[dict[str,str]]=None; home_storage_location:Optional[str]=Field(default=None,max_length=240); storage_conditions:Optional[str]=Field(default=None,max_length=1000); maintenance_requirements:Optional[str]=Field(default=None,max_length=2000); pre_use_check_required:Optional[bool]=None; competency_required:Optional[bool]=None; weekly_inspection_required:Optional[bool]=None; monthly_inspection_required:Optional[bool]=None; quarterly_inspection_required:Optional[bool]=None; calibration_required:Optional[bool]=None; calibration_frequency_days:Optional[int]=Field(default=None,ge=1,le=3650); replacement_value:Optional[float]=Field(default=None,ge=0); criticality:Optional[Literal["standard","high","safety_critical"]]=None; cctv_required:Optional[bool]=None; gps_required:Optional[bool]=None; required_ppe:Optional[list[str]]=Field(default=None,max_length=20); ownership_type:Optional[Literal["company","contractor"]]=None; contractor_name:Optional[str]=Field(default=None,max_length=200); oem_manual_ref:Optional[str]=Field(default=None,max_length=240); purchase_date:Optional[str]=Field(default=None,pattern=r"^\d{4}-\d{2}-\d{2}$"); procurement_cost:Optional[float]=Field(default=None,ge=0); insured:Optional[bool]=None; last_verified:Optional[str]=Field(default=None,max_length=40); working_status:Optional[Literal["working","not_working"]]=None; trade_sections:Optional[list[str]]=Field(default=None,max_length=10)
 class IssueInput(BaseModel):
     employee_id:str; location:str=Field(min_length=1,max_length=240); expected_return_at:Optional[str]=None; job_reference:Optional[str]=Field(default=None,max_length=160); assigned_equipment:list[str]=Field(default_factory=list,max_length=30); notes:Optional[str]=Field(default=None,max_length=1000); override_due_checks:bool=False; override_reason:Optional[str]=Field(default=None,max_length=500)
 class ReturnInput(BaseModel):
@@ -218,6 +223,41 @@ class GatePassDecision(BaseModel):
 DEPARTMENT_CODES={"Engineering":"ENG","Mining":"MIN","Mine Technical Services":"MTS","Shared Services":"SS","IT":"IT"}
 ACTIVITY_CODES={"angle-grinder":"AG","cordless-drill":"CD","rotary-hammer":"RH","digital-multimeter":"DM","clamp-meter":"CM","torque-wrench":"TW","inverter-welder":"WM","welding-equipment":"WM","laser-level":"LL","socket-set":"SS","laptop":"LT","work-lamp":"WL","survey-equipment":"SE","lifting-equipment":"LE","power-tool":"PT","hand-tool":"HT","test-instrument":"TI","tool-kit":"TK","other-equipment":"OE"}
 QUARTER_COLOURS={1:"Blue",2:"Green",3:"Yellow",4:"White"}
+TRADE_SECTIONS=("Electrical","Mechanical")
+#: Job titles that never gain eligibility through their section (case-insensitive substrings).
+_SECTION_EXCLUDED_TITLE_PARTS=("driver","lamp")
+#: Tool names outside the engineering trades: nobody gains them by section, only by individual approval.
+_OUT_OF_TRADE_NAMES=("survey","total station","theodolite","gnss","optical level","dumpy level","laptop","computer","printer","scanner","projector","tablet","radio","camera","gps","ladder","scaffold","harness","lanyard","gas detector")
+_ELECTRICAL_NAMES=("multimeter","clamp meter","voltmeter","ammeter","megger","insulation tester","earth tester","loop tester","pat tester","proving unit","phase tester","voltage tester","cable locator","test lamp","test lead","fuse","transformer","calibrator","tester","detector","instrument","cable","extension lead")
+_MECHANICAL_NAMES=("torque","spanner","wrench","socket","ratchet","allen key","hex key","pipe","puller","bearing","bottle jack","trolley jack","toe jack","hoist","sling","shackle","chain block","lever block","lifting","chisel","punch","hacksaw","grease","lubricat","micrometer","vernier","caliper")
+#: Names both trades genuinely share (power tools, welding, generic striking/cutting/gripping tools).
+_SHARED_TRADE_NAMES=("grinder","drill","saw","sander","polisher","planer","router","nibbler","impact","nail gun","blower","engraver","mixer","wall chaser","biscuit joiner","heat gun","weld","hammer","screwdriver","screw driver","pliers","cutter","laser","level","oxy","acetylene","cutting torch","gas cutting","tape measure","measuring tape")
+_ELECTRICAL_KINDS={"digital-multimeter","clamp-meter","test-instrument","work-lamp"}
+_MECHANICAL_KINDS={"torque-wrench","socket-set","hand-tool","lifting-equipment"}
+_SHARED_TRADE_KINDS={"angle-grinder","cordless-drill","rotary-hammer","power-tool","inverter-welder","welding-equipment","laser-level","tool-kit"}
+_OUT_OF_TRADE_KINDS={"survey-equipment","laptop"}
+_ELECTRICAL_CATEGORIES={"test & measure","electrical equipment","lighting"}
+_MECHANICAL_CATEGORIES={"hand tools","lifting equipment"}
+_SHARED_TRADE_CATEGORIES={"power tools","welding"}
+def suggest_trade_sections(name:Optional[str],equipment_kind:Optional[str]=None,category:Optional[str]=None):
+    """Suggest which trade sections may use a tool: the name decides first (a specific instrument beats a vague
+    category), then the equipment kind, then the category. Returns [] outside the engineering trades, where only an
+    individual approval grants eligibility."""
+    text=re.sub(r"[-_]+"," ",f"{name or ''} {equipment_kind or ''} {category or ''}").lower()
+    if any(part in text for part in _OUT_OF_TRADE_NAMES): return []
+    if any(part in text for part in _ELECTRICAL_NAMES): return ["Electrical"]
+    if any(part in text for part in _MECHANICAL_NAMES): return ["Mechanical"]
+    if any(part in text for part in _SHARED_TRADE_NAMES): return ["Electrical","Mechanical"]
+    kind=(equipment_kind or "").strip().lower()
+    if kind in _OUT_OF_TRADE_KINDS: return []
+    if kind in _ELECTRICAL_KINDS: return ["Electrical"]
+    if kind in _MECHANICAL_KINDS: return ["Mechanical"]
+    if kind in _SHARED_TRADE_KINDS: return ["Electrical","Mechanical"]
+    section=(category or "").strip().lower()
+    if section in _ELECTRICAL_CATEGORIES: return ["Electrical"]
+    if section in _MECHANICAL_CATEGORIES: return ["Mechanical"]
+    if section in _SHARED_TRADE_CATEGORIES: return ["Electrical","Mechanical"]
+    return []
 def _parse_datetime(value:Optional[str]):
     if not value: return None
     try:
@@ -253,11 +293,30 @@ def _competency_for(employee:dict[str,Any],tool:dict[str,Any],competencies:Optio
     exact=next((row for row in matches if row.get("tool_id")==tool.get("id")),None)
     return exact or next(iter(matches),None)
 
-def _is_eligible(employee:dict[str,Any],tool:dict[str,Any],competencies:Optional[list[dict[str,Any]]]=None):
-    if not tool.get("competency_required",True): return True
-    record=_competency_for(employee,tool,competencies)
-    if not record: return False
+def _current_approval(record:dict[str,Any]):
     return bool(record.get("trained") and record.get("qualified") and record.get("authorized") and _not_expired(record.get("training_expires_at")) and _not_expired(record.get("qualification_expires_at")) and _not_expired(record.get("authorization_expires_at")))
+
+def _explicit_denial(record:dict[str,Any]):
+    """An individual record whose own flags withhold approval (removing someone writes exactly this). Unlike a lapsed
+    approval, it is not a paperwork gap the section rule may cover — the removal sticks."""
+    return not (record.get("trained") and record.get("qualified") and record.get("authorized"))
+
+def _eligibility_basis(employee:dict[str,Any],tool:dict[str,Any],competencies:Optional[list[dict[str,Any]]]=None):
+    """Why an employee may use a tool: "individual" (a current approval), "section:<name>" (their section is one of the
+    tool's trade sections), "open" (the tool needs no approval), or None. The one place the rule lives: the eligible
+    list, issue enforcement and (through the list) the frontend all follow it."""
+    if not tool.get("competency_required",True): return "open"
+    record=_competency_for(employee,tool,competencies)
+    if record and _current_approval(record): return "individual"
+    if record and record.get("tool_id")==tool.get("id") and _explicit_denial(record): return None
+    section=(employee.get("section") or "").strip()
+    if not section or not employee.get("active",True): return None
+    if any(part in (employee.get("job_title") or "").lower() for part in _SECTION_EXCLUDED_TITLE_PARTS): return None
+    match=next((name for name in (tool.get("trade_sections") or []) if (name or "").strip().lower()==section.lower()),None)
+    return f"section:{match}" if match else None
+
+def _is_eligible(employee:dict[str,Any],tool:dict[str,Any],competencies:Optional[list[dict[str,Any]]]=None):
+    return _eligibility_basis(employee,tool,competencies) is not None
 
 def _latest_inspections(tool_id:str,inspections:Optional[list[dict[str,Any]]]=None):
     latest:dict[str,dict[str,Any]]={}
@@ -447,15 +506,20 @@ def read_notifications(body:NotificationReadInput,account=Depends(_session)):
 @router.get("/employees")
 def list_employees(account=Depends(_session)): return _visible_records("employees",account)
 class EmployeeUpdate(BaseModel):
-    active:Optional[bool]=None; employee_number:Optional[str]=Field(default=None,max_length=60)
+    active:Optional[bool]=None; employee_number:Optional[str]=Field(default=None,max_length=60); section:Optional[str]=Field(default=None,max_length=100)
     @field_validator("employee_number",mode="before")
     @classmethod
     def _blank_number_is_unknown(cls,value):
         if value is None: return None
         text=str(value).strip(); return text or None
+    @field_validator("section",mode="before")
+    @classmethod
+    def _blank_section_is_unknown(cls,value):
+        if value is None: return None
+        text=str(value).strip(); return text or None
 @router.patch("/employees/{employee_id}")
 def update_employee(employee_id:str,body:EmployeeUpdate,account=Depends(_operator)):
-    """Deactivate or reactivate an employee (nothing is deleted: approvals and history stay), or set the mine number that was unknown when they were added. An explicit null clears the number."""
+    """Deactivate or reactivate an employee (nothing is deleted: approvals and history stay), set the mine number that was unknown when they were added, or set their trade section. An explicit null clears the number or the section."""
     employee=_find("employees","id",employee_id)
     if not employee: raise HTTPException(404,"Employee was not found.")
     _ensure_managed_department(account,employee.get("department"))
@@ -494,9 +558,17 @@ def list_tools(account=Depends(_session)):
         by_tool.setdefault(item["tool_id"],[]).append(row)
     result=[]
     for tool in tools:
-        eligible=[{"id":employee["id"],"employee_number":employee["employee_number"],"name":employee["name"],"department":employee["department"],"job_title":employee.get("job_title")} for employee in employees if _is_eligible(employee,tool,competencies)]
+        eligible=[]
+        for employee in employees:
+            basis=_eligibility_basis(employee,tool,competencies)
+            if basis is None: continue
+            eligible.append({"id":employee["id"],"employee_number":employee["employee_number"],"name":employee["name"],"department":employee["department"],"job_title":employee.get("job_title"),"via_section":basis.split(":",1)[1] if basis.startswith("section:") else None})
         result.append({**_effective_tool(tool),"evidence":by_tool.get(tool["id"],[]),"eligible_employees":eligible,"inspection_due":_inspection_due(tool,inspections),"latest_inspections":_latest_inspections(tool["id"],inspections)})
     return result
+@router.get("/tools/trade-section-suggestion")
+def suggest_tool_trade_sections(name:str="",equipment_kind:str="",category:str="",_=Depends(_session)):
+    """The classifier behind new-tool prefill: which trade sections a tool with this name, kind and category fits."""
+    return {"trade_sections":suggest_trade_sections(name,equipment_kind,category)}
 @router.post("/tools",status_code=201)
 def create_tool(body:ToolInput,account=Depends(_operator)):
     _ensure_managed_department(account,body.department)
