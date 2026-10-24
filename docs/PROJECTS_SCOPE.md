@@ -217,3 +217,39 @@ Plumbing + obvious UI; no per-module filtering yet (Batches 2–5).
   fetches (VFL/Pachedu panels complete in Batch 4).
 - Suite: test_projects_scope.py 2 red (equipment + guard, both Batch 4);
   test_scope_batch3.py 63 green; pyright 192/196.
+
+## Batch 4 — done (branch projects-scope-4, both repos)
+
+- SQL (file only, NOT run): `supabase_migration_projects_scope_section_columns.sql`
+  adds a nullable `section` column to equipment, work_orders, breakdowns,
+  notices, sop_documents, services, daily_reports, maintenance_schedules.
+  Existing rows stay NULL = "not Projects" (untriaged, invisible to scoped
+  accounts); no backfill. PostgREST needs ~30s to pick up the columns.
+- Enforced (13 routers): equipment, maintenance/work_orders (+events,
+  comments, allocated pickers, stats), breakdowns (dashboard stays open via
+  the optional-user pattern — anonymous sees whole-mine KPIs), notices,
+  SOPs, services (+attachments inherit the service), daily reports (upsert
+  grain is date x section for scoped), schedules (runs guarded; generated
+  work orders inherit the schedule's section), pachedu + VFL (validation
+  patterns widened to Projects), availability + compliance register +
+  condition monitoring (inherit equipment; unlinked compliance rows hidden
+  from scoped). Registry: `compliance` corrected to `compliance_register`.
+- Regressions caught and fixed in-batch: breakdowns dashboard briefly
+  required auth (reopened with get_current_user_optional); services
+  attachment delete briefly 404'd for unscoped missing rows (guard now
+  scoped-only, idempotent delete preserved).
+- Harness: `in_` gains the same PostgREST int/str coercion as `eq`
+  (TEXT equipment_id links), plus gte/lte/gt/lt range operators.
+- Frontend: pachedu + VFL fully adopted (Projects joins the section type,
+  options, filter hide + pin, form pin to a disabled field, scoped empty;
+  ReportDialog exported for tests). Headers + honest `No {scope} ... yet`
+  empties on equipment, maintenance (+schedules), breakdowns, noticeboard,
+  SOP library, services, both availability pages, compliance register,
+  condition monitoring (noticeboard/SOP alias the auth scope to
+  `viewerScope` — both pages already own a `scope` local). Daily reports
+  has no frontend consumer, so nothing to adopt. Migration ledger
+  regenerated (pachedu/VFL test counts).
+- Suite: test_projects_scope.py 18/19 — equipment green, guard red ONLY on
+  the Batch 5 documents tables; test_scope_batch4a/b.py 39 + 42 green;
+  full backend 2514 passed; endpoint auth 68 passed; pyright 184/196.
+  Frontend: tsc/eslint clean, vitest 1952 passed, docs:check clean.

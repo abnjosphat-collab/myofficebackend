@@ -79,7 +79,9 @@ TABLES: dict[str, dict[str, Any]] = {
     "service_attachments": {"rule": "inherits", "parent": "services", "via": "service_id"},
     "corrective_actions": {"rule": "inherits", "parent": "work_stoppage_reports", "via": "report_id"},
     "availabilities": {"rule": "inherits", "parent": "equipment", "via": "equipment_id"},
-    "compliance": {"rule": "inherits", "parent": "equipment", "via": "equipment_id"},
+    # The table is compliance_register (Batch 0/1 shortened it to "compliance",
+    # which also left the router invisible to the guard test).
+    "compliance_register": {"rule": "inherits", "parent": "equipment", "via": "equipment_id"},
     "condition_monitoring": {"rule": "inherits", "parent": "equipment", "via": "equipment_id"},
     # lube_schedules carries its own section column (the list filter and the
     # create payload both use it), so it is direct-section: the Batch 1

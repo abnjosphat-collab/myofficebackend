@@ -288,7 +288,7 @@ SCOPED_TABLES = {
     "equipment", "work_orders", "breakdowns", "notices", "sop_documents",
     "sop_revisions", "services", "service_attachments", "daily_reports",
     "pachedu_reports", "vfl_reports", "vfl_action_plan", "maintenance_schedules",
-    "availabilities", "corrective_actions", "compliance", "condition_monitoring",
+    "availabilities", "corrective_actions", "compliance_register", "condition_monitoring",
     # Batch 5 — documents
     "documents", "document_folders", "document_activities",
 }

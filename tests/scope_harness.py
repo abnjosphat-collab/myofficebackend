@@ -49,7 +49,16 @@ class _Query:
 
     def eq(self, col, val):
         self._calls.append(("eq", col, val))
-        self._rows = [r for r in self._rows if r.get(col) == val]
+        # PostgREST coerces a string id against an int column ("42" matches
+        # 42); the fake must too, or str-typed link fields 404 against int
+        # parents they match in production.
+        def _same(row):
+            current = row.get(col)
+            if current == val:
+                return True
+            return (current is not None and val is not None
+                    and str(current) == str(val))
+        self._rows = [r for r in self._rows if _same(r)]
         return self
 
     def neq(self, col, val):
@@ -57,9 +66,52 @@ class _Query:
         self._rows = [r for r in self._rows if r.get(col) != val]
         return self
 
+    def _cmp(self, name, col, val, op):
+        self._calls.append((name, col, val))
+
+        def _hit(row):
+            current = row.get(col)
+            if current is None or val is None:
+                return False
+            try:
+                return op(current, val)
+            except TypeError:
+                # Mixed date/str or int/str: compare the rendered forms, as
+                # PostgREST would after casting the unknown literal.
+                return op(str(current), str(val))
+
+        self._rows = [r for r in self._rows if _hit(r)]
+        return self
+
+    def gte(self, col, val):
+        import operator
+        return self._cmp("gte", col, val, operator.ge)
+
+    def lte(self, col, val):
+        import operator
+        return self._cmp("lte", col, val, operator.le)
+
+    def gt(self, col, val):
+        import operator
+        return self._cmp("gt", col, val, operator.gt)
+
+    def lt(self, col, val):
+        import operator
+        return self._cmp("lt", col, val, operator.lt)
+
     def in_(self, col, vals):
         self._calls.append(("in", col, list(vals)))
-        self._rows = [r for r in self._rows if r.get(col) in vals]
+        # Same PostgREST int/str coercion as eq(): in.(1) matches TEXT '1'.
+        wanted = list(vals)
+        wanted_str = {str(v) for v in wanted if v is not None}
+
+        def _hit(row):
+            current = row.get(col)
+            if current in wanted:
+                return True
+            return current is not None and str(current) in wanted_str
+
+        self._rows = [r for r in self._rows if _hit(r)]
         return self
 
     @property
@@ -74,6 +126,17 @@ class _Query:
         return _Not()
 
     def single(self):
+        self._single = True
+        return self
+
+    def is_(self, col, val):
+        if isinstance(val, str) and val.lower() == "null":
+            self._rows = [r for r in self._rows if r.get(col) is None]
+        else:
+            self._rows = [r for r in self._rows if r.get(col) == val]
+        return self
+
+    def maybe_single(self):
         self._single = True
         return self
 

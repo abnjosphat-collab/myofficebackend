@@ -30,6 +30,7 @@ from pydantic import BaseModel, Field, validator
 from app.supabase_client import supabase, rows as db_rows, one_row
 from app.auth import get_current_user, require_role, require_role_if_status_in
 from app.db_helpers import or_ilike, get_or_404
+from app.scope import apply_list_scope, assert_row_visible, stamp_create, viewer_scope
 from app.errors import server_error
 import logging
 
@@ -78,6 +79,7 @@ class SopCreate(BaseModel):
     code: str = Field(..., min_length=1)
     title: str = Field(..., min_length=1)
     department: str = Field(..., min_length=1)
+    section: Optional[str] = None
     summary: str = ""
     status: str = "draft"
     classification: str = "Internal"
@@ -100,6 +102,7 @@ class SopCreate(BaseModel):
 class SopUpdate(BaseModel):
     title: Optional[str] = Field(None, min_length=1)
     department: Optional[str] = Field(None, min_length=1)
+    section: Optional[str] = None
     summary: Optional[str] = None
     status: Optional[str] = None
     classification: Optional[str] = None
@@ -164,6 +167,7 @@ async def list_sops(
     department: Optional[str] = None,
     status: Optional[str] = None,
     owner: Optional[str] = None,
+    current_user: dict = Depends(get_current_user),
 ):
     try:
         q = supabase.table("sop_documents").select("*").is_("deleted_at", "null")
@@ -175,6 +179,7 @@ async def list_sops(
             q = q.eq("status", status)
         if owner:
             q = q.eq("owner", owner)
+        q = apply_list_scope(q, current_user, "sop_documents")
         r = q.order("updated_at", desc=True).execute()
         return [_serialize(row) for row in db_rows(r)]
     except Exception as e:
@@ -183,12 +188,13 @@ async def list_sops(
 
 
 @router.get("/archived", dependencies=[Depends(require_role("manager"))])
-async def list_archived_sops():
+async def list_archived_sops(current_user: dict = Depends(get_current_user)):
     try:
-        r = (supabase.table("sop_documents")
+        _q = (supabase.table("sop_documents")
              .select("*")
-             .not_.is_("deleted_at", "null")
-             .order("updated_at", desc=True)
+             .not_.is_("deleted_at", "null"))
+        _q = apply_list_scope(_q, current_user, "sop_documents")
+        r = (_q.order("updated_at", desc=True)
              .execute())
         return [_serialize(row) for row in db_rows(r)]
     except Exception as e:
@@ -199,8 +205,9 @@ async def list_archived_sops():
 # ── Get one (+ revision history) ─────────────────────────────────────────────
 
 @router.get("/{sop_id}", dependencies=[Depends(get_current_user)])
-async def get_sop(sop_id: str):
+async def get_sop(sop_id: str, current_user: dict = Depends(get_current_user)):
     doc = get_or_404(supabase, "sop_documents", sop_id, detail="SOP not found")
+    assert_row_visible(current_user, "sop_documents", doc, detail="SOP not found")
     try:
         rev_r = (supabase.table("sop_revisions")
                  .select("*")
@@ -227,16 +234,17 @@ async def create_sop(body: SopCreate, current_user: dict = Depends(require_role(
     payload["updated_at"] = now
     payload["created_by"] = current_user.get("email", "")
     payload["updated_by"] = current_user.get("email", "")
+    payload = stamp_create(current_user, "sop_documents", payload)
 
     for date_field in ("effective_date", "next_review_date"):
         if isinstance(payload.get(date_field), date):
             payload[date_field] = payload[date_field].isoformat()
 
     try:
-        existing = (supabase.table("sop_documents")
+        _code_q = (supabase.table("sop_documents")
                     .select("id")
-                    .eq("code", payload["code"])
-                    .execute())
+                    .eq("code", payload["code"]))
+        existing = apply_list_scope(_code_q, current_user, "sop_documents").execute()
         if db_rows(existing):
             raise HTTPException(409, f"An SOP with code '{payload['code']}' already exists")
         r = supabase.table("sop_documents").insert(payload).execute()
@@ -269,7 +277,7 @@ async def update_sop(
     # transitions.
     await require_role_if_status_in(body.status, {"effective"}, "admin", authorization, context="SOP approval")
 
-    get_or_404(supabase, "sop_documents", sop_id, detail="SOP not found")
+    existing = get_or_404(supabase, "sop_documents", sop_id, detail="SOP not found")
 
     payload = body.model_dump(exclude_unset=True, exclude={"change_note"})
     if "sections" in payload and payload["sections"] is not None:
@@ -277,6 +285,9 @@ async def update_sop(
     for date_field in ("effective_date", "next_review_date"):
         if isinstance(payload.get(date_field), date):
             payload[date_field] = payload[date_field].isoformat()
+    if viewer_scope(current_user) is not None:
+        merged = {**existing, **payload}
+        assert_row_visible(current_user, "sop_documents", merged, detail="SOP not found")
     payload["updated_at"] = datetime.utcnow().isoformat()
     payload["updated_by"] = current_user.get("email", "")
 
@@ -299,6 +310,7 @@ async def update_sop(
 @router.post("/{sop_id}/archive", dependencies=[Depends(require_role("manager"))])
 async def archive_sop(sop_id: str, current_user: dict = Depends(require_role("manager"))):
     existing = get_or_404(supabase, "sop_documents", sop_id, detail="SOP not found")
+    assert_row_visible(current_user, "sop_documents", existing, detail="SOP not found")
     if existing.get("deleted_at"):
         raise HTTPException(400, "This SOP is already archived")
     try:
@@ -320,6 +332,7 @@ async def archive_sop(sop_id: str, current_user: dict = Depends(require_role("ma
 @router.post("/{sop_id}/restore", dependencies=[Depends(require_role("manager"))])
 async def restore_sop(sop_id: str, current_user: dict = Depends(require_role("manager"))):
     existing = get_or_404(supabase, "sop_documents", sop_id, detail="SOP not found")
+    assert_row_visible(current_user, "sop_documents", existing, detail="SOP not found")
     if not existing.get("deleted_at"):
         raise HTTPException(400, "This SOP is not archived")
     try:

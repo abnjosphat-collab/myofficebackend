@@ -7,6 +7,7 @@ from app.supabase_client import supabase
 from app.auth import get_current_user, require_role
 from app.cache import cached, invalidate_namespace
 from app.db_helpers import get_or_404
+from app.scope import apply_list_scope, assert_row_visible, stamp_create, viewer_scope
 from app.errors import server_error
 import logging
 
@@ -35,6 +36,7 @@ class EquipmentBase(BaseModel):
     status: Optional[str] = "operational"
     location: Optional[str] = None
     department: Optional[str] = None
+    section: Optional[str] = None
     assigned_to: Optional[str] = None
 
     # Purchase information
@@ -140,10 +142,11 @@ def generate_equipment_id():
 @router.get("", dependencies=[Depends(get_current_user)])
 @router.get("/", dependencies=[Depends(get_current_user)])
 @cached("equipment", ttl=60)
-async def get_equipment():
+async def get_equipment(current_user: dict = Depends(get_current_user)):
     """Retrieve all equipment from the database."""
     try:
-        response = supabase.table("equipment").select("*").execute()
+        query = apply_list_scope(supabase.table("equipment").select("*"), current_user, "equipment")
+        response = query.execute()
         data = get_supabase_data(response)
         
         if not data:
@@ -156,10 +159,11 @@ async def get_equipment():
         raise server_error(e, "Loading equipment")
 
 @router.get("/{equipment_id}", dependencies=[Depends(get_current_user)])
-async def get_equipment_item(equipment_id: int):
+async def get_equipment_item(equipment_id: int, current_user: dict = Depends(get_current_user)):
     """Retrieve a specific equipment item by ID."""
     try:
         row = get_or_404(supabase, "equipment", equipment_id, detail=f"Equipment with ID {equipment_id} not found")
+        assert_row_visible(current_user, "equipment", row, detail=f"Equipment with ID {equipment_id} not found")
         equipment_data = process_dates_from_db(row)
         return equipment_data
     except HTTPException:
@@ -181,6 +185,7 @@ async def create_equipment(equipment: Equipment, current_user: dict = Depends(ge
         if not data_to_insert.get('equipment_id'):
             data_to_insert['equipment_id'] = generate_equipment_id()
         
+        data_to_insert = stamp_create(current_user, "equipment", data_to_insert)
         data_to_insert = process_dates_for_db(data_to_insert)
         
         logger.debug(f"Inserting equipment data: {data_to_insert}")
@@ -205,7 +210,7 @@ async def create_equipment(equipment: Equipment, current_user: dict = Depends(ge
 async def update_equipment(equipment_id: int, updated: Equipment, current_user: dict = Depends(get_current_user)):
     """Update an existing equipment record."""
     try:
-        existing_response = supabase.table("equipment").select("id").eq("id", equipment_id).execute()
+        existing_response = supabase.table("equipment").select("id,section").eq("id", equipment_id).execute()
         existing_data = get_supabase_data(existing_response)
             
         if not existing_data:
@@ -224,6 +229,9 @@ async def update_equipment(equipment_id: int, updated: Equipment, current_user: 
         if 'equipment_id' in data_to_update and not data_to_update['equipment_id']:
             data_to_update.pop('equipment_id')
         
+        if viewer_scope(current_user) is not None:
+            merged = {**existing_data[0], **data_to_update}
+            assert_row_visible(current_user, "equipment", merged, detail=f"Equipment with ID {equipment_id} not found")
         result = supabase.table("equipment").update(data_to_update).eq("id", equipment_id).execute()
         updated_data = get_supabase_data(result)
             
@@ -244,7 +252,7 @@ async def update_equipment(equipment_id: int, updated: Equipment, current_user: 
 async def delete_equipment(equipment_id: int, current_user: dict = Depends(require_role('manager'))):
     """Delete an equipment record."""
     try:
-        existing_response = supabase.table("equipment").select("id, name").eq("id", equipment_id).execute()
+        existing_response = supabase.table("equipment").select("id, name, section").eq("id", equipment_id).execute()
         existing_data = get_supabase_data(existing_response)
             
         if not existing_data:
@@ -253,6 +261,7 @@ async def delete_equipment(equipment_id: int, current_user: dict = Depends(requi
                 detail=f"Equipment with ID {equipment_id} not found"
             )
         
+        assert_row_visible(current_user, "equipment", existing_data[0], detail=f"Equipment with ID {equipment_id} not found")
         equipment_name = existing_data[0].get('name', 'Unknown')
         
         supabase.table("equipment").delete().eq("id", equipment_id).execute()

@@ -3,7 +3,8 @@ from pydantic import BaseModel
 from typing import Optional
 import logging
 from app.supabase_client import supabase, rows, one_row
-from app.auth import get_current_user, require_role
+from app.auth import get_current_user, get_current_user_optional, require_role
+from app.scope import apply_list_scope, assert_row_visible, stamp_create, viewer_scope
 from app.errors import server_error
 from app.clock import today_harare
 from datetime import datetime, timedelta
@@ -24,7 +25,7 @@ class AvailRecordIn(BaseModel):
 # ─── Existing read endpoints ──────────────────────────────────────────────────
 
 @router.get("/availabilities", dependencies=[Depends(get_current_user)])
-async def get_availabilities():
+async def get_availabilities(current_user: dict = Depends(get_current_user)):
     """Get equipment list with their latest availability data merged in.
 
     Equipment with no availability record gets ``availability``, ``mtbf`` and
@@ -32,7 +33,8 @@ async def get_availabilities():
     """
     try:
         logger.info("Fetching equipment with availability data...")
-        equipment = rows(supabase.table("equipment").select("*").execute())
+        _eq_q = apply_list_scope(supabase.table("equipment").select("*"), current_user, "equipment")
+        equipment = rows(_eq_q.execute())
 
         for eq in equipment:
             av_resp = (supabase.table("availabilities")
@@ -72,11 +74,12 @@ async def get_availabilities():
 
 
 @router.get("/availabilities/stats")
-async def get_availability_stats():
+async def get_availability_stats(current_user: Optional[dict] = Depends(get_current_user_optional)):
     """Aggregate availability statistics."""
     try:
         thirty_days_ago = (today_harare() - timedelta(days=30)).isoformat()
-        equipment = rows(supabase.table("equipment").select("*").execute())
+        _eq_q = apply_list_scope(supabase.table("equipment").select("*"), current_user, "equipment")
+        equipment = rows(_eq_q.execute())
 
         if not equipment:
             return {"totalEquipment": 0, "operational": 0, "inMaintenance": 0, "inBreakdown": 0,
@@ -100,7 +103,8 @@ async def get_availability_stats():
         # does it: 24 possible hours/day per machine, minus that machine's actual
         # breakdown downtime in the window, from the breakdowns table.
         week_start = (today_harare() - timedelta(days=7)).isoformat()
-        week_bd_resp = supabase.table("breakdowns").select("downtime_minutes").gte("breakdown_date", week_start).execute()
+        _bd_q = apply_list_scope(supabase.table("breakdowns").select("downtime_minutes").gte("breakdown_date", week_start), current_user, "breakdowns")
+        week_bd_resp = _bd_q.execute()
         week_bd_hours = sum((b.get("downtime_minutes") or 0) for b in rows(week_bd_resp)) / 60.0
         week_possible_hours = total * 24 * 7
         week_availability = round(((week_possible_hours - week_bd_hours) / week_possible_hours) * 100, 2) if week_possible_hours > 0 else 0
@@ -124,9 +128,12 @@ async def get_availability_stats():
 
 
 @router.get("/availabilities/history/{equipment_id}", dependencies=[Depends(get_current_user)])
-async def get_availability_history(equipment_id: int, days: int = 30):
+async def get_availability_history(equipment_id: int, days: int = 30, current_user: dict = Depends(get_current_user)):
     """Availability history for one piece of equipment."""
     try:
+        if viewer_scope(current_user) is not None:
+            parent_rows = (supabase.table("equipment").select("*").eq("id", equipment_id).execute()).data or []
+            assert_row_visible(current_user, "equipment", parent_rows[0] if parent_rows else None, detail="Equipment not found")
         start_date = (today_harare() - timedelta(days=days)).isoformat()
         response = (supabase.table("availabilities")
                     .select("*")
@@ -147,10 +154,11 @@ async def list_availability_records(
     equipment_id: Optional[int] = None,
     date_from:    Optional[str] = None,
     date_to:      Optional[str] = None,
+    current_user: dict = Depends(get_current_user),
 ):
     """List all availability records with optional filters."""
     try:
-        q = supabase.table("availabilities").select("*").order("date", desc=True)
+        q = apply_list_scope(supabase.table("availabilities").select("*").order("date", desc=True), current_user, "availabilities", supabase)
         if equipment_id: q = q.eq("equipment_id", equipment_id)
         if date_from:    q = q.gte("date", date_from)
         if date_to:      q = q.lte("date", date_to)
@@ -173,19 +181,21 @@ async def availability_from_breakdowns(
     equipment_id: Optional[int] = None,
     date_from:    Optional[str] = None,
     date_to:      Optional[str] = None,
+    current_user: dict = Depends(get_current_user),
 ):
     """Compute availability records derived from breakdown downtime entries."""
     try:
         from collections import defaultdict
 
         # Load equipment: equipment_id (code) → row
-        eq_resp = supabase.table("equipment").select("id, name, equipment_id, category, department").execute()
+        _eq_q = apply_list_scope(supabase.table("equipment").select("id, name, equipment_id, category, department"), current_user, "equipment")
+        eq_resp = _eq_q.execute()
         equipment = rows(eq_resp)
         code_to_eq = {e["equipment_id"]: e for e in equipment}
         name_to_eq = {e["name"]: e for e in equipment}
 
         # Load breakdowns
-        q = supabase.table("breakdowns").select("machine_id, machine_name, breakdown_date, downtime_minutes")
+        q = apply_list_scope(supabase.table("breakdowns").select("machine_id, machine_name, breakdown_date, downtime_minutes"), current_user, "breakdowns")
         if date_from: q = q.gte("breakdown_date", date_from)
         if date_to:   q = q.lte("breakdown_date", date_to)
         bd_resp = q.execute()
@@ -205,6 +215,8 @@ async def availability_from_breakdowns(
                 continue
             # Match equipment by code, then by name
             eq = code_to_eq.get(machine_code) or name_to_eq.get(v["machine_name"])
+            if viewer_scope(current_user) is not None and eq is None:
+                continue
             eq_id  = eq["id"]   if eq else None
             eq_name = eq["name"] if eq else (v["machine_name"] or machine_code)
 
@@ -243,6 +255,7 @@ async def create_availability_record(body: AvailRecordIn, current_user: dict = D
         data.pop("availability_percentage", None)   # generated column — DB computes it
         data["created_at"] = now
         data["updated_at"] = now
+        data = stamp_create(current_user, "availabilities", data, supabase)
         r = supabase.table("availabilities").insert(data).execute()
         created = one_row(r)
         if created is None:
@@ -262,6 +275,10 @@ async def update_availability_record(record_id: int, body: AvailRecordIn, curren
         data = body.model_dump()
         data.pop("availability_percentage", None)   # generated column — DB computes it
         data["updated_at"] = datetime.utcnow().isoformat()
+        if viewer_scope(current_user) is not None:
+            found = (supabase.table("availabilities").select("*").eq("id", record_id).execute()).data or []
+            merged = {**(found[0] if found else {}), **data}
+            assert_row_visible(current_user, "availabilities", merged, supabase, detail="Record not found")
         r = (supabase.table("availabilities")
              .update(data)
              .eq("id", record_id)
@@ -281,6 +298,9 @@ async def update_availability_record(record_id: int, body: AvailRecordIn, curren
 async def delete_availability_record(record_id: int, current_user: dict = Depends(require_role('manager'))):
     """Delete an availability record."""
     try:
+        if viewer_scope(current_user) is not None:
+            found = (supabase.table("availabilities").select("*").eq("id", record_id).execute()).data or []
+            assert_row_visible(current_user, "availabilities", found[0] if found else None, supabase, detail="Record not found")
         supabase.table("availabilities").delete().eq("id", record_id).execute()
         return {"ok": True}
     except Exception as e:

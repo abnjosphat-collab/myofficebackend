@@ -13,6 +13,7 @@ import os
 from dotenv import load_dotenv
 import traceback
 from app.supabase_client import rows, one_row
+from app.scope import apply_list_scope, assert_row_visible, stamp_create, viewer_scope
 from app.errors import server_error
 
 # Load environment variables
@@ -56,6 +57,7 @@ class EquipmentPerformance(BaseModel):
 
 class DailyReportCreate(BaseModel):
     date: str
+    section: Optional[str] = None
     safety: str = ""
     projects: str = ""
     weekly_plan: str = ""
@@ -110,7 +112,8 @@ async def health_check():
 async def get_reports(
     start_date: Optional[str] = Query(None),
     end_date: Optional[str] = Query(None),
-    limit: int = Query(1000, ge=1, le=1000)
+    limit: int = Query(1000, ge=1, le=1000),
+    current_user: dict = Depends(get_current_user)
 ):
     """Get all daily reports"""
     logger.info(f"📡 GET /api/daily-reports called with start_date={start_date}, end_date={end_date}")
@@ -139,6 +142,7 @@ async def get_reports(
         query = supabase.table("daily_reports").select("*")
         
         query = apply_date_range(query, "date", start_date, end_date)
+        query = apply_list_scope(query, current_user, "daily_reports")
         
         # Execute query
         result = query.order("date", desc=True).limit(limit).execute()
@@ -170,10 +174,8 @@ async def create_report(report: DailyReportCreate, current_user: dict = Depends(
             }
         
         # Check if report already exists
-        existing = supabase.table("daily_reports") \
-            .select("*") \
-            .eq("date", report.date) \
-            .execute()
+        _ex_q = supabase.table("daily_reports").select("*").eq("date", report.date)
+        existing = apply_list_scope(_ex_q, current_user, "daily_reports").execute()
         existing_row = one_row(existing)
 
         # Prepare data
@@ -184,15 +186,20 @@ async def create_report(report: DailyReportCreate, current_user: dict = Depends(
 
         if existing_row:
             # Update existing
+            scope = viewer_scope(current_user)
+            if scope is not None:
+                if report_data.get("section") is None:
+                    report_data["section"] = scope
+                elif report_data["section"] != scope:
+                    raise HTTPException(status_code=404, detail="Daily report not found")
             report_data['updated_at'] = now
-            result = supabase.table("daily_reports") \
-                .update(report_data) \
-                .eq("date", report.date) \
-                .execute()
+            _up_q = supabase.table("daily_reports").update(report_data).eq("date", report.date)
+            result = apply_list_scope(_up_q, current_user, "daily_reports").execute()
         else:
             # Create new
             report_data['created_at'] = now
             report_data['updated_at'] = now
+            report_data = stamp_create(current_user, "daily_reports", report_data)
             result = supabase.table("daily_reports").insert(report_data).execute()
         
         created_data = one_row(result)
@@ -214,7 +221,8 @@ async def create_report(report: DailyReportCreate, current_user: dict = Depends(
 @router.get("/stats/summary", dependencies=[Depends(get_current_user)])
 async def get_stats_summary(
     start_date: Optional[str] = Query(None),
-    end_date: Optional[str] = Query(None)
+    end_date: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user)
 ):
     """Get statistics summary"""
     try:
@@ -230,6 +238,7 @@ async def get_stats_summary(
         # Get reports
         query = supabase.table("daily_reports").select("*")
         query = apply_date_range(query, "date", start_date, end_date)
+        query = apply_list_scope(query, current_user, "daily_reports")
         
         result = query.execute()
         reports = rows(result)
@@ -278,7 +287,8 @@ async def get_stats_summary(
 @router.get("/trends/plant-availability", dependencies=[Depends(get_current_user)])
 async def get_plant_availability_trend(
     start_date: Optional[str] = Query(None),
-    end_date: Optional[str] = Query(None)
+    end_date: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user)
 ):
     """Get plant availability trend"""
     try:
@@ -290,7 +300,7 @@ async def get_plant_availability_trend(
             }
         
         # Get reports
-        query = supabase.table("daily_reports") \
+        query = apply_list_scope(supabase.table("daily_reports"), current_user, "daily_reports") \
             .select("date, plant_availability_percent, dam_level") \
             .order("date", desc=True) \
             .limit(30)
@@ -330,7 +340,8 @@ async def get_plant_availability_trend(
 @router.get("/trends/equipment-performance", dependencies=[Depends(get_current_user)])
 async def get_equipment_performance_trend(
     start_date: Optional[str] = Query(None),
-    end_date: Optional[str] = Query(None)
+    end_date: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user)
 ):
     """Get equipment performance trend"""
     try:
@@ -338,7 +349,7 @@ async def get_equipment_performance_trend(
             return {"equipment_data": [], "categories": []}
         
         # Get reports
-        query = supabase.table("daily_reports") \
+        query = apply_list_scope(supabase.table("daily_reports"), current_user, "daily_reports") \
             .select("date, equipment") \
             .order("date", desc=True) \
             .limit(30)
@@ -406,7 +417,8 @@ async def delete_all_reports(current_user: dict = Depends(require_role('manager'
             }
         
         # Get count before deletion
-        all_reports = supabase.table("daily_reports").select("*").execute()
+        _q = apply_list_scope(supabase.table("daily_reports").select("*"), current_user, "daily_reports")
+        all_reports = _q.execute()
         report_count = len(rows(all_reports))
         
         if report_count == 0:
@@ -417,7 +429,8 @@ async def delete_all_reports(current_user: dict = Depends(require_role('manager'
             }
         
         # Delete all
-        supabase.table("daily_reports").delete().neq("id", 0).execute()
+        _dq = apply_list_scope(supabase.table("daily_reports").delete().neq("id", 0), current_user, "daily_reports")
+        _dq.execute()
         
         return {
             "success": True,

@@ -5,6 +5,7 @@ from app.clock import today_harare
 from app.supabase_client import supabase
 from app.auth import get_current_user, require_role
 from app.db_helpers import get_or_404
+from app.scope import apply_list_scope, assert_row_visible, stamp_create, viewer_scope
 from app.errors import server_error
 from datetime import date
 import logging
@@ -53,9 +54,10 @@ class ComplianceUpdate(BaseModel):
 
 @router.get("", dependencies=[Depends(get_current_user)])
 @router.get("/", dependencies=[Depends(get_current_user)])
-async def get_compliance(status: Optional[str] = None):
+async def get_compliance(status: Optional[str] = None, current_user: dict = Depends(get_current_user)):
     try:
-        r = supabase.table("compliance_register").select("*").order("expiry_date").execute()
+        _q = apply_list_scope(supabase.table("compliance_register").select("*").order("expiry_date"), current_user, "compliance_register", supabase)
+        r = _q.execute()
         items = r.data or []
         # Auto-refresh computed status
         for item in items:
@@ -67,8 +69,9 @@ async def get_compliance(status: Optional[str] = None):
         raise server_error(e, "Loading compliance")
 
 @router.get("/{c_id}", dependencies=[Depends(get_current_user)])
-async def get_compliance_item(c_id: int):
+async def get_compliance_item(c_id: int, current_user: dict = Depends(get_current_user)):
     item = get_or_404(supabase, "compliance_register", c_id, detail="Item not found")
+    assert_row_visible(current_user, "compliance_register", item, supabase, detail="Item not found")
     item["status"] = _compute_status(item.get("expiry_date"))
     return item
 
@@ -78,6 +81,7 @@ async def create_compliance(data: ComplianceCreate, current_user: dict = Depends
     try:
         payload = data.model_dump(exclude_none=True)
         payload["status"] = _compute_status(data.expiry_date)
+        payload = stamp_create(current_user, "compliance_register", payload, supabase)
         r = supabase.table("compliance_register").insert(payload).execute()
         if not r.data:
             raise HTTPException(500, "Insert failed")
@@ -91,6 +95,10 @@ async def create_compliance(data: ComplianceCreate, current_user: dict = Depends
 async def update_compliance(c_id: int, data: ComplianceUpdate, current_user: dict = Depends(get_current_user)):
     # exclude_unset, not a None-filter: an explicitly-sent null must clear the
     # field, not be silently dropped. See work_orders (backend edec24a).
+    if viewer_scope(current_user) is not None:
+        found = (supabase.table("compliance_register").select("*").eq("id", c_id).execute()).data or []
+        merged = {**(found[0] if found else {}), **data.model_dump(exclude_unset=True)}
+        assert_row_visible(current_user, "compliance_register", merged, supabase, detail="Item not found")
     payload = data.model_dump(exclude_unset=True)
     if "expiry_date" in payload:
         payload["status"] = _compute_status(payload["expiry_date"])
@@ -101,5 +109,8 @@ async def update_compliance(c_id: int, data: ComplianceUpdate, current_user: dic
 
 @router.delete("/{c_id}")
 async def delete_compliance(c_id: int, current_user: dict = Depends(require_role('manager'))):
+    if viewer_scope(current_user) is not None:
+        found = (supabase.table("compliance_register").select("*").eq("id", c_id).execute()).data or []
+        assert_row_visible(current_user, "compliance_register", found[0] if found else None, supabase, detail="Item not found")
     supabase.table("compliance_register").delete().eq("id", c_id).execute()
     return {"ok": True}
