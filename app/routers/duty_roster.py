@@ -22,6 +22,7 @@ from app.supabase_client import supabase, rows, one_row
 from app.auth import get_current_user, require_role
 from app.db_helpers import fetch_all_pages, get_or_404
 from app.errors import server_error
+from app.scope import apply_list_scope, assert_row_visible, person_ids_for, row_visible, stamp_create, viewer_scope
 
 logger = logging.getLogger(__name__)
 
@@ -78,8 +79,18 @@ def _as_day(value: Any) -> str:
     return str(value or "")[:10]
 
 
+def _visible_ids(user) -> Optional[set]:
+    """Row ids this viewer may see, or None for a full view (unscoped)."""
+    if viewer_scope(user) is None:
+        return None
+    bank = person_ids_for(supabase, user)
+    found = rows(supabase.table(TABLE).select("id,employee_id").execute())
+    return {r["id"] for r in found if row_visible(user, TABLE, r, supabase, bank)}
+
+
 def _find_overlap(
-    department: Optional[str], date_from: str, date_to: str, exclude_id: Optional[int] = None
+    department: Optional[str], date_from: str, date_to: str, exclude_id: Optional[int] = None,
+    only_ids: Optional[set] = None,
 ) -> Optional[Dict[str, Any]]:
     want = _scope(department)
 
@@ -88,6 +99,8 @@ def _find_overlap(
 
     existing = fetch_all_pages(lambda start, end: _query().range(start, end).execute(), extract_rows=rows)
     for row in existing:
+        if only_ids is not None and row.get("id") not in only_ids:
+            continue
         if exclude_id is not None and row.get("id") == exclude_id:
             continue
         if _scope(row.get("department")) != want:
@@ -100,9 +113,10 @@ def _find_overlap(
 
 
 def _reject_overlap(
-    department: Optional[str], date_from: str, date_to: str, exclude_id: Optional[int] = None
+    department: Optional[str], date_from: str, date_to: str, exclude_id: Optional[int] = None,
+    only_ids: Optional[set] = None,
 ) -> None:
-    clash = _find_overlap(department, date_from, date_to, exclude_id)
+    clash = _find_overlap(department, date_from, date_to, exclude_id, only_ids)
     if clash:
         scope = f"department {clash.get('department')}" if _scope(clash.get("department")) else "mine-wide"
         raise HTTPException(
@@ -116,9 +130,12 @@ def _reject_overlap(
 
 @router.get("")
 async def list_duty_roster(current_user: dict = Depends(get_current_user)):
+    person_ids = person_ids_for(supabase, current_user)
     try:
         def _query():
-            return supabase.table(TABLE).select("*").order("date_from").order("id")
+            return apply_list_scope(
+                supabase.table(TABLE).select("*").order("date_from").order("id"),
+                current_user, TABLE, supabase, person_ids)
 
         return fetch_all_pages(lambda start, end: _query().range(start, end).execute(), extract_rows=rows)
     except Exception as e:
@@ -129,7 +146,10 @@ async def list_duty_roster(current_user: dict = Depends(get_current_user)):
 @router.get("/{entry_id}")
 async def get_duty_entry(entry_id: int, current_user: dict = Depends(get_current_user)):
     try:
-        return get_or_404(supabase, TABLE, entry_id, detail="Duty roster entry not found")
+        row = get_or_404(supabase, TABLE, entry_id, detail="Duty roster entry not found")
+        return assert_row_visible(current_user, TABLE, row, supabase,
+                                  person_ids_for(supabase, current_user),
+                                  detail="Duty roster entry not found")
     except HTTPException:
         raise
     except Exception as e:
@@ -139,11 +159,14 @@ async def get_duty_entry(entry_id: int, current_user: dict = Depends(get_current
 
 @router.post("")
 async def create_duty_entry(body: DutyRosterCreate, current_user: dict = Depends(get_current_user)):
+    if viewer_scope(current_user) is not None:
+        stamp_create(current_user, TABLE, {"employee_id": body.employee_id},
+                     supabase, person_ids_for(supabase, current_user))
     try:
         department = _clean_department(body.department)
         date_from = body.date_from.isoformat()
         date_to = body.date_to.isoformat()
-        _reject_overlap(department, date_from, date_to)
+        _reject_overlap(department, date_from, date_to, only_ids=_visible_ids(current_user))
 
         payload = body.model_dump()
         payload["department"] = department
@@ -166,6 +189,10 @@ async def create_duty_entry(body: DutyRosterCreate, current_user: dict = Depends
 async def update_duty_entry(entry_id: int, body: DutyRosterUpdate, current_user: dict = Depends(get_current_user)):
     try:
         existing = get_or_404(supabase, TABLE, entry_id, detail="Duty roster entry not found")
+        if viewer_scope(current_user) is not None:
+            assert_row_visible(current_user, TABLE, existing, supabase,
+                               person_ids_for(supabase, current_user),
+                               detail="Duty roster entry not found")
         data = body.model_dump(exclude_unset=True)
         if not data:
             return existing
@@ -181,7 +208,13 @@ async def update_duty_entry(entry_id: int, body: DutyRosterUpdate, current_user:
         date_to = _as_day(data.get("date_to", existing.get("date_to")))
         if date_from > date_to:
             raise HTTPException(status_code=422, detail="date_to must not be before date_from")
-        _reject_overlap(department, date_from, date_to, exclude_id=entry_id)
+        if viewer_scope(current_user) is not None and "employee_id" in data:
+            merged = {**existing, **data}
+            assert_row_visible(current_user, TABLE, merged, supabase,
+                               person_ids_for(supabase, current_user),
+                               detail="Duty roster entry not found")
+        _reject_overlap(department, date_from, date_to, exclude_id=entry_id,
+                        only_ids=_visible_ids(current_user))
 
         data["updated_at"] = datetime.utcnow().isoformat()
         response = supabase.table(TABLE).update(data).eq("id", entry_id).execute()
@@ -199,7 +232,11 @@ async def update_duty_entry(entry_id: int, body: DutyRosterUpdate, current_user:
 @router.delete("/{entry_id}")
 async def delete_duty_entry(entry_id: int, current_user: dict = Depends(require_role("manager"))):
     try:
-        get_or_404(supabase, TABLE, entry_id, detail="Duty roster entry not found")
+        existing = get_or_404(supabase, TABLE, entry_id, detail="Duty roster entry not found")
+        if viewer_scope(current_user) is not None:
+            assert_row_visible(current_user, TABLE, existing, supabase,
+                               person_ids_for(supabase, current_user),
+                               detail="Duty roster entry not found")
         supabase.table(TABLE).delete().eq("id", entry_id).execute()
         return {"success": True, "message": "Duty roster entry deleted"}
     except HTTPException:

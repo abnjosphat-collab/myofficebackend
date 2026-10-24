@@ -8,7 +8,7 @@ Table: `ppe_order_list` (see supabase_migration_shared_lists.sql).
 """
 import logging
 import re
-from typing import Any, List, Literal
+from typing import Any, List, Literal, cast
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
@@ -18,6 +18,7 @@ from app.auth import get_current_user
 from app.db_helpers import fetch_all_pages
 from app.supabase_client import supabase
 from app.errors import server_error
+from app.scope import assert_row_visible, filter_rows, person_ids_for, row_visible, viewer_scope
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -80,6 +81,10 @@ async def update_order_line(record_id: str, body: PatchLine, current_user: dict 
     if not rows:
         raise HTTPException(status_code=404, detail="That order line is not on the list.")
     first = rows[0] if isinstance(rows[0], dict) else {}
+    if viewer_scope(current_user) is not None:
+        assert_row_visible(current_user, TABLE, first, supabase,
+                           person_ids_for(supabase, current_user),
+                           detail="That order line is not on the list.")
     entry = first.get("entry")
     stored = dict(entry) if isinstance(entry, dict) else {}
     patch = {k: v for k, v in body.model_dump(exclude_unset=True).items() if v is not None}
@@ -108,9 +113,9 @@ def _entry_of(row: dict[str, Any]) -> dict[str, Any]:
     return entry
 
 
-@router.get("", dependencies=[Depends(get_current_user)])
-@router.get("/", dependencies=[Depends(get_current_user)])
-async def list_order_lines():
+@router.get("")
+@router.get("/")
+async def list_order_lines(current_user: dict = Depends(get_current_user)):
     try:
         data = await run_in_threadpool(lambda: fetch_all_pages(
             lambda start, end: supabase.table(TABLE).select("*").order("added_at", desc=False).order("record_id").range(start, end).execute()
@@ -118,6 +123,8 @@ async def list_order_lines():
     except Exception as e:
         logger.error(f"list_order_lines error: {e}")
         raise server_error(e, "Loading order lines")
+    if viewer_scope(current_user) is not None:
+        data = filter_rows(current_user, TABLE, data, supabase, person_ids_for(supabase, current_user))
     return [_entry_of(row) for row in data]
 
 
@@ -128,6 +135,11 @@ async def add_order_lines(body: AddLines, current_user: dict = Depends(get_curre
     if not body.entries:
         return {"added": 0}
     _check_record_ids(body.entries)
+    if viewer_scope(current_user) is not None:
+        person_ids = person_ids_for(supabase, current_user)
+        for e in body.entries:
+            if not row_visible(current_user, TABLE, {"entry": e.model_dump()}, supabase, person_ids):
+                raise HTTPException(status_code=404, detail="Not found")
     who = current_user.get("email") or current_user.get("user_id") or ""
     payload = [{"record_id": e.record_id, "entry": e.model_dump(exclude_none=True), "added_by": who} for e in body.entries]
     try:
@@ -144,7 +156,17 @@ async def remove_order_lines(body: RemoveLines, current_user: dict = Depends(get
     if not body.record_ids:
         return {"ok": True}
     try:
-        await run_in_threadpool(lambda: supabase.table(TABLE).delete().in_("record_id", body.record_ids).execute())
+        doomed = list(body.record_ids)
+        if viewer_scope(current_user) is not None:
+            found = await run_in_threadpool(
+                lambda: supabase.table(TABLE).select("*").in_("record_id", body.record_ids).execute()
+            )
+            person_ids = person_ids_for(supabase, current_user)
+            found_rows = cast("list[dict]", found.data or [])
+            doomed = [r.get("record_id") for r in found_rows
+                      if row_visible(current_user, TABLE, r, supabase, person_ids)]
+        if doomed:
+            await run_in_threadpool(lambda: supabase.table(TABLE).delete().in_("record_id", doomed).execute())
     except Exception as e:
         logger.error(f"remove_order_lines error: {e}")
         raise server_error(e, "Deleting order lines")
@@ -154,9 +176,20 @@ async def remove_order_lines(body: RemoveLines, current_user: dict = Depends(get
 @router.delete("")
 @router.delete("/")
 async def clear_order_list(current_user: dict = Depends(get_current_user)):
-    """Empty the whole list (after the order has been placed)."""
+    """Empty the whole list (after the order has been placed) — a scoped clear
+    empties the viewer's slice, never anyone else's lines."""
     try:
-        await run_in_threadpool(lambda: supabase.table(TABLE).delete().neq("record_id", "").execute())
+        if viewer_scope(current_user) is None:
+            await run_in_threadpool(lambda: supabase.table(TABLE).delete().neq("record_id", "").execute())
+        else:
+            data = await run_in_threadpool(lambda: fetch_all_pages(
+                lambda start, end: supabase.table(TABLE).select("*").range(start, end).execute()
+            ))
+            person_ids = person_ids_for(supabase, current_user)
+            doomed = [r.get("record_id") for r in data
+                      if row_visible(current_user, TABLE, r, supabase, person_ids)]
+            if doomed:
+                await run_in_threadpool(lambda: supabase.table(TABLE).delete().in_("record_id", doomed).execute())
     except Exception as e:
         logger.error(f"clear_order_list error: {e}")
         raise server_error(e, "Clearing order list")

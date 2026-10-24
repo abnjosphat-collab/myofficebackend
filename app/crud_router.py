@@ -38,6 +38,13 @@ no DB-level default/trigger) that doesn't justify hand-writing the whole endpoin
 difference (computed fields, joins) — that's still a sign the table needs its own
 hand-written endpoint alongside the base, same as `contractors.py`.
 
+`scope_table` (optional): enforce a section limit through app/scope.py — pass
+the registry table (usually == `table`). Lists gain the scope predicate (member-
+list tables filter in Python, then honour ?limit=/?offset= against the slice);
+creates stamp/refuse; PATCH/DELETE check visibility BEFORE writing (missing or
+out-of-scope → 404, nothing written). None (default) = shared/exempt rows,
+untouched for every viewer. Unknown table → RuntimeError at construction.
+
 Subclass to extend:
 
     class ContractorsRouter(CrudRouter):
@@ -57,6 +64,7 @@ from pydantic import BaseModel
 
 from app.supabase_client import supabase, rows as db_rows, one_row
 from app.auth import get_current_user, require_role
+from app.scope import TABLES, apply_list_scope, assert_row_visible, filter_rows, person_ids_for, stamp_create, viewer_scope
 from app.db_helpers import or_ilike
 from app.errors import server_error
 import logging
@@ -102,6 +110,11 @@ class CrudRouter:
         # int (default, a SERIAL primary key) or str (a UUID/client-generated id, e.g.
         # notices.py) — several tables in this codebase use string ids, not just one.
         id_type: Type = int,
+        # Enforce a section limit through the scope registry (app/scope.py): the
+        # registry table (usually == table). None (default) = this table's rows
+        # are shared/exempt — every signed-in viewer sees the same rows,
+        # exactly as before scoping existed.
+        scope_table: Optional[str] = None,
     ):
         self.table = table
         self.create_model = create_model
@@ -116,6 +129,9 @@ class CrudRouter:
         self.before_create = before_create
         self.before_update = before_update
         self.id_type = id_type
+        self.scope_table = scope_table
+        if scope_table is not None and scope_table not in TABLES:
+            raise RuntimeError(f"CrudRouter scope_table {scope_table!r} is not in the scope registry")
         self.router = APIRouter(tags=tags or [])
         self._register()
 
@@ -136,6 +152,7 @@ class CrudRouter:
         before_create = self.before_create
         before_update = self.before_update
         id_type = self.id_type
+        scope_table = self.scope_table
 
         def cast_id(raw: str):
             # The path param is always read as str (FastAPI's natural type for a URL
@@ -149,8 +166,13 @@ class CrudRouter:
                     raise HTTPException(status_code=422, detail=f"Invalid id: {raw!r}")
             return raw
 
-        async def list_items(request: Request):
+        async def list_items(request: Request, current_user: dict = Depends(get_current_user)):
             try:
+                # Scoped viewers of an opted-in table see their slice; everything
+                # else runs the exact query it always did.
+                stable = scope_table if scope_table is not None and viewer_scope(current_user) is not None else None
+                members = stable is not None and TABLES[stable]["rule"] == "members"
+                person_ids = person_ids_for(supabase, current_user) if stable is not None else None
                 q = supabase.table(table).select("*")
                 params = request.query_params
                 search = params.get("search")
@@ -160,8 +182,34 @@ class CrudRouter:
                     value = params.get(param)
                     if value is not None and value != "":
                         q = q.eq(column, value)
+                if stable is not None and not members:
+                    q = apply_list_scope(q, current_user, stable, supabase, person_ids)
                 q = q.order(order_by, desc=order_desc)
-                if default_limit is not None:
+                if stable is not None and members:
+                    # Member-list tables are handfuls of rows: fetch everything,
+                    # keep the viewer's slice, then honour ?limit=/?offset=
+                    # against that slice.
+                    PAGE = 1000
+                    everything = []
+                    start = 0
+                    while True:
+                        batch = db_rows(q.range(start, start + PAGE - 1).execute())
+                        everything.extend(batch)
+                        if len(batch) < PAGE:
+                            break
+                        start += PAGE
+                    result = filter_rows(current_user, stable, everything, supabase, person_ids)
+                    try:
+                        offset = max(0, int(params.get("offset") or 0))
+                    except (TypeError, ValueError):
+                        offset = 0
+                    raw_limit = params.get("limit", default_limit)
+                    try:
+                        limit = int(raw_limit) if raw_limit is not None else None
+                    except (TypeError, ValueError):
+                        limit = default_limit
+                    result = result[offset:] if limit is None else result[offset:offset + max(0, limit)]
+                elif default_limit is not None:
                     try:
                         limit = int(params.get("limit", default_limit))
                     except (TypeError, ValueError):
@@ -189,11 +237,13 @@ class CrudRouter:
                 logger.error(f"[{table}] list failed: {e}")
                 raise server_error(e, "Loading items")
 
-        async def create_item(data: create_model):
+        async def create_item(data: create_model, current_user: dict = Depends(get_current_user)):
             try:
                 payload = data.model_dump(exclude_none=True)
                 if before_create:
                     payload = before_create(payload)
+                if scope_table is not None:
+                    payload = stamp_create(current_user, scope_table, payload, supabase, person_ids_for(supabase, current_user))
                 r = supabase.table(table).insert(payload).execute()
                 created = one_row(r)
                 if created is None:
@@ -205,7 +255,7 @@ class CrudRouter:
                 logger.error(f"[{table}] create failed: {e}")
                 raise server_error(e, "Creating item")
 
-        async def update_item(item_id: str, data: update_model):
+        async def update_item(item_id: str, data: update_model, current_user: dict = Depends(get_current_user)):
             # exclude_unset (not a None-filter): an explicitly-sent null clears the field,
             # an unset field is left untouched. See work_orders (backend edec24a).
             payload = data.model_dump(exclude_unset=True)
@@ -213,31 +263,29 @@ class CrudRouter:
                 raise HTTPException(status_code=400, detail="No fields to update")
             if before_update:
                 payload = before_update(payload)
+            if scope_table is not None and viewer_scope(current_user) is not None:
+                # Both ends visible, before anything is written: the row as it
+                # stands (missing/out-of-scope → 404) and the row as the patch
+                # would leave it (a move out of scope → 404, nothing written).
+                existing = one_row(supabase.table(table).select("*").eq("id", cast_id(item_id)).execute())
+                merged = {**existing, **payload} if existing is not None else None
+                assert_row_visible(current_user, scope_table, merged, supabase, person_ids_for(supabase, current_user), detail=not_found)
             r = supabase.table(table).update(payload).eq("id", cast_id(item_id)).execute()
             updated = one_row(r)
             if updated is None:
                 raise HTTPException(status_code=404, detail=not_found)
             return serialize_row(updated)
 
-        async def delete_item(item_id: str):
+        async def delete_item(item_id: str, admin: dict = Depends(require_role("manager"))):
+            if scope_table is not None and viewer_scope(admin) is not None:
+                existing = one_row(supabase.table(table).select("*").eq("id", cast_id(item_id)).execute())
+                assert_row_visible(admin, scope_table, existing, supabase, person_ids_for(supabase, admin), detail=not_found)
             supabase.table(table).delete().eq("id", cast_id(item_id)).execute()
             return {"ok": True}
 
         # Register both "" and "/" to match the hand-written routers, which decorated both.
         for path in ("", "/"):
-            self.router.add_api_route(
-                path, list_items, methods=["GET"],
-                dependencies=[Depends(get_current_user)],
-            )
-            self.router.add_api_route(
-                path, create_item, methods=["POST"],
-                dependencies=[Depends(get_current_user)],
-            )
-        self.router.add_api_route(
-            "/{item_id}", update_item, methods=["PATCH"],
-            dependencies=[Depends(get_current_user)],
-        )
-        self.router.add_api_route(
-            "/{item_id}", delete_item, methods=["DELETE"],
-            dependencies=[Depends(require_role("manager"))],
-        )
+            self.router.add_api_route(path, list_items, methods=["GET"])
+            self.router.add_api_route(path, create_item, methods=["POST"])
+        self.router.add_api_route("/{item_id}", update_item, methods=["PATCH"])
+        self.router.add_api_route("/{item_id}", delete_item, methods=["DELETE"])

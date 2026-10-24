@@ -18,22 +18,30 @@ Two things the original router had that this migration deliberately changes:
 
 /stats/summary is genuinely custom (an aggregation, not a CRUD verb) and stays
 hand-added alongside the base, same pattern as contractors.py.
+
+Scoping (Batch 2): recipient_id is optional, so a NULL recipient falls back
+to matching recipient_name against in-scope people (Q6) — the generic
+predicated list cannot express that, so the list is hand-rolled here too
+(scoped: in-scope-or-NULL predicate, NULLs name-filtered in Python, then
+?limit=/?offset= against the slice; unscoped: the generic path verbatim).
 """
+import json
 from typing import List, Optional
 
-from fastapi import Depends, HTTPException
+from fastapi import Depends, HTTPException, Request
 from starlette.concurrency import run_in_threadpool
 from pydantic import BaseModel, Field
 import logging
 
 from app.clock import today_harare, week_start_harare
-from app.crud_router import CrudRouter
-from app.supabase_client import supabase, one_row
+from app.crud_router import CrudRouter, serialize_row
+from app.supabase_client import supabase, one_row, rows as db_rows
 from app.auth import get_current_user, require_role
-from app.db_helpers import fetch_all_pages
+from app.db_helpers import fetch_all_pages, or_ilike
 from app.concurrency import assert_unchanged, touch
 from app.stock_levels import adjust_stock, item_deltas
 from app.errors import server_error
+from app.scope import person_ids_for, viewer_scope
 
 logger = logging.getLogger(__name__)
 
@@ -105,6 +113,7 @@ router = CrudRouter(
 router.routes[:] = [
     r for r in router.routes
     if not (getattr(r, "path", None) in ("", "/") and "POST" in getattr(r, "methods", set()))
+    and not (getattr(r, "path", None) in ("", "/") and "GET" in getattr(r, "methods", set()))
     and not (getattr(r, "path", None) == "/{item_id}" and getattr(r, "methods", set()) & {"PATCH", "DELETE"})
 ]
 
@@ -118,9 +127,75 @@ def _with_stock(row: dict, report: dict) -> dict:
     return {**row, "stock": report["stock"], "stock_warnings": report["warnings"]}
 
 
-async def _create_issue(data: StockIssueCreate):
+def _norm_name(name) -> str:
+    return " ".join((name or "").split()).lower()
+
+
+def _recipient_visible(recipient_id, recipient_name, person_ids) -> bool:
+    """Q6: the id is authoritative when present; a missing id falls back to
+    the name. Anything else fails closed (hidden / 404)."""
+    if recipient_id:
+        return str(recipient_id) in person_ids["register"]
+    return _norm_name(recipient_name) in person_ids["names"]
+
+
+def _scoped_page(search, allow, start, end):
+    q = supabase.table("stock_issues").select("*")
+    if search:
+        q = q.or_(or_ilike(["recipient_name", "recipient_id", "issued_by"], search))
+    return q.or_(allow).order("issued_at", desc=True).range(start, end).execute()
+
+
+async def _list_issues(request: Request, current_user: dict = Depends(get_current_user)):
+    params = request.query_params
+    try:
+        if viewer_scope(current_user) is None:
+            q = supabase.table("stock_issues").select("*")
+            search = params.get("search")
+            if search:
+                q = q.or_(or_ilike(["recipient_name", "recipient_id", "issued_by"], search))
+            q = q.order("issued_at", desc=True)
+            try:
+                limit = int(params.get("limit", 500))
+            except (TypeError, ValueError):
+                limit = 500
+            result = db_rows(q.limit(limit).offset(int(params.get("offset") or 0)).execute())
+            return [serialize_row(r) for r in result]
+        person_ids = person_ids_for(supabase, current_user)
+        assert person_ids is not None  # unscoped viewers returned above
+        quoted = ",".join(json.dumps(i) for i in sorted(person_ids["register"], key=str))
+        allow = f"recipient_id.in.({quoted}),recipient_id.is.null" if quoted else "recipient_id.is.null"
+        search = params.get("search")
+        records = await run_in_threadpool(lambda: fetch_all_pages(
+            lambda start, end: _scoped_page(search, allow, start, end)
+        ))
+        kept = [r for r in records
+                if _recipient_visible(r.get("recipient_id"), r.get("recipient_name"), person_ids)]
+        try:
+            offset = max(0, int(params.get("offset") or 0))
+        except (TypeError, ValueError):
+            offset = 0
+        raw_limit = params.get("limit", 500)
+        try:
+            limit = int(raw_limit) if raw_limit is not None else None
+        except (TypeError, ValueError):
+            limit = 500
+        kept = kept[offset:] if limit is None else kept[offset:offset + max(0, limit)]
+        return [serialize_row(r) for r in kept]
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"[stock_issues] list failed: {e}")
+        raise server_error(e, "Loading items")
+
+
+async def _create_issue(data: StockIssueCreate, current_user: dict = Depends(get_current_user)):
     try:
         payload = _clean_issue_write(data.model_dump(exclude_none=True))
+        if viewer_scope(current_user) is not None and not _recipient_visible(
+                payload.get("recipient_id"), payload.get("recipient_name"),
+                person_ids_for(supabase, current_user)):
+            raise HTTPException(status_code=404, detail="Not found")
         created = one_row(await run_in_threadpool(lambda: supabase.table("stock_issues").insert(payload).execute()))
         if created is None:
             raise HTTPException(status_code=500, detail="Insert failed")
@@ -133,7 +208,7 @@ async def _create_issue(data: StockIssueCreate):
     return _with_stock(created, report)
 
 
-async def _update_issue(item_id: int, data: StockIssueUpdate):
+async def _update_issue(item_id: int, data: StockIssueUpdate, current_user: dict = Depends(get_current_user)):
     payload = _clean_issue_write(data.model_dump(exclude_unset=True))
     expectation = payload.pop('expected_updated_at', None)
     if not payload:
@@ -142,6 +217,13 @@ async def _update_issue(item_id: int, data: StockIssueUpdate):
         before = one_row(await run_in_threadpool(lambda: supabase.table("stock_issues").select("*").eq("id", item_id).execute()))
         if before is None:
             raise HTTPException(status_code=404, detail="Issue record not found")
+        if viewer_scope(current_user) is not None:
+            person_ids = person_ids_for(supabase, current_user)
+            merged = {**before, **payload}
+            if not _recipient_visible(before.get("recipient_id"), before.get("recipient_name"), person_ids):
+                raise HTTPException(status_code=404, detail="Issue record not found")
+            if not _recipient_visible(merged.get("recipient_id"), merged.get("recipient_name"), person_ids):
+                raise HTTPException(status_code=404, detail="Issue record not found")
         assert_unchanged(before, expectation)
         touch(before, payload)
         updated = one_row(await run_in_threadpool(lambda: supabase.table("stock_issues").update(payload).eq("id", item_id).execute()))
@@ -168,7 +250,13 @@ async def _update_issue(item_id: int, data: StockIssueUpdate):
 async def _delete_issue(item_id: int, current_user: dict = Depends(require_role("manager"))):
     try:
         before = one_row(await run_in_threadpool(lambda: supabase.table("stock_issues").select("*").eq("id", item_id).execute()))
+        if before is not None and viewer_scope(current_user) is not None and not _recipient_visible(
+                before.get("recipient_id"), before.get("recipient_name"),
+                person_ids_for(supabase, current_user)):
+            raise HTTPException(status_code=404, detail="Issue record not found")
         await run_in_threadpool(lambda: supabase.table("stock_issues").delete().eq("id", item_id).execute())
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"[stock_issues] delete failed: {e}")
         raise server_error(e, "Deleting issue")
@@ -178,18 +266,22 @@ async def _delete_issue(item_id: int, current_user: dict = Depends(require_role(
 
 
 for _path in ("", "/"):
-    router.add_api_route(_path, _create_issue, methods=["POST"], dependencies=[Depends(get_current_user)])
-router.add_api_route("/{item_id}", _update_issue, methods=["PATCH"], dependencies=[Depends(get_current_user)])
+    router.add_api_route(_path, _list_issues, methods=["GET"])
+    router.add_api_route(_path, _create_issue, methods=["POST"])
+router.add_api_route("/{item_id}", _update_issue, methods=["PATCH"])
 router.add_api_route("/{item_id}", _delete_issue, methods=["DELETE"])
 
 
-@router.get("/stats/summary", dependencies=[Depends(get_current_user)])
-async def get_stats():
+@router.get("/stats/summary")
+async def get_stats(current_user: dict = Depends(get_current_user)):
     try:
         # Every page: PostgREST cuts a plain read at 1,000 rows, which would make the totals wrong once there are more issues than that.
         records = await run_in_threadpool(lambda: fetch_all_pages(
-            lambda start, end: supabase.table("stock_issues").select("issued_at, recipient_name").order("id").range(start, end).execute()
+            lambda start, end: supabase.table("stock_issues").select("issued_at,recipient_name,recipient_id").order("id").range(start, end).execute()
         ))
+        if viewer_scope(current_user) is not None:
+            person_ids = person_ids_for(supabase, current_user)
+            records = [r for r in records if _recipient_visible(r.get("recipient_id"), r.get("recipient_name"), person_ids)]
         today_str = today_harare().isoformat()
         week_start = week_start_harare().isoformat()
         today_count = sum(1 for r in records if (r.get("issued_at") or "").startswith(today_str))

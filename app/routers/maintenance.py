@@ -12,6 +12,7 @@ from app.db_helpers import fetch_all_pages, get_or_404
 from app.concurrency import assert_unchanged
 from app.maintenance_events import append_event, diff_changes
 from app.errors import server_error
+from app.scope import apply_list_scope, person_ids_for, stamp_create, viewer_scope
 from app.clock import today_harare
 import logging
 import json
@@ -659,14 +660,16 @@ async def get_work_order_stats():
         raise server_error(e, "Loading work order stats")
 
 # ==================== PPE ENDPOINTS (if you want them consolidated here) ====================
-@router.get("/ppe", dependencies=[Depends(get_current_user)])
+@router.get("/ppe")
 async def get_ppe_records(
     status: Optional[str] = None,
     ppe_type: Optional[str] = None,
     department: Optional[str] = None,
     location: Optional[str] = None,
-    employee_id: Optional[str] = None
+    employee_id: Optional[str] = None,
+    current_user: dict = Depends(get_current_user),
 ):
+    person_ids = person_ids_for(supabase, current_user)
     try:
         query = supabase.table("ppe_records").select("*")
         
@@ -680,7 +683,8 @@ async def get_ppe_records(
             query = query.eq("location", location)
         if employee_id and employee_id != 'all':
             query = query.eq("employee_id", employee_id)
-            
+
+        query = apply_list_scope(query, current_user, "ppe_records", supabase, person_ids)
         response = query.order("created_at", desc=True).execute()
 
         records = rows(response)
@@ -695,6 +699,9 @@ async def get_ppe_records(
 
 @router.post("/ppe")
 async def create_ppe_record(record: PPEIssueCreate, current_user: dict = Depends(get_current_user)):
+    if viewer_scope(current_user) is not None:
+        stamp_create(current_user, "ppe_records", {"employee_id": record.employee_id},
+                     supabase, person_ids_for(supabase, current_user))
     try:
         data_to_insert = record.model_dump()
         

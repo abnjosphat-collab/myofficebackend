@@ -51,6 +51,7 @@ from app.supabase_client import supabase
 from app.auth import get_current_user, require_role
 from app.db_helpers import fetch_all_pages, get_or_404
 from app.errors import server_error
+from app.scope import apply_list_scope, assert_row_visible, person_ids_for, stamp_create, viewer_scope
 import logging
 
 logger = logging.getLogger(__name__)
@@ -148,20 +149,24 @@ def _rows(response) -> list:
     return (response.data if hasattr(response, "data") else response) or []
 
 
-def _require_exists(assignment_id: int) -> None:
-    resp = supabase.table(TABLE).select("id").eq("id", assignment_id).execute()
-    if not _rows(resp):
+def _require_existing(assignment_id: int) -> dict:
+    resp = supabase.table(TABLE).select("id,employee_id").eq("id", assignment_id).execute()
+    found = _rows(resp)
+    if not found:
         raise HTTPException(status_code=404, detail=f"Assignment {assignment_id} not found")
+    return found[0]
 
 # ─── GET all ──────────────────────────────────────────────────────────────────
 
-@router.get("",  response_model=List[ShiftRosterResponse], dependencies=[Depends(get_current_user)])
-@router.get("/", response_model=List[ShiftRosterResponse], dependencies=[Depends(get_current_user)])
-async def list_assignments(active_only: bool = False):
+@router.get("",  response_model=List[ShiftRosterResponse])
+@router.get("/", response_model=List[ShiftRosterResponse])
+async def list_assignments(active_only: bool = False, current_user: dict = Depends(get_current_user)):
+    person_ids = person_ids_for(supabase, current_user)
     try:
         q = supabase.table(TABLE).select("*")
         if active_only:
             q = q.eq("is_active", True)
+        q = apply_list_scope(q, current_user, TABLE, supabase, person_ids)
         q = q.order("created_at", desc=True).order("id", desc=True)
         return await run_in_threadpool(lambda: fetch_all_pages(lambda start,end:q.range(start,end).execute(),extract_rows=_rows))
     except Exception as e:
@@ -170,10 +175,13 @@ async def list_assignments(active_only: bool = False):
 
 # ─── GET one ──────────────────────────────────────────────────────────────────
 
-@router.get("/{assignment_id}", response_model=ShiftRosterResponse, dependencies=[Depends(get_current_user)])
-async def get_assignment(assignment_id: int):
+@router.get("/{assignment_id}", response_model=ShiftRosterResponse)
+async def get_assignment(assignment_id: int, current_user: dict = Depends(get_current_user)):
     try:
-        return get_or_404(supabase, TABLE, assignment_id, detail=f"Assignment {assignment_id} not found")
+        row = get_or_404(supabase, TABLE, assignment_id, detail=f"Assignment {assignment_id} not found")
+        return assert_row_visible(current_user, TABLE, row, supabase,
+                                  person_ids_for(supabase, current_user),
+                                  detail=f"Assignment {assignment_id} not found")
     except HTTPException:
         raise
     except Exception as e:
@@ -185,6 +193,9 @@ async def get_assignment(assignment_id: int):
 @router.post("",  response_model=ShiftRosterResponse, status_code=201)
 @router.post("/", response_model=ShiftRosterResponse, status_code=201)
 async def create_assignment(payload: ShiftRosterCreate, current_user: dict = Depends(get_current_user)):
+    if viewer_scope(current_user) is not None:
+        stamp_create(current_user, TABLE, {"employee_id": payload.employee_id},
+                     supabase, person_ids_for(supabase, current_user))
     try:
         data: dict = {
             "employee_id":      payload.employee_id,
@@ -233,12 +244,20 @@ def _is_missing_column_error(e: Exception) -> bool:
 @router.put("/{assignment_id}", response_model=ShiftRosterResponse)
 async def update_assignment(assignment_id: int, payload: ShiftRosterUpdate, current_user: dict = Depends(get_current_user)):
     try:
-        _require_exists(assignment_id)
+        existing = _require_existing(assignment_id)
+        person_ids = person_ids_for(supabase, current_user)
+        if viewer_scope(current_user) is not None:
+            assert_row_visible(current_user, TABLE, existing, supabase, person_ids,
+                               detail=f"Assignment {assignment_id} not found")
 
         data = payload.model_dump(exclude_unset=True)
         if "cycle_start_date" in data and isinstance(data["cycle_start_date"], date):
             data["cycle_start_date"] = data["cycle_start_date"].isoformat()
         data["updated_at"] = datetime.utcnow().isoformat()
+        if viewer_scope(current_user) is not None and "employee_id" in data:
+            merged = {**existing, **data}
+            assert_row_visible(current_user, TABLE, merged, supabase, person_ids,
+                               detail=f"Assignment {assignment_id} not found")
 
         try:
             rows = _rows(supabase.table(TABLE).update(data).eq("id", assignment_id).execute())
@@ -271,7 +290,11 @@ async def update_assignment(assignment_id: int, payload: ShiftRosterUpdate, curr
 @router.delete("/{assignment_id}")
 async def delete_assignment(assignment_id: int, current_user: dict = Depends(require_role('manager'))):
     try:
-        _require_exists(assignment_id)
+        existing = _require_existing(assignment_id)
+        if viewer_scope(current_user) is not None:
+            assert_row_visible(current_user, TABLE, existing, supabase,
+                               person_ids_for(supabase, current_user),
+                               detail=f"Assignment {assignment_id} not found")
         supabase.table(TABLE).delete().eq("id", assignment_id).execute()
         return {"success": True, "detail": f"Assignment {assignment_id} deleted"}
     except HTTPException:

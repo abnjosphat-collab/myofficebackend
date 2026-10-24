@@ -13,6 +13,8 @@ from app.auth import get_current_user, require_role
 from app.nec_import import job_store
 from app.nec_import.apply_runner import run_import_from_review
 from app.errors import server_error
+from app.scope import person_ids_for, viewer_scope
+from app.supabase_client import supabase
 from app.nec_import.extraction.registry import NOT_CONFIGURED_MESSAGE, ExtractionNotConfigured, get_extraction_provider
 from app.nec_import.pdf_render import render_page_png
 from app.nec_import.preview import build_preview
@@ -152,14 +154,51 @@ async def run_extract(job_id: str):
         raise server_error(exc, "Reading the scan", 502)
 
 
-@router.get("/jobs/{job_id}/preview", dependencies=[Depends(get_current_user)])
-async def get_preview(job_id: str):
+def _filter_preview_for_scope(preview: dict, person_ids: Optional[dict]) -> dict:
+    from app.nec_import.employee_match import normalize_code, normalize_name
+
+    if person_ids is None:
+        return preview
+    db_ids = person_ids["db"]
+    codes = set(person_ids["register"])
+    codes.update(c for c in (normalize_code(c) for c in person_ids["register"]) if c)
+    names = person_ids["names"]
+
+    def _visible(item: dict) -> bool:
+        db_id = item.get("database_id", item.get("employee_id"))
+        if isinstance(db_id, int) and db_id in db_ids:
+            return True
+        code = item.get("human_code")
+        if code is not None and normalize_code(str(code)) in codes:
+            return True
+        name = item.get("name")
+        return bool(name) and normalize_name(str(name)) in names
+
+    kept = [x for x in preview.get("line_items", []) if _visible(x)]
+    out = dict(preview)
+    out["line_items"] = kept
+    out["sheet_summaries"] = [s for s in preview.get("sheet_summaries", []) if _visible(s)]
+    out["missing_sheets"] = [m for m in preview.get("missing_sheets", []) if _visible(m)]
+    out["duplicate_sheet_groups"] = [
+        g for g in preview.get("duplicate_sheet_groups", [])
+        if normalize_code(str(g.get("key") or "")) in codes
+        or (isinstance(g.get("key"), str) and normalize_name(g["key"]) in names)
+    ]
+    out["stats"] = {k: sum(1 for x in kept if x["kind"] == k)
+                    for k in ("create", "update", "unchanged", "unresolved", "exception")}
+    return out
+
+
+@router.get("/jobs/{job_id}/preview")
+async def get_preview(job_id: str, current_user: dict = Depends(get_current_user)):
     try:
         meta = job_store.load_job(job_id)
         review = job_store.load_review_json(job_id)
     except FileNotFoundError as exc:
         raise HTTPException(404, detail=str(exc))
     preview = build_preview(review, meta["period_start"], meta["period_end"])
+    if viewer_scope(current_user) is not None:
+        preview = _filter_preview_for_scope(preview, person_ids_for(supabase, current_user))
     meta["last_preview_at"] = preview.get("period")
     job_store._write_meta(job_id, meta)
     return {"job": meta, "preview": preview}
@@ -171,6 +210,8 @@ async def apply_import(
     dry_run: bool = Query(True),
     current_user: dict = Depends(get_current_user),
 ):
+    if viewer_scope(current_user) is not None:
+        raise HTTPException(status_code=403, detail="Import apply is not available to section-limited accounts.")
     try:
         meta = job_store.load_job(job_id)
         review = job_store.load_review_json(job_id)
