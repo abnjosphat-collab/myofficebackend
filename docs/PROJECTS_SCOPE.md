@@ -306,3 +306,21 @@ Plumbing + obvious UI; no per-module filtering yet (Batches 2–5).
   touch (atomic RPCs, undo/redo). Nav-hiding alone would have been
   obscurity, not enforcement, so it was offered and declined.
 - No code changed in this batch; this entry is the record.
+
+## Batch 7 — done (branch projects-scope-7, backend SQL file only)
+
+- `supabase_move_c0952_to_projects.sql` (file only, NOT run): moves the
+  single employees row with employee_id C0952 (Takudzwa Chibi) into
+  section Projects. Person-linked data follows the employee's current
+  section, so his leaves/timesheets/PPE/training/standby rows become
+  visible to the Projects-scoped account; direct-section records stay
+  put (authorship was never ownership). Does NOT set his account limit
+  (Admin UI / PATCH scope does that). Guardrails: table+columns exist,
+  exactly one C0952 row (name shown before anything changes), reads
+  back in Projects; pre-move image kept in
+  backup_employees_projects_scope; re-runnable no-op; transactional;
+  rollback statement included as a comment. Go-live order: Batch 1
+  user-scope SQL, Batch 4 section-columns SQL, this file, then deploy.
+- Full acceptance re-run on the finished tree: backend suite green,
+  Batch 0 suite 19/19, pyright under baseline — committed below.
+  Nothing pushed, no SQL run, no live data touched in any batch.
