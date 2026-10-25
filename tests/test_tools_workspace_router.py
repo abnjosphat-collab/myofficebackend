@@ -162,6 +162,14 @@ def test_register_fields_reject_a_malformed_date_and_a_negative_cost():
     assert client.post("/api/tools-workspace/tools", headers=admin_auth, json={**base, "working_status": "broken"}).status_code == 422
 
 
+def test_new_tools_default_to_no_monthly_inspection_but_keep_quarterly():
+    admin, _ = admin_and_issuer()
+    admin_auth = {"Authorization": f"Bearer {admin}"}
+    tool = client.post("/api/tools-workspace/tools", headers=admin_auth, json={"register_number": "T-NM", "name": "Saw", "storage_location": "Workshop"}).json()
+    assert tool["monthly_inspection_required"] is False
+    assert tool["quarterly_inspection_required"] is True
+
+
 def _eligible_tool_with_checks_due():
     admin, issuer = admin_and_issuer()
     auth = {"Authorization": f"Bearer {issuer}"}

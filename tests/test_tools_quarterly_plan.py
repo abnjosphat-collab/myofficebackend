@@ -73,12 +73,12 @@ def test_100_tools_spread_evenly_with_locations_kept_together():
     for index in range(100):
         seed_tool(index, location=f"Bay {index % 10}")
     rows = tools_workspace._ensure_quarter_plan(2026, 4)
-    assert len(rows) == 100
+    assert len(rows) == 40  # the quarter caps at 40; the rest spill into coming quarters
     by_day = {}
     for row in rows:
         by_day.setdefault(row["planned_date"], []).append(row)
     assert len(by_day) == 10
-    assert sorted(len(group) for group in by_day.values()) == [10] * 10
+    assert sorted(len(group) for group in by_day.values()) == [4] * 10
     tools = {tool["id"]: tool for tool in tools_workspace._all("tools")}
     location_days = {}
     for row in rows:
@@ -86,6 +86,10 @@ def test_100_tools_spread_evenly_with_locations_kept_together():
     assert all(len(days) == 1 for days in location_days.values())
     assert {row["quarter"] for row in rows} == {"2026-Q4"}
     assert all(row["completed_inspection_id"] is None for row in rows)
+    spilled = {}
+    for row in tools_workspace._all("plan"):
+        spilled.setdefault(row["quarter"], []).append(row)
+    assert {quarter: len(group) for quarter, group in spilled.items()} == {"2026-Q4": 40, "2027-Q1": 40, "2027-Q2": 20}
 
 
 def test_generation_is_idempotent_and_skips_archived_and_non_quarterly_tools():
@@ -182,8 +186,36 @@ def test_failed_quarterly_does_not_complete_the_plan_row():
     assert next(row for row in plan if row["tool_id"] == tool["id"])["completed_inspection_id"] is None
 
 
-def test_new_tools_default_to_no_monthly_inspection_but_keep_quarterly():
+# --- the 40-item cap: a quarter's plan holds 40 tools; the rest spill forward ---
+
+def test_plan_holds_exactly_40_tools():
     admin_auth, _ = admin_and_issuer()
-    tool = client.post("/api/tools-workspace/tools", headers=admin_auth, json={"register_number": "T-NM", "name": "Saw", "storage_location": "Workshop"}).json()
-    assert tool["monthly_inspection_required"] is False
-    assert tool["quarterly_inspection_required"] is True
+    for index in range(40):
+        created = client.post("/api/tools-workspace/tools", headers=admin_auth, json={"register_number": f"T-CAP-{index:02d}", "name": f"Capped tool {index}", "storage_location": "Workshop"})
+        assert created.status_code == 201
+    plan = client.get("/api/tools-workspace/compliance", headers=admin_auth).json()["inspection_plan"]
+    year, quarter = tools_workspace._quarter_of(date.today())
+    assert len(plan) == 40
+    assert {row["quarter"] for row in plan} == {tools_workspace._quarter_key(year, quarter)}
+
+
+def test_plan_spills_the_41st_tool_into_next_quarter_and_caps_the_record_path_too():
+    admin_auth, issuer_auth = admin_and_issuer()
+    for index in range(41):
+        created = client.post("/api/tools-workspace/tools", headers=admin_auth, json={"register_number": f"T-OVF-{index:02d}", "name": f"Overflow tool {index}", "storage_location": "Workshop"})
+        assert created.status_code == 201
+    plan = client.get("/api/tools-workspace/compliance", headers=admin_auth).json()["inspection_plan"]
+    assert len(plan) == 40  # T-OVF-40 spills; it is not in this quarter's plan
+    numbers = {tools_workspace._find("tools", "id", row["tool_id"])["register_number"] for row in plan}
+    assert "T-OVF-40" not in numbers
+    year, quarter = tools_workspace._quarter_of(date.today())
+    next_key = tools_workspace._quarter_key(*tools_workspace._next_quarter(year, quarter))
+    spilled = [row for row in tools_workspace._all("plan") if row["quarter"] == next_key]
+    assert len(spilled) == 1
+    assert tools_workspace._find("tools", "id", spilled[0]["tool_id"])["register_number"] == "T-OVF-40"
+    first = next(row for row in plan if tools_workspace._find("tools", "id", row["tool_id"])["register_number"] == "T-OVF-00")
+    recorded = client.post(f"/api/tools-workspace/tools/{first['tool_id']}/inspections", headers=issuer_auth, json={"inspection_type": "quarterly", "outcome": "passed"}).json()
+    coming = [row for row in tools_workspace._all("plan") if row["quarter"] == next_key]
+    assert len(coming) == 40  # the record path backfills next quarter up to the same cap
+    mine = next(row for row in coming if row["tool_id"] == first["tool_id"])
+    assert recorded["next_due_at"] == mine["planned_date"] + "T00:00:00+00:00"

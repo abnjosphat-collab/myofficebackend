@@ -369,33 +369,45 @@ def _next_free_plan_day(rows,window,today):
         if row.get("planned_date") in counts: counts[row["planned_date"]]+=1
     open_days=[day for day in window if day>=today.isoformat()]
     return min(open_days,key=lambda day:(counts[day],day)) if open_days else None
-def _ensure_quarter_plan_rows(year,quarter,today):
-    key=_quarter_key(year,quarter)
+PLAN_MAX_ITEMS=40
+def _schedule_quarter_tools(year,quarter,tools,today):
+    """Schedule the given tools into the quarter's plan up to the cap; returns (rows, spilled). Existing rows never move."""
+    key=_quarter_key(year,quarter); window=_quarter_window(year,quarter)
     existing=[row for row in _all("plan") if row.get("quarter")==key]
     planned={row.get("tool_id") for row in existing}
-    missing=[tool for tool in _all("tools") if not tool.get("archived") and tool.get("quarterly_inspection_required") and tool["id"] not in planned]
-    if not missing: return existing
-    window=_quarter_window(year,quarter)
+    pending=[tool for tool in tools if tool["id"] not in planned]
+    room=PLAN_MAX_ITEMS-len(existing)
+    here,spilled=(pending,[]) if room>=len(pending) else (pending[:max(room,0)],pending[max(room,0):])
+    rows=list(existing)
     if existing:
-        rows=list(existing)
-        for tool in sorted(missing,key=lambda item:item.get("register_number") or ""):
+        for tool in here:
             day=_next_free_plan_day(rows,window,today)
-            if day is None:
-                following=_quarter_key(*_next_quarter(year,quarter))
-                _insert("plan",_plan_row(tool["id"],following,_quarter_window(*_next_quarter(year,quarter))[0]))
+            if day is None: spilled.append(tool)
             else: rows.append(_insert("plan",_plan_row(tool["id"],key,day)))
-        return rows
+        return rows,spilled
     groups:dict[str,list[dict[str,Any]]]={}
-    for tool in missing: groups.setdefault(tool.get("storage_location") or "Unspecified",[]).append(tool)
-    loads={day:0 for day in window}; rows=[]
+    for tool in here: groups.setdefault(tool.get("storage_location") or "Unspecified",[]).append(tool)
+    loads={day:0 for day in window}
     for location in sorted(groups,key=lambda name:(-len(groups[name]),name)):
         day=min(window,key=lambda item:(loads[item],item))
         for tool in sorted(groups[location],key=lambda item:item.get("register_number") or ""):
             rows.append(_insert("plan",_plan_row(tool["id"],key,day))); loads[day]+=1
+    return rows,spilled
+def _ensure_quarter_plan_rows(year,quarter,today):
+    key=_quarter_key(year,quarter)
+    existing=[row for row in _all("plan") if row.get("quarter")==key]
+    planned={row.get("tool_id") for row in existing}
+    missing=sorted((tool for tool in _all("tools") if not tool.get("archived") and tool.get("quarterly_inspection_required") and tool["id"] not in planned),key=lambda item:item.get("register_number") or "")
+    if not missing: return existing
+    rows,spilled=_schedule_quarter_tools(year,quarter,missing,today)
+    while spilled:
+        year,quarter=_next_quarter(year,quarter)
+        _,spilled=_schedule_quarter_tools(year,quarter,spilled,today)
     return rows
 def _ensure_quarter_plan(year,quarter,today=None):
     """The quarter's inspection plan, generated on first read and backfilled as tools arrive; existing rows never move.
-    Empty (with quarterly falling back to next-due dates) while the plan table is not migrated yet."""
+    Capped at 40 tools per quarter, the rest spill into coming quarters. Empty (with quarterly falling back
+    to next-due dates) while the plan table is not migrated yet."""
     try:
         return _ensure_quarter_plan_rows(year,quarter,today or date.today())
     except Exception:
