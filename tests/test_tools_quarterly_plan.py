@@ -48,6 +48,16 @@ def seed_tool(index, location="Bay 0", **over):
     return tools_workspace._insert("tools", row)
 
 
+def fix_today(monkeypatch, day):
+    """Pin the workspace's 'today' (Harare clock and date.today) to a fixed date."""
+    class FixedDate(date):
+        @classmethod
+        def today(cls):
+            return day
+    monkeypatch.setattr(tools_workspace, "date", FixedDate)
+    monkeypatch.setattr(tools_workspace, "today_harare", lambda: day, raising=False)
+
+
 # --- the window: first 10 working days of the quarter, holidays out ---
 
 def test_window_skips_weekends_and_zimbabwe_holidays():
@@ -72,7 +82,8 @@ def test_window_starting_on_a_weekend_begins_on_monday():
 def test_100_tools_spread_evenly_with_locations_kept_together():
     for index in range(100):
         seed_tool(index, location=f"Bay {index % 10}")
-    rows = tools_workspace._ensure_quarter_plan(2026, 4)
+    window = tools_workspace._quarter_window(2026, 4)
+    rows = tools_workspace._ensure_quarter_plan(2026, 4, date.fromisoformat(window[0]))
     assert len(rows) == 100
     by_day = {}
     for row in rows:
@@ -93,9 +104,11 @@ def test_generation_is_idempotent_and_skips_archived_and_non_quarterly_tools():
         seed_tool(index)
     seed_tool("arch", archived=True)
     seed_tool("noq", quarterly_inspection_required=False)
-    first = tools_workspace._ensure_quarter_plan(2026, 4)
+    window = tools_workspace._quarter_window(2026, 4)
+    noon = date.fromisoformat(window[0])
+    first = tools_workspace._ensure_quarter_plan(2026, 4, noon)
     assert len(first) == 5
-    second = tools_workspace._ensure_quarter_plan(2026, 4)
+    second = tools_workspace._ensure_quarter_plan(2026, 4, noon)
     assert [row["id"] for row in second] == [row["id"] for row in first]
 
 
@@ -157,15 +170,15 @@ def test_pass_recorded_in_the_quarter_clears_the_due_but_last_quarter_does_not()
 
 # --- API wiring ---
 
-def test_compliance_carries_the_plan_and_recording_completes_it_with_next_quarter_due():
+def test_compliance_carries_the_plan_and_recording_completes_it_with_next_quarter_due(monkeypatch):
+    fix_today(monkeypatch, date(2027, 1, 5))
     admin_auth, issuer_auth = admin_and_issuer()
     tool = client.post("/api/tools-workspace/tools", headers=admin_auth, json={"register_number": "T-Q", "name": "Grinder", "storage_location": "Workshop"}).json()
     plan = client.get("/api/tools-workspace/compliance", headers=admin_auth).json()["inspection_plan"]
     assert len(plan) == 1 and plan[0]["tool_id"] == tool["id"] and plan[0]["completed_inspection_id"] is None
-    recorded = client.post(f"/api/tools-workspace/tools/{tool['id']}/inspections", headers=issuer_auth, json={"inspection_type": "quarterly", "outcome": "passed"}).json()
-    year, quarter = tools_workspace._quarter_of(date.today())
-    next_year, next_quarter = tools_workspace._next_quarter(year, quarter)
-    expected = tools_workspace._quarter_window(next_year, next_quarter)[0] + "T00:00:00+00:00"
+    assert plan[0]["quarter"] == "2027-Q1"
+    recorded = client.post(f"/api/tools-workspace/tools/{tool['id']}/inspections", headers=issuer_auth, json={"inspection_type": "quarterly", "outcome": "passed", "inspected_at": "2027-01-05T10:00:00+00:00"}).json()
+    expected = tools_workspace._quarter_window(2027, 2)[0] + "T00:00:00+00:00"
     assert recorded["next_due_at"] == expected
     done = client.get("/api/tools-workspace/compliance", headers=admin_auth).json()["inspection_plan"]
     assert next(row for row in done if row["tool_id"] == tool["id"])["completed_inspection_id"] == recorded["id"]
@@ -173,11 +186,12 @@ def test_compliance_carries_the_plan_and_recording_completes_it_with_next_quarte
     assert "quarterly" not in next(item for item in listed if item["id"] == tool["id"])["inspection_due"]
 
 
-def test_failed_quarterly_does_not_complete_the_plan_row():
+def test_failed_quarterly_does_not_complete_the_plan_row(monkeypatch):
+    fix_today(monkeypatch, date(2027, 1, 5))
     admin_auth, issuer_auth = admin_and_issuer()
     tool = client.post("/api/tools-workspace/tools", headers=admin_auth, json={"register_number": "T-QF", "name": "Drill", "storage_location": "Workshop"}).json()
     client.get("/api/tools-workspace/compliance", headers=admin_auth)
-    client.post(f"/api/tools-workspace/tools/{tool['id']}/inspections", headers=issuer_auth, json={"inspection_type": "quarterly", "outcome": "failed", "defects": "Cracked housing"})
+    client.post(f"/api/tools-workspace/tools/{tool['id']}/inspections", headers=issuer_auth, json={"inspection_type": "quarterly", "outcome": "failed", "defects": "Cracked housing", "inspected_at": "2027-01-05T10:00:00+00:00"})
     plan = client.get("/api/tools-workspace/compliance", headers=admin_auth).json()["inspection_plan"]
     assert next(row for row in plan if row["tool_id"] == tool["id"])["completed_inspection_id"] is None
 
@@ -187,3 +201,59 @@ def test_new_tools_default_to_no_monthly_inspection_but_keep_quarterly():
     tool = client.post("/api/tools-workspace/tools", headers=admin_auth, json={"register_number": "T-NM", "name": "Saw", "storage_location": "Workshop"}).json()
     assert tool["monthly_inspection_required"] is False
     assert tool["quarterly_inspection_required"] is True
+
+
+# --- January start: a quarter first created after its window starts with the next quarter ---
+
+def test_plan_created_after_the_window_starts_with_next_quarter():
+    for index in range(3):
+        seed_tool(index)
+    rows = tools_workspace._ensure_quarter_plan(2026, 4, date(2026, 10, 25))
+    assert rows == []
+    coming = tools_workspace._all("plan")
+    assert len(coming) == 3
+    assert {row["quarter"] for row in coming} == {"2027-Q1"}
+
+
+def test_no_quarterly_due_while_the_plan_defers_to_next_quarter():
+    seed_tool(0)
+    tool = tools_workspace._find("tools", "id", "t0")
+    assert tools_workspace._quarterly_due(tool, [], date(2026, 10, 25)) is False
+
+
+def test_tool_list_reads_the_plan_table_once_per_request(monkeypatch):
+    fix_today(monkeypatch, date(2026, 10, 25))
+    for index in range(70):
+        seed_tool(index)
+    admin_auth, _ = admin_and_issuer()
+    reads = []
+    real_all = tools_workspace._all
+    def counting(kind, newest=False):
+        if kind == "plan":
+            reads.append(kind)
+        return real_all(kind, newest)
+    monkeypatch.setattr(tools_workspace, "_all", counting)
+    listed = client.get("/api/tools-workspace/tools", headers=admin_auth).json()
+    assert len(listed) == 70
+    assert len(reads) <= 3  # was one full-table read per tool; now the quarter check, next-quarter check and post-generation re-read
+    assert all("quarterly" not in tool["inspection_due"] for tool in listed)
+
+
+def test_plan_insert_ignores_an_existing_row():
+    seed_tool(0)
+    first = tools_workspace._insert_plan_row(tools_workspace._plan_row("t0", "2026-Q4", "2026-10-01"))
+    second = tools_workspace._insert_plan_row(tools_workspace._plan_row("t0", "2026-Q4", "2026-10-02"))
+    assert first["tool_id"] == second["tool_id"] == "t0"
+    rows = [row for row in tools_workspace._all("plan") if row["tool_id"] == "t0"]
+    assert len(rows) == 1
+    assert rows[0]["planned_date"] == "2026-10-01"  # the winner's row stands; the loser is ignored
+
+
+def test_quarter_logic_uses_harare_time(monkeypatch):
+    monkeypatch.setattr(tools_workspace, "today_harare", lambda: date(2027, 1, 5), raising=False)
+    for index in range(2):
+        seed_tool(index)
+    admin_auth, _ = admin_and_issuer()
+    plan = client.get("/api/tools-workspace/compliance", headers=admin_auth).json()["inspection_plan"]
+    assert len(plan) == 2
+    assert {row["quarter"] for row in plan} == {"2027-Q1"}

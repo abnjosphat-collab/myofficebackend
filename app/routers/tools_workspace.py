@@ -13,6 +13,7 @@ from pydantic import BaseModel, Field, field_validator
 from app.supabase_client import rows, supabase
 from app.db_helpers import fetch_all_pages
 from app.zim_holidays import zim_holiday_name
+from app.clock import today_harare
 from app.rate_limit import limiter
 import time as _time
 
@@ -326,14 +327,14 @@ def _latest_inspections(tool_id:str,inspections:Optional[list[dict[str,Any]]]=No
         latest.setdefault(row["inspection_type"],row)
     return latest
 
-def _inspection_due(tool:dict[str,Any],inspections:Optional[list[dict[str,Any]]]=None):
+def _inspection_due(tool:dict[str,Any],inspections:Optional[list[dict[str,Any]]]=None,plan_rows:Optional[list[dict[str,Any]]]=None,deferred:bool=False):
     rows=inspections if inspections is not None else _all("inspections")
     latest=_latest_inspections(tool["id"],rows); now=datetime.now(timezone.utc); due=[]
     requirements=(("weekly",tool.get("weekly_inspection_required")),("monthly",tool.get("monthly_inspection_required")),("quarterly",tool.get("quarterly_inspection_required")),("calibration",tool.get("calibration_required")))
     for inspection_type,required in requirements:
         if not required: continue
         if inspection_type=="quarterly":
-            if _quarterly_due(tool,rows): due.append(inspection_type)
+            if _quarterly_due(tool,rows,None,plan_rows,deferred): due.append(inspection_type)
             continue
         record=latest.get(inspection_type); deadline=_parse_datetime(record.get("next_due_at")) if record else None
         if not record or record.get("outcome")!="passed" or not deadline or deadline<now: due.append(inspection_type)
@@ -361,6 +362,17 @@ def _quarter_window(year,quarter):
         if current.weekday()<5 and zim_holiday_name(current.isoformat()) is None: days.append(current.isoformat())
         current+=timedelta(days=1)
     return days
+def _insert_plan_row(row:dict[str,Any]):
+    """Insert a plan row, ignoring it when a concurrent first generation already won the (tool_id, quarter) race."""
+    if _test_mode:
+        existing=next((item for item in _memory["plan"] if item.get("tool_id")==row.get("tool_id") and item.get("quarter")==row.get("quarter")),None)
+        if existing: return dict(existing)
+        _memory["plan"].append(dict(row)); return dict(row)
+    data=rows(supabase.table(TABLE["plan"]).upsert(row,on_conflict="tool_id,quarter",ignore_duplicates=True).execute())
+    if data: return data[0]
+    winner=rows(supabase.table(TABLE["plan"]).select("*").eq("tool_id",row["tool_id"]).eq("quarter",row["quarter"]).limit(1).execute())
+    if not winner: raise HTTPException(500,"The record could not be saved.")
+    return winner[0]
 def _plan_row(tool_id,quarter,planned_date):
     return {"id":str(uuid.uuid4()),"tool_id":tool_id,"quarter":quarter,"planned_date":planned_date,"completed_inspection_id":None,"created_at":_now()}
 def _next_free_plan_day(rows,window,today):
@@ -372,36 +384,52 @@ def _next_free_plan_day(rows,window,today):
 def _ensure_quarter_plan_rows(year,quarter,today):
     key=_quarter_key(year,quarter)
     existing=[row for row in _all("plan") if row.get("quarter")==key]
+    if not existing and today.isoformat()>_quarter_window(year,quarter)[-1]:
+        _ensure_quarter_plan_rows(*_next_quarter(year,quarter),today)
+        return []
     planned={row.get("tool_id") for row in existing}
     missing=[tool for tool in _all("tools") if not tool.get("archived") and tool.get("quarterly_inspection_required") and tool["id"] not in planned]
     if not missing: return existing
     window=_quarter_window(year,quarter)
+    rows=list(existing)
     if existing:
-        rows=list(existing)
         for tool in sorted(missing,key=lambda item:item.get("register_number") or ""):
             day=_next_free_plan_day(rows,window,today)
             if day is None:
                 following=_quarter_key(*_next_quarter(year,quarter))
-                _insert("plan",_plan_row(tool["id"],following,_quarter_window(*_next_quarter(year,quarter))[0]))
-            else: rows.append(_insert("plan",_plan_row(tool["id"],key,day)))
-        return rows
-    groups:dict[str,list[dict[str,Any]]]={}
-    for tool in missing: groups.setdefault(tool.get("storage_location") or "Unspecified",[]).append(tool)
-    loads={day:0 for day in window}; rows=[]
-    for location in sorted(groups,key=lambda name:(-len(groups[name]),name)):
-        day=min(window,key=lambda item:(loads[item],item))
-        for tool in sorted(groups[location],key=lambda item:item.get("register_number") or ""):
-            rows.append(_insert("plan",_plan_row(tool["id"],key,day))); loads[day]+=1
-    return rows
+                _insert_plan_row(_plan_row(tool["id"],following,_quarter_window(*_next_quarter(year,quarter))[0]))
+            else: rows.append(_insert_plan_row(_plan_row(tool["id"],key,day)))
+    else:
+        groups:dict[str,list[dict[str,Any]]]={}
+        for tool in missing: groups.setdefault(tool.get("storage_location") or "Unspecified",[]).append(tool)
+        loads={day:0 for day in window}
+        for location in sorted(groups,key=lambda name:(-len(groups[name]),name)):
+            day=min(window,key=lambda item:(loads[item],item))
+            for tool in sorted(groups[location],key=lambda item:item.get("register_number") or ""):
+                rows.append(_insert_plan_row(_plan_row(tool["id"],key,day))); loads[day]+=1
+    # Re-read: a concurrent first generation may have won some races; the table is the truth.
+    return [row for row in _all("plan") if row.get("quarter")==key]
 def _ensure_quarter_plan(year,quarter,today=None):
     """The quarter's inspection plan, generated on first read and backfilled as tools arrive; existing rows never move.
-    Empty (with quarterly falling back to next-due dates) while the plan table is not migrated yet."""
+    A quarter first created after its window starts with the next quarter instead, so 2026-Q4 stays empty and the
+    plan begins with 2027-Q1. Empty (with quarterly falling back to next-due dates) while the plan table is not migrated yet."""
     try:
-        return _ensure_quarter_plan_rows(year,quarter,today or date.today())
+        return _ensure_quarter_plan_rows(year,quarter,today or today_harare())
     except Exception:
         if _test_mode: raise
         logger.warning("tools inspection plan unavailable; quarterly checks fall back to next-due dates")
         return []
+def _quarter_plan_state(year,quarter,today):
+    """(rows, deferred): the quarter's plan rows, and whether the quarter has no plan because the plan starts next quarter.
+    Unmigrated table -> ([], False): due logic falls back to next-due dates as before."""
+    try:
+        rows=_ensure_quarter_plan_rows(year,quarter,today)
+    except Exception:
+        if _test_mode: raise
+        logger.warning("tools inspection plan unavailable; quarterly checks fall back to next-due dates")
+        return [],False
+    if rows: return rows,False
+    return [],today.isoformat()>_quarter_window(year,quarter)[-1]
 def _quarterly_passed(tool_id,year,quarter,inspections):
     for row in inspections:
         if row.get("tool_id")!=tool_id or row.get("inspection_type")!="quarterly" or row.get("outcome")!="passed" or not row.get("inspected_at"): continue
@@ -409,12 +437,16 @@ def _quarterly_passed(tool_id,year,quarter,inspections):
         except HTTPException: continue
         if moment and _quarter_of(moment.date())==(year,quarter): return True
     return False
-def _quarterly_due(tool,inspections,today=None):
-    """Quarterly is due on its planned date and stays due (overdue past the window) until a pass is recorded that quarter."""
-    now=today or date.today(); year,quarter=_quarter_of(now)
+def _quarterly_due(tool,inspections,today=None,plan_rows=None,deferred=False):
+    """Quarterly is due on its planned date and stays due (overdue past the window) until a pass is recorded that quarter.
+    While the quarter has no plan because the plan starts next quarter, nothing is due."""
+    now=today or today_harare(); year,quarter=_quarter_of(now)
     if _quarterly_passed(tool["id"],year,quarter,inspections): return False
-    planned=next((row.get("planned_date") for row in _ensure_quarter_plan(year,quarter,now) if row.get("tool_id")==tool.get("id")),None)
+    if plan_rows is None:
+        plan_rows,deferred=_quarter_plan_state(year,quarter,now)
+    planned=next((row.get("planned_date") for row in plan_rows if row.get("tool_id")==tool.get("id")),None)
     if planned is None:
+        if deferred: return False
         record=_latest_inspections(tool["id"],inspections).get("quarterly")
         deadline=_parse_datetime(record.get("next_due_at")) if record else None
         return not record or record.get("outcome")!="passed" or not deadline or deadline.date()<=now
@@ -464,6 +496,7 @@ def _effective_tool(tool:dict[str,Any]):
 def _active_notifications():
     alerts=[]
     now=datetime.now(timezone.utc)
+    today=today_harare(); plan_rows,plan_deferred=_quarter_plan_state(*_quarter_of(today),today)
     for stored_tool in _all("tools"):
         tool=_effective_tool(stored_tool); kind=tool.get("status")
         if tool.get("archived"): continue
@@ -472,7 +505,7 @@ def _active_notifications():
             kind="overdue_6h" if due and due+timedelta(hours=6)<=now else "overdue"
             alerts.append({"key":_notification_key(tool,kind),"kind":kind,"tool_id":tool["id"],"tool_name":tool.get("name","Equipment"),"department":tool.get("department","Engineering")})
         elif kind=="attention": alerts.append({"key":_notification_key(tool,kind),"kind":kind,"tool_id":tool["id"],"tool_name":tool.get("name","Equipment"),"department":tool.get("department","Engineering")})
-        for inspection_type in _inspection_due(tool):
+        for inspection_type in _inspection_due(tool,None,plan_rows,plan_deferred):
             alerts.append({"key":f"inspection:{tool['id']}:{inspection_type}","kind":"inspection_due","inspection_type":inspection_type,"tool_id":tool["id"],"tool_name":tool.get("name","Equipment"),"department":tool.get("department","Engineering")})
     for incident in _all("incidents"):
         if incident.get("status")=="closed": continue
@@ -637,6 +670,7 @@ def list_tools(account=Depends(_session)):
     employees=[employee for employee in _visible_records("employees",account) if employee.get("active",True)]
     competencies=_all("competencies")
     inspections=[item for item in _all("inspections") if item.get("tool_id") in tool_ids]
+    today=today_harare(); plan_rows,plan_deferred=_quarter_plan_state(*_quarter_of(today),today)
     by_tool:dict[str,list[dict[str,Any]]]={}
     for item in evidence:
         if item.get("removed_at"): continue
@@ -654,7 +688,7 @@ def list_tools(account=Depends(_session)):
             basis=_eligibility_basis(employee,tool,competencies)
             if basis is None: continue
             eligible.append({"id":employee["id"],"employee_number":employee["employee_number"],"name":employee["name"],"department":employee["department"],"job_title":employee.get("job_title"),"via_section":basis.split(":",1)[1] if basis.startswith("section:") else None})
-        result.append({**_effective_tool(tool),"evidence":by_tool.get(tool["id"],[]),"eligible_employees":eligible,"inspection_due":_inspection_due(tool,inspections),"latest_inspections":_latest_inspections(tool["id"],inspections)})
+        result.append({**_effective_tool(tool),"evidence":by_tool.get(tool["id"],[]),"eligible_employees":eligible,"inspection_due":_inspection_due(tool,inspections,plan_rows,plan_deferred),"latest_inspections":_latest_inspections(tool["id"],inspections)})
     return result
 @router.get("/tools/trade-section-suggestion")
 def suggest_tool_trade_sections(name:str="",equipment_kind:str="",category:str="",_=Depends(_session)):
@@ -712,7 +746,7 @@ def compliance(account=Depends(_session)):
     inspections=[row for row in _all("inspections",True) if department is None or row.get("tool_id") in tool_ids]
     incidents=[row for row in _all("incidents",True) if department is None or row.get("tool_id") in tool_ids]
     gate_passes=[_gate_pass_view(item) for item in _all("gate_passes",True) if department is None or item.get("department")==department]
-    year,quarter=_quarter_of(date.today())
+    year,quarter=_quarter_of(today_harare())
     plan=[row for row in _ensure_quarter_plan(year,quarter) if department is None or row.get("tool_id") in tool_ids]
     return {"competencies":competencies,"inspections":inspections,"incidents":incidents,"gate_passes":gate_passes,"inspection_plan":plan}
 
