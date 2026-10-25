@@ -11,7 +11,9 @@
 #   * Changes made directly in the Supabase SQL editor are not seen here; this records what the application did.
 #
 # The audited data is the application's own: the approval signature image is never copied into the log, and long text
-# is shortened, so the log stays small and holds nothing it should not.
+# is shortened, so the log stays small and holds nothing it should not. Deletes additionally keep a full,
+# untruncated copy of the row in `deleted_records` (every table but the log tables and documents), so Recently
+# deleted can restore a record exactly.
 from __future__ import annotations
 
 import logging
@@ -29,6 +31,13 @@ AUDITED_TABLES = frozenset({
 
 _SKIP_FIELDS = frozenset({"approval_signature", "signature", "password", "token"})
 _MAX_TEXT = 500
+
+# Every delete in the app also keeps a full, untruncated copy of the row here (signatures included), with who
+# deleted it and when, so Recently deleted can put it back exactly. The audit log stays small on purpose; this
+# store is the one that can restore. Never written for the log tables themselves, and never for documents, which
+# keep their own trash and purge flow.
+TRASH_TABLE = "deleted_records"
+TRASH_EXCLUDED = frozenset({"audit_log", "deleted_records", "documents", "document_folders"})
 
 _ACTOR: ContextVar[Optional[Dict[str, Any]]] = ContextVar("audit_actor", default=None)
 
@@ -50,12 +59,33 @@ class AuditState:
     last_error: Optional[str] = None
 
 
+class TrashState:
+    """What /api/health reports about the deleted-records store (same shape as AuditState)."""
+    written = 0
+    failures = 0
+    table_missing = False
+    last_error: Optional[str] = None
+
+
+def trash_status() -> Dict[str, Any]:
+    if TrashState.table_missing:
+        return {"status": "missing", "detail": "deleted_records table not created yet", "written": TrashState.written}
+    if TrashState.failures:
+        return {"status": "failing", "failures": TrashState.failures, "written": TrashState.written}
+    return {"status": "ok", "written": TrashState.written}
+
+
 def audit_status() -> Dict[str, Any]:
     if AuditState.table_missing:
-        return {"status": "missing", "detail": "audit_log table not created yet", "written": AuditState.written}
+        return {"status": "missing", "detail": "audit_log table not created yet", "written": AuditState.written,
+                "trash": trash_status()}
     if AuditState.failures:
-        return {"status": "failing", "failures": AuditState.failures, "written": AuditState.written}
-    return {"status": "ok", "written": AuditState.written}
+        return {"status": "failing", "failures": AuditState.failures, "written": AuditState.written,
+                "trash": trash_status()}
+    if TrashState.table_missing or TrashState.failures:
+        return {"status": "failing", "detail": "deleted_records is not being written", "written": AuditState.written,
+                "trash": trash_status()}
+    return {"status": "ok", "written": AuditState.written, "trash": trash_status()}
 
 
 def _clean(value: Any) -> Any:
@@ -100,6 +130,45 @@ def _action(op: str, payload: Any) -> str:
     return {"approved": "approve", "rejected": "reject", "cancelled": "cancel"}.get(status, "update")
 
 
+def _row_id(row: Dict[str, Any]) -> Optional[str]:
+    """The record id for a deleted row: `id`, else `record_id` (a few tables key on that)."""
+    value = row.get("id")
+    if value is None:
+        value = row.get("record_id")
+    return str(value) if value is not None else None
+
+
+def _trash(real: Any, table: str, rows: List[Dict[str, Any]]) -> None:
+    """Keep a full copy of deleted rows in `deleted_records`, with who/when. Never raises."""
+    if table in TRASH_EXCLUDED or not rows:
+        return
+    actor = current_actor() or {}
+    entries = [
+        {
+            "table_name": table,
+            "record_id": _row_id(row),
+            "snapshot": row,
+            "deleted_by_id": actor.get("user_id"),
+            "deleted_by_email": actor.get("email") or "system",
+            "deleted_by_name": actor.get("name"),
+        }
+        for row in rows
+    ]
+    try:
+        real.table(TRASH_TABLE).insert(entries).execute()
+        TrashState.written += len(entries)
+    except Exception as exc:  # the person's delete already succeeded; never undo or block it for the copy
+        text = str(exc)
+        if TRASH_TABLE in text and ("does not exist" in text or "PGRST205" in text or "42P01" in text):
+            if not TrashState.table_missing:
+                logger.error("deleted_records table does not exist: deletes are NOT being kept. Run supabase_migration_deleted_records_2026-10-25.sql")
+            TrashState.table_missing = True
+        else:
+            TrashState.failures += 1
+            TrashState.last_error = text[:300]
+            logger.error(f"trash write failed for {table}: {exc}")
+
+
 def _record(real: Any, op: str, table: str, payload: Any, response: Any) -> None:
     data = getattr(response, "data", None)
     if not isinstance(data, list) or not data:
@@ -107,9 +176,12 @@ def _record(real: Any, op: str, table: str, payload: Any, response: Any) -> None
     actor = current_actor() or {}
     action = _action(op, payload)
     entries: List[Dict[str, Any]] = []
+    deleted: List[Dict[str, Any]] = []
     for row in data:
         if not isinstance(row, dict):
             continue
+        if op == "delete":
+            deleted.append(row)
         entry: Dict[str, Any] = {
             "actor_id": actor.get("user_id"),
             "actor_email": actor.get("email") or "system",
@@ -117,13 +189,15 @@ def _record(real: Any, op: str, table: str, payload: Any, response: Any) -> None
             "actor_role": actor.get("role"),
             "action": action,
             "table_name": table,
-            "record_id": str(row.get("id")) if row.get("id") is not None else None,
+            "record_id": _row_id(row),
         }
         if op == "update":
             entry["changes"] = _clean(payload if isinstance(payload, dict) else {})
         else:
             entry["snapshot"] = _clean(row)
         entries.append(entry)
+    if deleted:
+        _trash(real, table, deleted)
     if not entries:
         return
     try:
@@ -144,12 +218,13 @@ def _record(real: Any, op: str, table: str, payload: Any, response: Any) -> None
 class _AuditedQuery:
     """A write that is recorded once it has succeeded. Every other builder call is passed straight through."""
 
-    def __init__(self, query: Any, real: Any, table: str, op: str, payload: Any) -> None:
+    def __init__(self, query: Any, real: Any, table: str, op: str, payload: Any, trash_only: bool = False) -> None:
         self._query = query
         self._real = real
         self._table = table
         self._op = op
         self._payload = payload
+        self._trash_only = trash_only
 
     def __getattr__(self, name: str) -> Any:
         attribute = getattr(self._query, name)
@@ -166,6 +241,16 @@ class _AuditedQuery:
 
     def execute(self) -> Any:
         response = self._query.execute()
+        if self._trash_only:
+            try:
+                data = getattr(response, "data", None)
+                rows = [row for row in data if isinstance(row, dict)] if isinstance(data, list) else []
+                _trash(self._real, self._table, rows)
+            except Exception as exc:  # keeping the copy must never break the delete that already happened
+                TrashState.failures += 1
+                TrashState.last_error = str(exc)[:300]
+                logger.error(f"trash recording failed for {self._table}: {exc}")
+            return response
         try:
             _record(self._real, self._op, self._table, self._payload, response)
         except Exception as exc:  # recording must never break the write that already happened
@@ -197,8 +282,24 @@ class _AuditedTable:
         return getattr(self._builder, name)
 
 
+class _TrashTable:
+    """A table whose deletes keep a full copy in `deleted_records`, but whose other writes are not audited."""
+
+    def __init__(self, real: Any, table: str) -> None:
+        self._real = real
+        self._table = table
+        self._builder = real.table(table)
+
+    def delete(self, **kwargs: Any) -> _AuditedQuery:
+        return _AuditedQuery(self._builder.delete(**kwargs), self._real, self._table, "delete", None, trash_only=True)
+
+    def __getattr__(self, name: str) -> Any:  # every other op reads or writes straight through
+        return getattr(self._builder, name)
+
+
 class AuditedClient:
-    """The shared Supabase client, with writes to AUDITED_TABLES recorded. Everything else is the real client."""
+    """The shared Supabase client: writes to AUDITED_TABLES are recorded, and deletes on every table but the
+    excluded ones keep a full copy in `deleted_records`. Everything else is the real client."""
 
     def __init__(self, real: Any) -> None:
         self._real = real
@@ -206,7 +307,9 @@ class AuditedClient:
     def table(self, name: str) -> Any:
         if name in AUDITED_TABLES:
             return _AuditedTable(self._real, name)
-        return self._real.table(name)
+        if name in TRASH_EXCLUDED:
+            return self._real.table(name)
+        return _TrashTable(self._real, name)
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self._real, name)

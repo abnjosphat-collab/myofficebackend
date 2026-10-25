@@ -308,6 +308,7 @@ for _name in [
     "failure_modes", "competency",
     # Who changed what
     "audit",
+    "recently_deleted",
 ]:
     # These routers already declare their full /api/<name> prefix internally.
     # Adding it again here made their public endpoints /api/name/api/name/*.

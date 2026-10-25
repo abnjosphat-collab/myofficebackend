@@ -18,6 +18,7 @@ client = TestClient(app)
 # (method, path) pairs across several different routers — a spread, not exhaustive.
 PROTECTED_WRITES = [
     ("post", "/api/employees"),
+    ("post", "/api/recently-deleted/abc/restore"),
     ("delete", "/api/employees/1"),
     ("post", "/api/equipment"),
     ("delete", "/api/equipment/1"),
