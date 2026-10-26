@@ -275,6 +275,7 @@ for _name, _prefix, _tags, _key in [
     ("issues", "/api/issues", ["Stock Issues"], None),
     ("tools_workspace", "/api/tools-workspace", ["Tools Workspace Prototype"], None),
     ("drivers", "/api/drivers", ["Drivers"], None),
+    ("emaint_import", "/api/emaint-import", ["eMaint Import"], None),
     ("lookup_lists", "/api/lookup-lists", ["Lookup Lists"], None),
     ("ppe_order_list", "/api/ppe-order-list", ["PPE Order List"], None),
     ("saved_quotations", "/api/quotations", ["Saved Quotations"], None),

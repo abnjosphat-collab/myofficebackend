@@ -1,0 +1,7 @@
+PM ID,Asset ID,Asset Description,PM Description,Frequency,Next Due,Last Done,Assigned To,Department,Priority,Estimated Hours,Instructions,Active
+PM-101,CRS-1,Crusher 1,Weekly liner check,Weekly,2026-11-06,2026-10-30,T. Banda,Engineering,High,2,Check liner wear and record thickness,Yes
+PM-102,CRS-1,Crusher 1,Quarterly service,Quarterly,2026-12-15,,J. Moyo,Engineering,Medium,8,Full quarterly service per manual,Yes
+PM-103,NOPE-1,Unknown Machine,Tighten bolts,Monthly,2026-11-20,,T. Banda,Engineering,Low,1,,Yes
+PM-104,MILL-3,Mill 3,Check oil level,Semi-Annual,2026-11-20,,T. Banda,Engineering,Medium,1,,Yes
+PM-105,MILL-3,Mill 3,Monthly vibration reading,Monthly,2026-11-18,,S. Ncube,Engineering,Medium,1.5,Take readings at all bearings,Yes
+PM-106,CMP-2,Compressor No 2,Retired weekly check,Weekly,2026-11-06,,T. Banda,Engineering,Low,1,,No

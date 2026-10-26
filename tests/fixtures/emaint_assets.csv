@@ -1,0 +1,8 @@
+Asset ID,Asset Description,Asset Type,Manufacturer,Model,Serial Number,Location,Department,Status,Criticality,Commission Date,Supplier,Purchase Cost,Warranty Info,Notes
+CRS-1,Crusher 1,Crushers,Acme,C-900,SN-CRUSH-9,Plant,Engineering,Active,High,2022-03-01,Acme Ltd,120000,2 years from install,Primary crusher
+CRS-9,New Conveyor,Conveyors,BeltCo,B-200,SN-BELT-2,Plant,Engineering,Active,Medium,2023-06-15,BeltCo,45000,,Feed conveyor
+MILL-3,Mill 3,Mills,,,SN-MILL-3,Plant,Engineering,Under Maintenance,High,,,,Liners due
+,mill 3,,VendorX,V-1,,Plant,Engineering,Active,Low,,,,,spare entry with odd case
+,,Pumps,,,,Plant,Engineering,Active,Medium,,,,,
+PMP-7,Broken Status Pump,Pumps,,,,Plant,Engineering,Sold,Low,,,,,
+CMP-2,Compressor No 2,Compressors,Atlas Copco,GA55,SN-CMP-2,Compressor House,Engineering,Active,High,2021-01-20,Atlas Copco ZW,88000,Expired 2024,Standby unit
