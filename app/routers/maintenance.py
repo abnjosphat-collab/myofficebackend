@@ -108,6 +108,9 @@ class WorkOrderCreate(BaseModel):
     classification: Optional[str] = None
     classification_custom: Optional[str] = None
     failure_mode: Optional[str] = None
+    # M3 Action: what fixed the breakdown (column from
+    # supabase_m3_failure_codes_20261026.sql; dropped until it has run).
+    corrective_action: Optional[str] = None
     discipline: Optional[str] = None
     trade: Optional[str] = None
     # Unlike the fields above, the DB column is NOT NULL DEFAULT '[]'::jsonb
@@ -173,6 +176,7 @@ class WorkOrderUpdate(BaseModel):
     classification: Optional[str] = None
     classification_custom: Optional[str] = None
     failure_mode: Optional[str] = None
+    corrective_action: Optional[str] = None
     discipline: Optional[str] = None
     trade: Optional[str] = None
     spares_used: Optional[List[Dict[str, Any]]] = None
@@ -187,8 +191,8 @@ class WorkOrderUpdate(BaseModel):
 class WorkOrderClose(BaseModel):
     """Fast close (M2): what was done, and the actual time as start/finish times
     or plain hours. Anything the row already holds counts, so a job reported
-    earlier closes with only what is missing; a breakdown also needs its cause
-    and failure mode (M3 turns the mode into a managed list)."""
+    earlier closes with only what is missing; a breakdown also needs its Problem,
+    Cause and Action codes (M3 failure coding)."""
 
     work_done_details: str = ""
     time_work_started: Optional[str] = None
@@ -198,6 +202,7 @@ class WorkOrderClose(BaseModel):
     artisan_date: Optional[str] = None
     cause_of_failure: Optional[str] = None
     failure_mode: Optional[str] = None
+    corrective_action: Optional[str] = None
     expected_updated_at: Optional[str] = None
 
 
@@ -315,6 +320,16 @@ def prepare_data_for_response(data: dict) -> dict:
 # M1 SQL has run (the columns do not exist before that).
 _LIFECYCLE_COLUMNS = ("started_at", "completed_at", "signed_off_at")
 _LINK_COLUMNS = ("equipment_id", "schedule_id")
+# M3 failure coding: Problem / Cause / Action live in the shared lookup_lists
+# table (starter values from supabase_m3_failure_codes_20261026.sql; managers
+# edit them in Admin > Shared lists). A freshly typed value is remembered so
+# the next breakdown can pick it.
+_ACTION_COLUMNS = ("corrective_action",)
+_FAILURE_CODE_LISTS = {
+    "failure_mode": "failure_problem",
+    "cause_of_failure": "failure_cause",
+    "corrective_action": "failure_action",
+}
 
 
 def _lifecycle_stamps(before: dict, updates: dict, now: str | None = None) -> dict:
@@ -379,12 +394,43 @@ def hours_text(hours: float) -> str:
     return f"{mins // 60}h {mins % 60:02d}m"
 
 
-def close_problems(before: dict, close: "WorkOrderClose") -> list:
+def _learn_code(list_name: str, value: object) -> None:
+    """Best-effort: remember a freshly typed failure code in its shared list
+
+    (lookup_lists), so the next breakdown can pick it. A case-insensitive
+    match already on the list is left alone. Never fails the write.
+    """
+    v = value.strip() if isinstance(value, str) else ""
+    if not v:
+        return
+    try:
+        existing = supabase.table("lookup_lists").select("id").eq("list_name", list_name).ilike("value", v).execute()
+        if existing.data:
+            return
+        supabase.table("lookup_lists").insert({"list_name": list_name, "value": v}).execute()
+    except Exception as e:  # noqa: BLE001 - learning must never fail the write
+        logger.warning(f"Could not save '{v}' to lookup list '{list_name}': {e}")
+
+
+def _learn_failure_codes(saved: dict, stored_action: bool) -> None:
+    """Remember the codes a close or report stored, from the SAVED row (so a
+
+    value dropped before the write — the Action column until the M3 SQL has
+    run — is never learned).
+    """
+    for column, list_name in _FAILURE_CODE_LISTS.items():
+        if column == "corrective_action" and not stored_action:
+            continue
+        _learn_code(list_name, saved.get(column))
+
+
+def close_problems(before: dict, close: "WorkOrderClose", require_action: bool = True) -> list:
     """What is missing or contradictory in a close, as one reason per problem.
 
     The check runs on the merged values (what was sent, falling back to what
     the row already holds), so a job reported earlier closes with only what is
-    missing. Empty means the close may go ahead.
+    missing. Empty means the close may go ahead. require_action is False
+    until the M3 SQL has run (the Action column does not exist yet).
     """
     problems = []
     done = (close.work_done_details or "").strip() or (before.get("work_done_details") or "").strip()
@@ -413,6 +459,9 @@ def close_problems(before: dict, close: "WorkOrderClose") -> list:
         mode = (close.failure_mode or "").strip() or (before.get("failure_mode") or "").strip()
         if not mode:
             problems.append("Pick the failure mode.")
+        action = (close.corrective_action or "").strip() or (before.get("corrective_action") or "").strip()
+        if require_action and not action:
+            problems.append("Say what action fixed it.")
     if close.artisan_date:
         try:
             date.fromisoformat(close.artisan_date.strip())
@@ -421,7 +470,7 @@ def close_problems(before: dict, close: "WorkOrderClose") -> list:
     return problems
 
 
-def _close_updates(before: dict, close: "WorkOrderClose", user: dict) -> dict:
+def _close_updates(before: dict, close: "WorkOrderClose", user: dict, store_action: bool = True) -> dict:
     """The row write for a validated close: completed, progress 100, the merged
     report fields. The artisan defaults to the signed-in person when no name is
     recorded anywhere; the date defaults to today (Harare)."""
@@ -452,6 +501,9 @@ def _close_updates(before: dict, close: "WorkOrderClose", user: dict) -> dict:
     mode = (close.failure_mode or "").strip()
     if mode:
         updates["failure_mode"] = mode
+    action = (close.corrective_action or "").strip()
+    if store_action and action:
+        updates["corrective_action"] = action
     return updates
 
 
@@ -584,6 +636,9 @@ async def create_work_order(work_order: WorkOrderCreate, current_user: dict = De
         else:
             data_to_insert.pop("equipment_id", None)
             data_to_insert.pop("schedule_id", None)
+        # M3 Action: drop until the M3 SQL has run.
+        if not has_columns(supabase, "work_orders", _ACTION_COLUMNS):
+            data_to_insert.pop("corrective_action", None)
 
         # Prepare data for database
         data_to_insert = prepare_data_for_db(data_to_insert)
@@ -663,6 +718,10 @@ async def update_work_order(work_order_id: int, updated: WorkOrderUpdate, curren
         expected_version = data_to_update.pop("version", None)
         assert_unchanged(before, data_to_update.pop("expected_updated_at", None))
         data_to_update = prepare_data_for_db(data_to_update)
+        # M3 Action: drop until the M3 SQL has run.
+        stored_action = has_columns(supabase, "work_orders", _ACTION_COLUMNS)
+        if not stored_action:
+            data_to_update.pop("corrective_action", None)
         data_to_update.update(_lifecycle_stamps(before, data_to_update))
         data_to_update["updated_at"] = datetime.utcnow().isoformat()
 
@@ -695,6 +754,7 @@ async def update_work_order(work_order_id: int, updated: WorkOrderUpdate, curren
                 to_status=saved.get("status") if "status" in changes else None,
                 changes=changes,
             )
+        _learn_failure_codes(saved, stored_action)
         result = prepare_data_for_response(saved)
         await invalidate_namespace("work_orders")
         return result
@@ -730,6 +790,7 @@ async def bulk_close_work_orders(body: WorkOrderBulkClose, current_user: dict = 
     """
     closed: list = []
     skipped: list = []
+    stored_action = has_columns(supabase, "work_orders", _ACTION_COLUMNS)
     for work_order_id in body.ids:
         try:
             before = one_row(supabase.table("work_orders").select("*").eq("id", work_order_id).execute())
@@ -757,12 +818,12 @@ async def bulk_close_work_orders(body: WorkOrderBulkClose, current_user: dict = 
             skipped.append({"id": work_order_id,
                             "reason": f"Only routine planned jobs close in bulk (this one is {_bulk_classification_label(before)})."})
             continue
-        problems = close_problems(before, body)
+        problems = close_problems(before, body, require_action=stored_action)
         if problems:
             skipped.append({"id": work_order_id, "reason": " ".join(problems)})
             continue
         try:
-            updates = prepare_data_for_db(_close_updates(before, body, current_user))
+            updates = prepare_data_for_db(_close_updates(before, body, current_user, store_action=stored_action))
             updates.update(_lifecycle_stamps(before, updates))
             updates["updated_at"] = datetime.utcnow().isoformat()
             saved = one_row(supabase.table("work_orders").update(updates).eq("id", work_order_id).execute())
@@ -788,8 +849,8 @@ async def bulk_close_work_orders(body: WorkOrderBulkClose, current_user: dict = 
 async def close_work_order(work_order_id: int, close: WorkOrderClose, current_user: dict = Depends(get_current_user)):
     """Close one job fast: completed, progress 100, the M1 stamps, one audit
     event. Refuses a job that is already finished (409) or that still misses
-    what was done, the time, or (for a breakdown) its cause and failure mode
-    (422 naming each gap). The foreman sign-off stays a separate step."""
+    what was done, the time, or (for a breakdown) its Problem, Cause and Action
+    codes (422 naming each gap). The foreman sign-off stays a separate step."""
     try:
         before = dict(get_or_404(supabase, "work_orders", work_order_id, detail="Work order not found"))
         if viewer_scope(current_user) is not None:
@@ -798,11 +859,12 @@ async def close_work_order(work_order_id: int, close: WorkOrderClose, current_us
         status = before.get("status") or "pending"
         if status in _TERMINAL_STATUSES:
             raise HTTPException(status_code=409, detail=f"This work order is already {status}; only an open job can be closed.")
-        problems = close_problems(before, close)
+        stored_action = has_columns(supabase, "work_orders", _ACTION_COLUMNS)
+        problems = close_problems(before, close, require_action=stored_action)
         if problems:
             raise HTTPException(status_code=422, detail=" ".join(problems))
         assert_unchanged(before, close.expected_updated_at)
-        updates = prepare_data_for_db(_close_updates(before, close, current_user))
+        updates = prepare_data_for_db(_close_updates(before, close, current_user, store_action=stored_action))
         updates.update(_lifecycle_stamps(before, updates))
         updates["updated_at"] = datetime.utcnow().isoformat()
 
@@ -817,6 +879,7 @@ async def close_work_order(work_order_id: int, close: WorkOrderClose, current_us
                 user=current_user, entity_number=saved.get("work_order_number") or before.get("work_order_number"),
                 from_status=before.get("status"), to_status="completed", changes=changes,
             )
+        _learn_failure_codes(saved, stored_action)
         result = prepare_data_for_response(saved)
         await invalidate_namespace("work_orders")
         return result

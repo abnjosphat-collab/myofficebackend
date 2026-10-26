@@ -182,12 +182,16 @@ def test_close_problems_hours_must_be_positive():
 
 
 def test_close_problems_breakdown_needs_cause_and_mode():
+    # M3: a breakdown close also needs its Action code (Problem/Cause/Action).
     row = _row(work_done_details="Done.", total_time_worked="1h 00m", classification="breakdown")
     assert close_problems(row, WorkOrderClose()) == [
-        "Say what caused the breakdown.", "Pick the failure mode."]
-    assert close_problems(row, WorkOrderClose(cause_of_failure="Seal worn", failure_mode="Seal failure")) == []
+        "Say what caused the breakdown.", "Pick the failure mode.", "Say what action fixed it."]
+    assert close_problems(row, WorkOrderClose(
+        cause_of_failure="Seal worn", failure_mode="Seal failure",
+        corrective_action="Replaced component")) == []
     coded = _row(work_done_details="Done.", total_time_worked="1h 00m", classification="breakdown",
-                 cause_of_failure="Seal worn", failure_mode="Seal failure")
+                 cause_of_failure="Seal worn", failure_mode="Seal failure",
+                 corrective_action="Replaced component")
     assert close_problems(coded, WorkOrderClose()) == []
 
 
