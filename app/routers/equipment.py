@@ -5,8 +5,11 @@ from typing import List, Optional
 from datetime import date
 from app.supabase_client import supabase
 from app.auth import get_current_user, require_role
+from app.audit import has_columns
 from app.cache import cached, invalidate_namespace
+from app.clock import today_harare
 from app.db_helpers import get_or_404
+from app.machine_history import compute_machine_history
 from app.scope import apply_list_scope, assert_row_visible, stamp_create, viewer_scope
 from app.errors import server_error
 import logging
@@ -171,6 +174,39 @@ async def get_equipment_item(equipment_id: int, current_user: dict = Depends(get
     except Exception as e:
         logger.error(f"Error fetching equipment {equipment_id}: {str(e)}")
         raise server_error(e, "Loading equipment")
+
+@router.get("/{equipment_id}/history")
+async def get_equipment_history(equipment_id: int, days: int = 90,
+                                current_user: dict = Depends(get_current_user)):
+    """One machine's history (M6): its jobs, breakdowns, planned work,
+
+    spares, hours and its measures. Lists and totals cover everything ever
+    recorded; the measures reuse the M5 definitions over the trailing
+    `days` window. Definitions in frontend/docs/WORK_ORDERS.md. Not cached:
+    the tables are small and the figures must match the register just read.
+    """
+    try:
+        days = min(365, max(7, days))
+        today = today_harare()
+        row = get_or_404(supabase, "equipment", equipment_id,
+                         detail=f"Equipment with ID {equipment_id} not found")
+        assert_row_visible(current_user, "equipment", row,
+                           detail=f"Equipment with ID {equipment_id} not found")
+        equipment = process_dates_from_db(row)
+        links_active = has_columns(supabase, "work_orders", ["equipment_id"])
+        orders_q = apply_list_scope(supabase.table("work_orders").select("*"), current_user, "work_orders")
+        orders = get_supabase_data(orders_q.execute()) or []
+        breakdowns_q = apply_list_scope(supabase.table("breakdowns").select("*"), current_user, "breakdowns")
+        breakdowns = get_supabase_data(breakdowns_q.execute()) or []
+        schedules_q = apply_list_scope(supabase.table("maintenance_schedules").select("*"), current_user, "maintenance_schedules")
+        schedules = get_supabase_data(schedules_q.execute()) or []
+        return compute_machine_history(equipment, orders, breakdowns, schedules, today, days, links_active)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error fetching history for equipment {equipment_id}: {str(e)}")
+        raise server_error(e, "Loading machine history")
+
 
 @router.post("")
 @router.post("/")
