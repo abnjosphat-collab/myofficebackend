@@ -128,6 +128,7 @@ class StatusUpdateRequest(BaseModel):
 from app.supabase_client import supabase as _shared_supabase_client
 from app.auth import get_current_user, require_role
 from app.compressor_register import fields_from_register, load_register_units, sync_from_register, with_register
+from app.audit import has_columns
 from app.errors import server_error
 
 #: Columns of a tracked compressor that the Equipment register owns (an update to them is ignored, not applied).
@@ -1416,6 +1417,11 @@ def ensure_weekly_routine_schedules(supabase_client, today: Optional[date] = Non
             "job_request_details": f"Routine weekly maintenance for {name} ({unit.get('location') or 'see register'}).",
             "job_instructions": "Check oil level and top up, drain condensate, inspect belts, filters and hoses for wear and leaks, record running hours.",
         }
+        # M1: the register link alongside the marker (the marker stays: the
+        # ensure matches on it, and M0 relies on that. Dropped pre-SQL).
+        if has_columns(supabase_client, SCHEDULES_TABLE, ("equipment_id", "classification")):
+            body["equipment_id"] = unit["id"]
+            body["classification"] = "planned_maintenance"
         inserted = supabase_client.table(SCHEDULES_TABLE).insert(body).execute()
         data = getattr(inserted, "data", inserted) or []
         created.append({"equipment_id": unit["id"], "schedule_id": data[0].get("id") if data else None})

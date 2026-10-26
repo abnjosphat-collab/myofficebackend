@@ -10,7 +10,9 @@ from app.serialization import convert_dates_to_iso
 from app.aggregation import count_by
 from app.db_helpers import fetch_all_pages, get_or_404
 from app.concurrency import assert_unchanged
+from app.audit import has_columns
 from app.maintenance_events import append_event, diff_changes
+from app.maintenance_links import resolve_equipment_id
 from app.errors import server_error
 from app.scope import apply_list_scope, assert_row_visible, person_ids_for, stamp_create, viewer_scope
 from app.clock import today_harare
@@ -92,6 +94,10 @@ class WorkOrderCreate(BaseModel):
     department: Optional[str] = None
     section: Optional[str] = None
     equipment: Optional[str] = None
+    # M1 links: the register machine and the raising schedule (columns from
+    # supabase_m1_maintenance_links_20261026.sql; dropped until it has run).
+    equipment_id: Optional[int] = None
+    schedule_id: Optional[int] = None
     due_date: Optional[date] = None
     progress: int = 0
     notes: Optional[str] = None
@@ -159,6 +165,8 @@ class WorkOrderUpdate(BaseModel):
     department: Optional[str] = None
     section: Optional[str] = None
     equipment: Optional[str] = None
+    equipment_id: Optional[int] = None
+    schedule_id: Optional[int] = None
     due_date: Optional[date] = None
     progress: Optional[int] = None
     notes: Optional[str] = None
@@ -272,6 +280,42 @@ def prepare_data_for_response(data: dict) -> dict:
             result[key] = value
     return result
 
+# M1 timestamps: when things happen, stamped by the server (never taken from
+# the browser -- integrity rule 2). started_at on the first move to
+# in-progress, completed_at on the move to completed (a direct pending to
+# completed close fills started_at too, since the work happened), signed_off_at
+# when the foreman sign first appears. Stamps are written once and never
+# cleared, so reopening a job keeps its history; nothing is stamped until the
+# M1 SQL has run (the columns do not exist before that).
+_LIFECYCLE_COLUMNS = ("started_at", "completed_at", "signed_off_at")
+_LINK_COLUMNS = ("equipment_id", "schedule_id")
+
+
+def _lifecycle_stamps(before: dict, updates: dict, now: str | None = None) -> dict:
+    """Server stamps for a work-order PATCH. Empty when the M1 columns are absent."""
+    if not has_columns(supabase, "work_orders", _LIFECYCLE_COLUMNS):
+        return {}
+    now = now if now is not None else datetime.utcnow().isoformat()
+    stamps: dict = {}
+    new_status = updates.get("status", before.get("status"))
+    if (
+        new_status == "in-progress"
+        and before.get("status") != "in-progress"
+        and not before.get("started_at")
+    ):
+        stamps["started_at"] = now
+    if new_status == "completed" and before.get("status") != "completed":
+        if not before.get("completed_at"):
+            stamps["completed_at"] = now
+        if not before.get("started_at") and "started_at" not in stamps:
+            stamps["started_at"] = now
+    before_sign = (before.get("foreman_sign") or "").strip()
+    after_sign = (updates.get("foreman_sign", before.get("foreman_sign")) or "").strip()
+    if before_sign == "" and after_sign != "" and not before.get("signed_off_at"):
+        stamps["signed_off_at"] = now
+    return stamps
+
+
 # ==================== WORK ORDERS ENDPOINTS ====================
 @router.get("/work-orders", dependencies=[Depends(get_current_user)])
 async def get_work_orders(
@@ -280,6 +324,8 @@ async def get_work_orders(
     department: Optional[str] = None,
     allocated_to: Optional[str] = None,
     to_department: Optional[str] = None,
+    equipment_id: Optional[int] = None,
+    schedule_id: Optional[int] = None,
     # A caller that only needs the N most recent rows (e.g. a sidebar activity
     # feed) can ask for them directly instead of downloading the entire table
     # and slicing client-side.
@@ -289,6 +335,7 @@ async def get_work_orders(
     cache_key = build_key(
         "work_orders", scope=viewer_scope(current_user), status=status, priority=priority, department=department,
         allocated_to=allocated_to, to_department=to_department, limit=limit,
+        equipment_id=equipment_id, schedule_id=schedule_id,
     )
     cached_result = await cache_get(cache_key)
     if cached_result is not None:
@@ -306,6 +353,15 @@ async def get_work_orders(
             query = query.eq("allocated_to", allocated_to)
         if to_department and to_department != 'all':
             query = query.eq("to_department", to_department)
+        if equipment_id is not None or schedule_id is not None:
+            # Before the M1 SQL runs no row can carry a link, so a filtered
+            # read is honestly empty (and must not 500 on a missing column).
+            if not has_columns(supabase, "work_orders", _LINK_COLUMNS):
+                return []
+            if equipment_id is not None:
+                query = query.eq("equipment_id", equipment_id)
+            if schedule_id is not None:
+                query = query.eq("schedule_id", schedule_id)
         query = apply_list_scope(query, current_user, "work_orders")
 
         query = query.order("created_at", desc=True).order("id", desc=True)
@@ -367,6 +423,16 @@ async def create_work_order(work_order: WorkOrderCreate, current_user: dict = De
         # Handle optional manpower - ensure it's not None
         if data_to_insert.get('manpower') is None:
             data_to_insert['manpower'] = []
+
+        # M1 links: resolve the typed machine name on an exact match when the
+        # picker sent no equipment_id; drop both keys until the M1 SQL has run.
+        if has_columns(supabase, "work_orders", _LINK_COLUMNS):
+            if data_to_insert.get("equipment_id") is None:
+                data_to_insert["equipment_id"] = resolve_equipment_id(
+                    supabase, data_to_insert.get("equipment_info"), current_user)
+        else:
+            data_to_insert.pop("equipment_id", None)
+            data_to_insert.pop("schedule_id", None)
 
         # Prepare data for database
         data_to_insert = prepare_data_for_db(data_to_insert)
@@ -446,6 +512,7 @@ async def update_work_order(work_order_id: int, updated: WorkOrderUpdate, curren
         expected_version = data_to_update.pop("version", None)
         assert_unchanged(before, data_to_update.pop("expected_updated_at", None))
         data_to_update = prepare_data_for_db(data_to_update)
+        data_to_update.update(_lifecycle_stamps(before, data_to_update))
         data_to_update["updated_at"] = datetime.utcnow().isoformat()
 
         # Optimistic concurrency. Only enforced when the editor sent the version it loaded AND the

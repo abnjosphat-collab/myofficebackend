@@ -70,7 +70,11 @@ async def test_update_without_version_still_works_and_is_audited(patch_supabase)
     result = await update_work_order(7, WorkOrderUpdate(status="completed"), current_user=_user())
     assert result["status"] == "completed"
     event = state["maintenance_events"][0]
-    assert event["action"] == "updated" and event["changes"] == {"status": ["pending", "completed"]}
+    assert event["action"] == "updated"
+    # M1: closing the job also stamps started_at/completed_at, and the trail records them.
+    assert event["changes"]["status"] == ["pending", "completed"]
+    assert event["changes"]["started_at"][0] is None and event["changes"]["started_at"][1]
+    assert event["changes"]["completed_at"][0] is None and event["changes"]["completed_at"][1]
     assert event["from_status"] == "pending" and event["to_status"] == "completed"
     assert event["entity_number"] == "WO-00007"
 

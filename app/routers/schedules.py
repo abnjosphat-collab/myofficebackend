@@ -18,7 +18,9 @@ from pydantic import BaseModel, Field, field_validator
 
 from app.clock import today_harare
 from app.supabase_client import one_row, supabase
+from app.audit import has_columns
 from app.auth import get_current_user, require_role
+from app.maintenance_links import PLANNED_MAINTENANCE, resolve_equipment_id
 from app.routers.compressors import ensure_weekly_routine_schedules
 from app.scope import apply_list_scope, assert_row_visible, stamp_create, viewer_scope
 from app.errors import server_error
@@ -35,6 +37,8 @@ def _is_schedule_run_claim_conflict(err: Exception) -> bool:
     return "23505" in s or "duplicate key" in s or "unique constraint" in s
 
 RECURRENCE_TYPES = ('daily', 'weekly', 'biweekly', 'monthly', 'quarterly', 'yearly', 'custom')
+# M1 columns on maintenance_schedules (supabase_m1_maintenance_links_20261026.sql).
+_SCHEDULE_M1_COLUMNS = ("equipment_id", "classification", "discipline", "trade")
 PRIORITIES = ('low', 'medium', 'high', 'urgent')
 FAR_FUTURE = date(9999, 1, 1)
 
@@ -43,6 +47,13 @@ FAR_FUTURE = date(9999, 1, 1)
 class ScheduleBase(BaseModel):
     name: str = Field(..., min_length=1)
     equipment_info: str = ''
+    # M1: the register machine (else resolved from equipment_info on an
+    # exact match), and what generated jobs inherit. A schedule is planned
+    # maintenance by definition, hence the default classification.
+    equipment_id: Optional[int] = None
+    classification: str = PLANNED_MAINTENANCE
+    discipline: Optional[str] = None
+    trade: Optional[str] = None
     to_department: str = ''
     allocated_to: str = ''
     authorising_foreman: str = ''
@@ -82,6 +93,10 @@ class ScheduleCreate(ScheduleBase):
 class ScheduleUpdate(BaseModel):
     name: Optional[str] = None
     equipment_info: Optional[str] = None
+    equipment_id: Optional[int] = None
+    classification: Optional[str] = None
+    discipline: Optional[str] = None
+    trade: Optional[str] = None
     to_department: Optional[str] = None
     allocated_to: Optional[str] = None
     authorising_foreman: Optional[str] = None
@@ -205,6 +220,12 @@ async def list_schedules(user: dict = Depends(get_current_user)):
 @router.post("")
 async def create_schedule(payload: ScheduleCreate, user: dict = Depends(require_role('manager'))):
     body = payload.model_dump(mode='json')
+    if has_columns(supabase, "maintenance_schedules", _SCHEDULE_M1_COLUMNS):
+        if body.get("equipment_id") is None:
+            body["equipment_id"] = resolve_equipment_id(supabase, body.get("equipment_info"), user)
+    else:
+        for key in _SCHEDULE_M1_COLUMNS:
+            body.pop(key, None)
     body['created_by'] = user['user_id']
     body = stamp_create(user, 'maintenance_schedules', body)
     if not body.get('next_due_date'):
@@ -222,6 +243,9 @@ async def update_schedule(schedule_id: int, payload: ScheduleUpdate, user: dict 
     # exclude_unset, not a None-filter: an explicitly-sent null must clear the
     # field, not be silently dropped. See work_orders (backend edec24a).
     body = payload.model_dump(mode='json', exclude_unset=True)
+    if not has_columns(supabase, "maintenance_schedules", _SCHEDULE_M1_COLUMNS):
+        for key in _SCHEDULE_M1_COLUMNS:
+            body.pop(key, None)
     if not body:
         raise HTTPException(status_code=400, detail="No fields to update.")
     if viewer_scope(user) is not None:
@@ -296,6 +320,7 @@ def _generate_one(s: dict, today: date) -> Optional[dict]:
         raise
 
     now = datetime.now()
+    link_cols = has_columns(supabase, "work_orders", ("equipment_id", "schedule_id"))
     work_order = {
         'work_order_number': _next_work_order_number(),
         'title': s['name'],
@@ -308,6 +333,9 @@ def _generate_one(s: dict, today: date) -> Optional[dict]:
         'job_request_details': s.get('job_request_details') or '',
         'job_instructions': s.get('job_instructions') or '',
         'priority': s.get('priority') or 'medium',
+        'classification': PLANNED_MAINTENANCE,
+        'discipline': s.get('discipline'),
+        'trade': s.get('trade'),
         'status': 'pending',
         'date_raised': today.isoformat(),
         'time_raised': now.strftime('%H:%M'),
@@ -315,6 +343,16 @@ def _generate_one(s: dict, today: date) -> Optional[dict]:
         'requested_by': 'Scheduled maintenance',
         'notes': f"Raised automatically from schedule #{s['id']} ({s['name']}), due {due.isoformat()}.",
     }
+    if link_cols:
+        # A schedule whose equipment_id is still empty (typed before the M1
+        # SQL ran, or by a client with no picker) resolves its machine here
+        # on the same exact-match rule as the backfill.
+        work_order['schedule_id'] = s['id']
+        work_order['equipment_id'] = (
+            s.get('equipment_id')
+            if s.get('equipment_id') is not None
+            else resolve_equipment_id(supabase, s.get('equipment_info'))
+        )
 
     try:
         wo = _rows(supabase.table('work_orders').insert(work_order).execute())[0]
