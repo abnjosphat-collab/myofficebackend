@@ -13,6 +13,7 @@ from app.concurrency import assert_unchanged
 from app.audit import has_columns
 from app.maintenance_events import append_event, diff_changes
 from app.maintenance_links import resolve_equipment_id
+from app.maintenance_measures import compute_measures
 from app.breakdown_links import (
     breakdown_shell_for_work_order,
     find_breakdown_for_work_order,
@@ -1200,6 +1201,38 @@ async def get_work_order_stats(current_user: Optional[dict] = Depends(get_curren
     except Exception as e:
         logger.error(f"Error fetching work order stats: {str(e)}")
         raise server_error(e, "Loading work order stats")
+
+# ==================== MAINTENANCE MEASURES (M5) ====================
+@router.get("/measures")
+async def get_maintenance_measures(
+    days: int = 90,
+    weeks: int = 12,
+    current_user: Optional[dict] = Depends(get_current_user_optional),
+):
+    """The seven maintenance measures, computed on the server (M5).
+
+    Definitions in frontend/docs/WORK_ORDERS.md; each figure carries the ids
+    it counts so the UI drills down to exactly that list. Not cached: the
+    tables are small and the figures must match the register just read.
+    """
+    try:
+        days = min(365, max(7, days))
+        weeks = min(26, max(4, weeks))
+        today = today_harare()
+        orders_q = apply_list_scope(supabase.table("work_orders").select("*"), current_user, "work_orders")
+        orders = rows(orders_q.execute())
+        breakdowns_q = apply_list_scope(supabase.table("breakdowns").select("*"), current_user, "breakdowns")
+        breakdowns = rows(breakdowns_q.execute())
+        try:
+            equipment_q = apply_list_scope(supabase.table("equipment").select("id,name"), current_user, "equipment")
+            equipment_names = {r.get("id"): r.get("name") for r in rows(equipment_q.execute())}
+        except Exception as e:  # noqa: BLE001 - labels only; ids still drill down
+            logger.warning(f"Measures continuing without equipment names: {e}")
+            equipment_names = {}
+        return compute_measures(orders, breakdowns, equipment_names, today, days, weeks)
+    except Exception as e:
+        logger.error(f"Error computing maintenance measures: {str(e)}")
+        raise server_error(e, "Loading maintenance measures")
 
 # ==================== PPE ENDPOINTS (if you want them consolidated here) ====================
 @router.get("/ppe")
