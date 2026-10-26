@@ -11,9 +11,11 @@
 import pytest
 from fastapi import HTTPException
 
+import app.breakdown_links as bl
 import app.routers.breakdowns as bd
+import app.routers.maintenance as wo
 from app.routers.breakdowns import create_breakdown, BreakdownCreate, SparePart
-from tests._breakdowns_fake import FakeSupabase
+from tests._breakdowns_fake import IdFakeSupabase
 
 CURRENT_USER = {"user_id": "u1", "email": "t@t", "role": "user"}
 
@@ -29,8 +31,19 @@ def _make(**overrides) -> BreakdownCreate:
 
 
 def _patch(monkeypatch, tables=None):
-    fake = FakeSupabase(tables or {"breakdowns": [], "lookup_lists": []})
+    # M4: logging a breakdown raises its work order through the maintenance
+    # router, so BOTH routers run on the one fake — patching breakdowns alone
+    # would send the work-order insert to the real database. Probes pinned to
+    # the pre-SQL shape (this file tests the breakdown insert path; the link
+    # itself is covered in test_maintenance_breakdown_link.py).
+    merged = {"breakdowns": [], "work_orders": [], "lookup_lists": [],
+              "maintenance_events": [], "equipment": []}
+    merged.update(tables or {})
+    fake = IdFakeSupabase(merged)
     monkeypatch.setattr(bd, "supabase", fake)
+    monkeypatch.setattr(wo, "supabase", fake)
+    monkeypatch.setattr(bl, "has_columns", lambda *a, **k: False)
+    monkeypatch.setattr(wo, "has_columns", lambda *a, **k: False)
     return fake
 
 

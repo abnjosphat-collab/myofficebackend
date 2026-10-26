@@ -144,3 +144,27 @@ class FakeSupabase:
 
     def always_fail(self, table: str, message: str = "simulated failure"):
         self.state.always_fail[table] = message
+
+
+class _IdQuery(_FakeQuery):
+    """The shared fake query, assigning ids on insert like PostgREST does."""
+
+    def execute(self):
+        if self._op and self._op[0] == "insert":
+            rows = self._op[1] if isinstance(self._op[1], list) else [self._op[1]]
+            table = self.state.tables.setdefault(self.table_name, [])
+            nxt = max([r.get("id", 0) or 0 for r in table] + [0])
+            for row in rows:
+                if isinstance(row, dict) and row.get("id") is None:
+                    nxt += 1
+                    row["id"] = nxt
+        return super().execute()
+
+
+class IdFakeSupabase(FakeSupabase):
+    """FakeSupabase that assigns auto-increment ids on insert, for tests where
+    the code under test reads the created row's id back (M4's breakdown <->
+    work-order link needs both ids)."""
+
+    def table(self, name: str) -> _IdQuery:
+        return _IdQuery(name, self.state)

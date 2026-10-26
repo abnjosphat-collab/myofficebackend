@@ -16,6 +16,12 @@ from app.db_helpers import fetch_all_pages
 from app.scope import apply_list_scope, assert_row_visible, stamp_create, viewer_scope
 from app.errors import server_error
 from app.clock import today_harare, week_start_harare
+from app.breakdown_links import (
+    has_work_order_link,
+    link_breakdown_to_work_order,
+    work_order_values_for_breakdown,
+)
+from app.routers.maintenance import JobType, WorkOrderCreate, create_work_order
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -86,6 +92,10 @@ class BreakdownCreate(BaseModel):
     # Status
     status: str = Field(default="logged")
     priority: str = Field(default="medium")
+
+    # M4: logging a breakdown raises its work order (classification breakdown)
+    # unless the logger opts out (a trivial log with no job behind it).
+    raise_work_order: bool = True
 
     # Validator to handle description fields
     @validator('breakdown_date', pre=True)
@@ -229,6 +239,41 @@ def learn_lookup_value(list_name: str, value: Optional[str]):
     except Exception as e:
         logger.warning(f"Could not save '{v}' to lookup list '{list_name}': {e}")
 
+def _work_order_create_for_breakdown(values: dict) -> "WorkOrderCreate":
+    """A work-order create from carried-over breakdown values.
+
+    Everything the breakdown cannot say stays blank for the artisan and
+    foreman (the same blanks as a manually raised job); the server
+    allocates the WO number on insert.
+    """
+    return WorkOrderCreate(
+        work_order_number="WO-PENDING",
+        equipment_info=values["equipment_info"],
+        to_department=values["to_department"],
+        allocated_to=values["allocated_to"],
+        artisan_name=values["artisan_name"],
+        priority=values["priority"],
+        classification=values["classification"],
+        job_request_details=values["job_request_details"],
+        date_raised=values["date_raised"],
+        requested_by=values["requested_by"],
+        section=values.get("section"),
+        notes=values["notes"],
+        to_section="", from_department="", from_section="",
+        account_number="", user_lab_today="",
+        time_raised=datetime.now().strftime("%H:%M"),
+        job_type=JobType(maintenance=True),
+        authorising_foreman="", authorising_engineer="",
+        estimated_hours="", responsible_foreman="", job_instructions="",
+        manpower=[], work_done_details="", cause_of_failure="",
+        delay_details="", artisan_sign="", artisan_date="",
+        foreman_name="", foreman_sign="", foreman_date="",
+        time_work_started="", time_work_finished="", total_time_worked="",
+        overtime_start_time="", overtime_end_time="", overtime_hours="",
+        delay_from_time="", delay_to_time="", total_delay_hours="",
+    )
+
+
 # ===== API ENDPOINTS =====
 
 @router.get("/", dependencies=[Depends(get_current_user)])
@@ -317,7 +362,20 @@ async def create_breakdown(breakdown: BreakdownCreate, current_user: dict = Depe
     try:
         # Convert to dict
         data = breakdown.model_dump()
-        
+        raise_job = data.pop("raise_work_order", True)
+
+        # M4: the job first — if raising fails nothing is stored, so a retry
+        # never duplicates the breakdown. The link itself waits for the M4
+        # column; the job does not (it is useful on its own).
+        raised_wo = None
+        if raise_job:
+            raised_wo = await create_work_order(
+                _work_order_create_for_breakdown(
+                    work_order_values_for_breakdown(data, current_user)
+                ),
+                current_user,
+            )
+
         # Calculate time metrics (only returns columns that exist in database)
         time_metrics = calculate_time_metrics(data)
         data.update(time_metrics)
@@ -349,10 +407,14 @@ async def create_breakdown(breakdown: BreakdownCreate, current_user: dict = Depe
             'net_downtime_minutes', 'total_spare_cost', 'spares_used',
             'created_at', 'updated_at', 'breakdown_description', 'section'
         ]
-        
+        if has_work_order_link(db):
+            expected_columns.append('work_order_id')
+
         # Filter out any unexpected keys
         data = {k: v for k, v in data.items() if k in expected_columns}
-        
+        if raised_wo is not None and has_work_order_link(db):
+            data["work_order_id"] = raised_wo["id"]
+
         logger.info(f"Inserting breakdown with {len(data)} fields")
         
         # Insert into database
@@ -369,6 +431,10 @@ async def create_breakdown(breakdown: BreakdownCreate, current_user: dict = Depe
             return {
                 "success": True,
                 "data": result,
+                "work_order": (
+                    {"id": raised_wo["id"], "work_order_number": raised_wo.get("work_order_number")}
+                    if raised_wo is not None else None
+                ),
                 "message": "Breakdown created successfully"
             }
         else:
@@ -400,6 +466,45 @@ async def get_breakdown(breakdown_id: str, current_user: dict = Depends(get_curr
     except Exception as e:
         logger.error(f"Error fetching breakdown: {e}")
         raise server_error(e, "Loading breakdown")
+
+@router.post("/{breakdown_id}/work-order")
+async def raise_work_order_for_breakdown(breakdown_id: str, current_user: dict = Depends(get_current_user)):
+    """Raise the work order for a breakdown logged before M4 (or opted out).
+
+    Idempotent: a breakdown that already has a job answers it again. Until
+    the M4 SQL has run the job is still raised, but no link is stored.
+    """
+    db = check_supabase()
+    try:
+        existing = db.table("breakdowns").select("*").eq("id", breakdown_id).execute()
+        row = one_row(existing)
+        if row is None:
+            raise HTTPException(status_code=404, detail="Breakdown not found")
+        assert_row_visible(current_user, "breakdowns", row, detail="Breakdown not found")
+        if has_work_order_link(db) and row.get("work_order_id") is not None:
+            linked = one_row(db.table("work_orders").select("id,work_order_number").eq("id", row["work_order_id"]).execute())
+            if linked is not None:
+                return {
+                    "breakdown_id": row["id"],
+                    "work_order": {"id": linked["id"], "work_order_number": linked.get("work_order_number")},
+                    "already_linked": True,
+                }
+        created = await create_work_order(
+            _work_order_create_for_breakdown(work_order_values_for_breakdown(row, current_user)),
+            current_user,
+        )
+        link_breakdown_to_work_order(db, row["id"], created["id"])
+        await invalidate_namespace("breakdowns")
+        return {
+            "breakdown_id": row["id"],
+            "work_order": {"id": created["id"], "work_order_number": created.get("work_order_number")},
+            "already_linked": False,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error raising work order for breakdown: {e}")
+        raise server_error(e, "Raising work order")
 
 @router.patch("/{breakdown_id}")
 async def update_breakdown(breakdown_id: str, breakdown_update: BreakdownUpdate, current_user: dict = Depends(get_current_user)):
@@ -498,6 +603,13 @@ async def delete_breakdown(breakdown_id: str, current_user: dict = Depends(requi
         if existing_row is None:
             raise HTTPException(status_code=404, detail="Breakdown not found")
         assert_row_visible(current_user, "breakdowns", existing_row, detail="Breakdown not found")
+        if has_work_order_link(db) and existing_row.get("work_order_id") is not None:
+            linked = one_row(db.table("work_orders").select("id,work_order_number").eq("id", existing_row["work_order_id"]).execute())
+            label = (linked or {}).get("work_order_number") or f"#{existing_row['work_order_id']}"
+            raise HTTPException(
+                status_code=409,
+                detail=f"This breakdown already has work order {label}; delete the work order first.",
+            )
 
         # Delete
         db.table("breakdowns").delete().eq("id", breakdown_id).execute()

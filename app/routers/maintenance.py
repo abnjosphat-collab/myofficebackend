@@ -6,13 +6,18 @@ from datetime import datetime, date
 from app.supabase_client import supabase, rows, one_row
 from app.auth import get_current_user, get_current_user_optional, require_role
 from app.cache import cached, cache_get, cache_set, build_key, invalidate_namespace
-from app.serialization import convert_dates_to_iso
+from app.serialization import convert_dates_to_iso, decode_json_fields
 from app.aggregation import count_by
 from app.db_helpers import fetch_all_pages, get_or_404
 from app.concurrency import assert_unchanged
 from app.audit import has_columns
 from app.maintenance_events import append_event, diff_changes
 from app.maintenance_links import resolve_equipment_id
+from app.breakdown_links import (
+    breakdown_shell_for_work_order,
+    find_breakdown_for_work_order,
+    has_work_order_link,
+)
 from app.errors import server_error
 from app.scope import apply_list_scope, assert_row_visible, person_ids_for, stamp_create, viewer_scope
 from app.clock import today_harare
@@ -424,6 +429,35 @@ def _learn_failure_codes(saved: dict, stored_action: bool) -> None:
         _learn_code(list_name, saved.get(column))
 
 
+def _insert_breakdown_shell(work_order: dict, user: dict):
+    """Insert the breakdown shell for a breakdown work order and link it.
+
+    The shell carries the machine, artisan and date over; times and metrics
+    stay NULL until the artisan records them on the breakdown. Answers the
+    linked breakdown when one already exists, None when the job is not a
+    breakdown or the M4 column does not exist yet. Raises when the insert
+    itself fails (the explicit endpoint says so; the automatic path logs
+    and leaves the job to record its downtime later).
+    """
+    if (work_order.get("classification") or "") != "breakdown":
+        return None
+    if not has_work_order_link(supabase):
+        return None
+    existing = find_breakdown_for_work_order(supabase, work_order.get("id"))
+    if existing is not None:
+        return existing
+    shell = breakdown_shell_for_work_order(work_order)
+    shell["work_order_id"] = work_order.get("id")
+    shell = stamp_create(user, "breakdowns", shell)
+    now = datetime.utcnow().isoformat()
+    shell["created_at"] = now
+    shell["updated_at"] = now
+    inserted = one_row(supabase.table("breakdowns").insert(shell).execute())
+    if inserted is None:
+        raise HTTPException(status_code=500, detail="Failed to record breakdown")
+    return inserted
+
+
 def close_problems(before: dict, close: "WorkOrderClose", require_action: bool = True) -> list:
     """What is missing or contradictory in a close, as one reason per problem.
 
@@ -675,6 +709,18 @@ async def create_work_order(work_order: WorkOrderCreate, current_user: dict = De
                     to_status=created.get("status"),
                 )
                 await invalidate_namespace("work_orders")
+                # M4: a breakdown job raises its downtime shell (best-effort —
+                # the job stands either way; without a shell the detail offers
+                # to record the downtime later).
+                if (created.get("classification") or "") == "breakdown":
+                    try:
+                        shell = _insert_breakdown_shell(created, current_user)
+                    except Exception as e:
+                        logger.error(f"Error recording breakdown shell: {str(e)}")
+                        shell = None
+                    if shell is not None:
+                        await invalidate_namespace("breakdowns")
+                    result["breakdown_id"] = (shell or {}).get("id")
                 return result
             raise HTTPException(status_code=500, detail="Failed to create work order")
 
@@ -755,7 +801,20 @@ async def update_work_order(work_order_id: int, updated: WorkOrderUpdate, curren
                 changes=changes,
             )
         _learn_failure_codes(saved, stored_action)
-        result = prepare_data_for_response(saved)
+        # M4: classifying a job as a breakdown raises its downtime shell
+        # (best-effort, as on create).
+        if (saved.get("classification") or "") == "breakdown":
+            try:
+                shell = _insert_breakdown_shell(saved, current_user)
+            except Exception as e:
+                logger.error(f"Error recording breakdown shell: {str(e)}")
+                shell = None
+            if shell is not None:
+                await invalidate_namespace("breakdowns")
+            result = prepare_data_for_response(saved)
+            result["breakdown_id"] = (shell or {}).get("id")
+        else:
+            result = prepare_data_for_response(saved)
         await invalidate_namespace("work_orders")
         return result
 
@@ -880,6 +939,14 @@ async def close_work_order(work_order_id: int, close: WorkOrderClose, current_us
                 from_status=before.get("status"), to_status="completed", changes=changes,
             )
         _learn_failure_codes(saved, stored_action)
+        # M4: a breakdown job has its downtime shell by the time it closes
+        # (best-effort, as on create; the close response itself is unchanged).
+        if (saved.get("classification") or "") == "breakdown":
+            try:
+                if _insert_breakdown_shell(saved, current_user) is not None:
+                    await invalidate_namespace("breakdowns")
+            except Exception as e:
+                logger.error(f"Error recording breakdown shell: {str(e)}")
         result = prepare_data_for_response(saved)
         await invalidate_namespace("work_orders")
         return result
@@ -983,6 +1050,67 @@ async def add_work_order_comment(
     except Exception as e:
         logger.error(f"Error adding work order comment: {str(e)}")
         raise server_error(e, "Adding work order comment")
+
+
+@router.get("/work-orders/{work_order_id}/breakdown", dependencies=[Depends(get_current_user)])
+async def get_work_order_breakdown(work_order_id: int, current_user: dict = Depends(get_current_user)):
+    """The breakdown linked to a work order, or null when there is none.
+
+    Null until the M4 SQL has run (no row can carry a link before that), or
+    when the linked breakdown sits outside the viewer's section.
+    """
+    try:
+        parent = get_or_404(supabase, "work_orders", work_order_id, detail="Work order not found")
+        assert_row_visible(current_user, "work_orders", parent, detail="Work order not found")
+        found = find_breakdown_for_work_order(supabase, work_order_id, current_user)
+        return decode_json_fields(found, ["spares_used"]) if found is not None else None
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error fetching work order breakdown: {str(e)}")
+        raise server_error(e, "Loading work order breakdown")
+
+
+@router.post("/work-orders/{work_order_id}/breakdown")
+async def record_breakdown_for_work_order(work_order_id: int, current_user: dict = Depends(get_current_user)):
+    """Record the breakdown shell for a breakdown job that has none (a job
+    raised before M4, or whose shell never stored). Idempotent: answers the
+    linked breakdown again. Only a breakdown job can record downtime."""
+    try:
+        parent = get_or_404(supabase, "work_orders", work_order_id, detail="Work order not found")
+        assert_row_visible(current_user, "work_orders", parent, detail="Work order not found")
+        if (parent.get("classification") or "") != "breakdown":
+            raise HTTPException(
+                status_code=422,
+                detail="Only a breakdown job can record downtime. Set the classification to breakdown first.",
+            )
+        if not has_work_order_link(supabase):
+            raise HTTPException(
+                status_code=409,
+                detail="The breakdown link is not ready yet — the M4 database change has not been run.",
+            )
+        existing = find_breakdown_for_work_order(supabase, work_order_id)
+        if existing is not None:
+            assert_row_visible(current_user, "breakdowns", existing, detail="Breakdown not found")
+            return {
+                "work_order_id": work_order_id,
+                "breakdown": decode_json_fields(existing, ["spares_used"]),
+                "already_linked": True,
+            }
+        shell = _insert_breakdown_shell(parent, current_user)
+        if shell is None:
+            raise HTTPException(status_code=500, detail="Failed to record breakdown")
+        await invalidate_namespace("breakdowns")
+        return {
+            "work_order_id": work_order_id,
+            "breakdown": decode_json_fields(shell, ["spares_used"]),
+            "already_linked": False,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error recording breakdown: {str(e)}")
+        raise server_error(e, "Recording breakdown")
 
 
 @router.get("/work-orders/allocated/{allocated_to}", dependencies=[Depends(get_current_user)])

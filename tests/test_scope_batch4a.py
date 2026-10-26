@@ -242,7 +242,11 @@ def test_bd_scoped_create_is_stamped_projects(bd_client):
     resp = bd_client.post("/api/breakdowns/", json={
         "machine_id": "M-3", "machine_name": "Mill 3", "department": "Engineering",
         "location": "Plant", "breakdown_type": "mechanical", "artisan_name": "Sam",
-        "breakdown_date": "2026-10-06"})
+        "breakdown_date": "2026-10-06",
+        # The scope harness mounts one router on one store; the M4 work-order
+        # raise is a cross-router write it cannot fake (scoped stamping of the
+        # raised job is covered in test_maintenance_breakdown_link.py).
+        "raise_work_order": False})
     assert resp.status_code == 200, resp.text
     assert bd_client.scope_store["breakdowns"][-1]["section"] == "Projects"
 
