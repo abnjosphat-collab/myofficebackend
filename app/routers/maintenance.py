@@ -184,6 +184,32 @@ class WorkOrderUpdate(BaseModel):
     expected_updated_at: Optional[str] = None
 
 
+class WorkOrderClose(BaseModel):
+    """Fast close (M2): what was done, and the actual time as start/finish times
+    or plain hours. Anything the row already holds counts, so a job reported
+    earlier closes with only what is missing; a breakdown also needs its cause
+    and failure mode (M3 turns the mode into a managed list)."""
+
+    work_done_details: str = ""
+    time_work_started: Optional[str] = None
+    time_work_finished: Optional[str] = None
+    total_hours: Optional[float] = None
+    artisan_name: Optional[str] = None
+    artisan_date: Optional[str] = None
+    cause_of_failure: Optional[str] = None
+    failure_mode: Optional[str] = None
+    expected_updated_at: Optional[str] = None
+
+
+class WorkOrderBulkClose(WorkOrderClose):
+    """Bulk close (M2): the shared fields for a batch of routine planned jobs,
+    applied to every row that closes. The dialog sends only the shared note
+    and time, so each row keeps its own artisan and date (blanks default to
+    the session person and today, as in a single close)."""
+
+    ids: List[int] = Field(..., min_length=1, max_length=100)
+
+
 class WorkOrderCommentCreate(BaseModel):
     body: str = Field(..., min_length=1, max_length=4000)
 
@@ -314,6 +340,131 @@ def _lifecycle_stamps(before: dict, updates: dict, now: str | None = None) -> di
     if before_sign == "" and after_sign != "" and not before.get("signed_off_at"):
         stamps["signed_off_at"] = now
     return stamps
+
+
+# M2 fast close: a job is finished when no further work is expected on it.
+# "completed" (the artisan closed it) and the foreman sign-off are separate
+# steps by owner decision; "cancelled" and "not-done" (a planned job that was
+# missed) are the other terminal states. Nothing terminal is overdue, and
+# nothing terminal can be closed again.
+_TERMINAL_STATUSES = ("completed", "cancelled", "not-done")
+
+_HHMM = re.compile(r"^([01]?\d|2[0-3]):([0-5]\d)$")
+
+
+def _minutes_of(value: str) -> int:
+    """Minutes since midnight for a "HH:MM" time; ValueError when malformed."""
+    match = _HHMM.match(value.strip())
+    if not match:
+        raise ValueError(f"not a HH:MM time: {value!r}")
+    return int(match.group(1)) * 60 + int(match.group(2))
+
+
+def _duration_minutes(start: str, finish: str) -> int:
+    """Minutes from start to finish; a finish earlier than the start means the
+    next day (the same rule as the frontend's durationText)."""
+    mins = _minutes_of(finish) - _minutes_of(start)
+    return mins + 1440 if mins < 0 else mins
+
+
+def close_duration_text(start: str, finish: str) -> str:
+    """A worked duration as "7h 30m", the shape total_time_worked has always had."""
+    mins = _duration_minutes(start, finish)
+    return f"{mins // 60}h {mins % 60:02d}m"
+
+
+def hours_text(hours: float) -> str:
+    """Plain hours as "7h 30m", so hours-closed jobs read the same everywhere."""
+    mins = int(round(hours * 60))
+    return f"{mins // 60}h {mins % 60:02d}m"
+
+
+def close_problems(before: dict, close: "WorkOrderClose") -> list:
+    """What is missing or contradictory in a close, as one reason per problem.
+
+    The check runs on the merged values (what was sent, falling back to what
+    the row already holds), so a job reported earlier closes with only what is
+    missing. Empty means the close may go ahead.
+    """
+    problems = []
+    done = (close.work_done_details or "").strip() or (before.get("work_done_details") or "").strip()
+    if not done:
+        problems.append("Say what was done.")
+    if close.total_hours is not None:
+        if not 0 < close.total_hours <= 1000:
+            problems.append("Hours must be more than 0 (and below 1000).")
+    elif close.time_work_started or close.time_work_finished:
+        start = (close.time_work_started or "").strip()
+        finish = (close.time_work_finished or "").strip()
+        if not start or not finish:
+            problems.append("Give both the start and finish times, or hours instead.")
+        else:
+            try:
+                if _duration_minutes(start, finish) <= 0:
+                    problems.append("The finish time must be after the start time.")
+            except ValueError:
+                problems.append("Times must look like 08:30.")
+    elif not (before.get("total_time_worked") or "").strip():
+        problems.append("Record the time worked: start and finish, or hours.")
+    if (before.get("classification") or "") == "breakdown":
+        cause = (close.cause_of_failure or "").strip() or (before.get("cause_of_failure") or "").strip()
+        if not cause:
+            problems.append("Say what caused the breakdown.")
+        mode = (close.failure_mode or "").strip() or (before.get("failure_mode") or "").strip()
+        if not mode:
+            problems.append("Pick the failure mode.")
+    if close.artisan_date:
+        try:
+            date.fromisoformat(close.artisan_date.strip())
+        except ValueError:
+            problems.append("The date must be YYYY-MM-DD.")
+    return problems
+
+
+def _close_updates(before: dict, close: "WorkOrderClose", user: dict) -> dict:
+    """The row write for a validated close: completed, progress 100, the merged
+    report fields. The artisan defaults to the signed-in person when no name is
+    recorded anywhere; the date defaults to today (Harare)."""
+    updates: dict = {"status": "completed", "progress": 100}
+    if (close.work_done_details or "").strip():
+        updates["work_done_details"] = close.work_done_details.strip()
+    if close.total_hours is not None:
+        updates["total_time_worked"] = hours_text(close.total_hours)
+    elif close.time_work_started or close.time_work_finished:
+        updates["time_work_started"] = (close.time_work_started or "").strip()
+        updates["time_work_finished"] = (close.time_work_finished or "").strip()
+        updates["total_time_worked"] = close_duration_text(
+            updates["time_work_started"], updates["time_work_finished"])
+    name = (
+        (close.artisan_name or "").strip()
+        or (before.get("artisan_name") or before.get("allocated_to") or "").strip()
+        or str(user.get("name") or user.get("email") or "")
+    )
+    if name and name != (before.get("artisan_name") or ""):
+        updates["artisan_name"] = name
+    if close.artisan_date:
+        updates["artisan_date"] = close.artisan_date.strip()
+    elif not (before.get("artisan_date") or "").strip():
+        updates["artisan_date"] = today_harare().isoformat()
+    cause = (close.cause_of_failure or "").strip()
+    if cause:
+        updates["cause_of_failure"] = cause
+    mode = (close.failure_mode or "").strip()
+    if mode:
+        updates["failure_mode"] = mode
+    return updates
+
+
+def _bulk_classification_label(row: dict) -> str:
+    """How a bulk-close refusal names a job that is not a routine planned one."""
+    cls = row.get("classification") or ""
+    if cls == "breakdown":
+        return "a breakdown"
+    if cls == "project":
+        return "a project job"
+    if cls == "custom":
+        return (row.get("classification_custom") or "").strip() or "a custom job"
+    return f"classified {cls}" if cls else "unclassified"
 
 
 # ==================== WORK ORDERS ENDPOINTS ====================
@@ -567,6 +718,116 @@ def _version_conflict(current: dict) -> HTTPException:
     )
 
 
+@router.post("/work-orders/bulk-close")
+async def bulk_close_work_orders(body: WorkOrderBulkClose, current_user: dict = Depends(get_current_user)):
+    """Close up to 100 routine planned jobs at once, with shared what-done/time.
+
+    Each row is judged on its own merged values; only open, routine planned
+    jobs (no classification yet, or planned_maintenance) close. The answer is
+    always 200 with per-row results: {"closed": [ids], "skipped": [{id,
+    reason}]}. A row that fails mid-batch is skipped with its reason, never
+    reported as closed, and rows already closed keep their audit events.
+    """
+    closed: list = []
+    skipped: list = []
+    for work_order_id in body.ids:
+        try:
+            before = one_row(supabase.table("work_orders").select("*").eq("id", work_order_id).execute())
+        except Exception as err:  # noqa: BLE001 - one unreadable row must not sink the batch
+            logger.error(f"Error reading work order {work_order_id} for bulk close: {str(err)}")
+            skipped.append({"id": work_order_id, "reason": "It could not be read; try again."})
+            continue
+        if before is None:
+            skipped.append({"id": work_order_id, "reason": "It no longer exists."})
+            continue
+        before = dict(before)
+        if viewer_scope(current_user) is not None:
+            try:
+                assert_row_visible(current_user, "work_orders", {**before, "status": "completed"},
+                                   detail="Work order not found")
+            except HTTPException:
+                skipped.append({"id": work_order_id, "reason": "You can no longer see it."})
+                continue
+        status = before.get("status") or "pending"
+        if status in _TERMINAL_STATUSES:
+            skipped.append({"id": work_order_id, "reason": f"Already {status}."})
+            continue
+        cls = before.get("classification") or ""
+        if cls not in ("", "planned_maintenance"):
+            skipped.append({"id": work_order_id,
+                            "reason": f"Only routine planned jobs close in bulk (this one is {_bulk_classification_label(before)})."})
+            continue
+        problems = close_problems(before, body)
+        if problems:
+            skipped.append({"id": work_order_id, "reason": " ".join(problems)})
+            continue
+        try:
+            updates = prepare_data_for_db(_close_updates(before, body, current_user))
+            updates.update(_lifecycle_stamps(before, updates))
+            updates["updated_at"] = datetime.utcnow().isoformat()
+            saved = one_row(supabase.table("work_orders").update(updates).eq("id", work_order_id).execute())
+        except Exception as err:  # noqa: BLE001 - reported per row, below
+            logger.error(f"Error closing work order {work_order_id} in bulk: {str(err)}")
+            skipped.append({"id": work_order_id, "reason": "It could not be closed; try again."})
+            continue
+        if saved is None:
+            skipped.append({"id": work_order_id, "reason": "It changed while closing; try again."})
+            continue
+        changes = diff_changes(before, saved, fields=updates.keys())
+        append_event(
+            supabase, entity="work_order", entity_id=work_order_id, action="closed",
+            user=current_user, entity_number=saved.get("work_order_number") or before.get("work_order_number"),
+            from_status=before.get("status"), to_status="completed", changes=changes,
+        )
+        closed.append(work_order_id)
+    await invalidate_namespace("work_orders")
+    return {"closed": closed, "skipped": skipped}
+
+
+@router.post("/work-orders/{work_order_id}/close")
+async def close_work_order(work_order_id: int, close: WorkOrderClose, current_user: dict = Depends(get_current_user)):
+    """Close one job fast: completed, progress 100, the M1 stamps, one audit
+    event. Refuses a job that is already finished (409) or that still misses
+    what was done, the time, or (for a breakdown) its cause and failure mode
+    (422 naming each gap). The foreman sign-off stays a separate step."""
+    try:
+        before = dict(get_or_404(supabase, "work_orders", work_order_id, detail="Work order not found"))
+        if viewer_scope(current_user) is not None:
+            assert_row_visible(current_user, "work_orders", {**before, "status": "completed"},
+                               detail="Work order not found")
+        status = before.get("status") or "pending"
+        if status in _TERMINAL_STATUSES:
+            raise HTTPException(status_code=409, detail=f"This work order is already {status}; only an open job can be closed.")
+        problems = close_problems(before, close)
+        if problems:
+            raise HTTPException(status_code=422, detail=" ".join(problems))
+        assert_unchanged(before, close.expected_updated_at)
+        updates = prepare_data_for_db(_close_updates(before, close, current_user))
+        updates.update(_lifecycle_stamps(before, updates))
+        updates["updated_at"] = datetime.utcnow().isoformat()
+
+        saved = one_row(supabase.table("work_orders").update(updates).eq("id", work_order_id).execute())
+        if saved is None:
+            raise HTTPException(status_code=500, detail="Update failed")
+
+        changes = diff_changes(before, saved, fields=updates.keys())
+        if changes:
+            append_event(
+                supabase, entity="work_order", entity_id=work_order_id, action="closed",
+                user=current_user, entity_number=saved.get("work_order_number") or before.get("work_order_number"),
+                from_status=before.get("status"), to_status="completed", changes=changes,
+            )
+        result = prepare_data_for_response(saved)
+        await invalidate_namespace("work_orders")
+        return result
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error closing work order: {str(e)}")
+        raise server_error(e, "Closing work order")
+
+
 @router.delete("/work-orders/{work_order_id}")
 async def delete_work_order(work_order_id: int, current_user: dict = Depends(require_role('manager'))):
     try:
@@ -706,7 +967,7 @@ async def get_work_order_stats(current_user: Optional[dict] = Depends(get_curren
             due_date_str = record.get('due_date')
             status = record.get('status', 'pending')
 
-            if due_date_str and status != 'completed':
+            if due_date_str and status not in _TERMINAL_STATUSES:
                 try:
                     due_date = datetime.strptime(due_date_str, '%Y-%m-%d').date()
                     if due_date < today:
@@ -738,6 +999,7 @@ async def get_work_order_stats(current_user: Optional[dict] = Depends(get_curren
             "in_progress": status_counts.get('in-progress', 0),
             "completed": status_counts.get('completed', 0),
             "on_hold": status_counts.get('on-hold', 0),
+            "not_done": status_counts.get('not-done', 0),
             "urgent": priority_counts.get('urgent', 0),
             "high": priority_counts.get('high', 0),
             "medium": priority_counts.get('medium', 0),
