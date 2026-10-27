@@ -4,7 +4,7 @@ from pydantic import BaseModel, Field, field_validator
 from typing import Optional, List, Dict, Any
 from datetime import datetime, date
 from app.supabase_client import supabase, rows, one_row
-from app.auth import get_current_user, get_current_user_optional, require_role
+from app.auth import get_current_user, get_current_user_optional, require_role, role_at_least
 from app.cache import cached, cache_get, cache_set, build_key, invalidate_namespace
 from app.serialization import convert_dates_to_iso, decode_json_fields
 from app.aggregation import count_by
@@ -554,6 +554,63 @@ def _bulk_classification_label(row: dict) -> str:
     return f"classified {cls}" if cls else "unclassified"
 
 
+# M8 role check: the foreman block (name/signature/date) is the sign-off step
+# of a job. Writing it needs manager+; every other field stays open to any
+# signed-in user (raise/close per the M8 role table in WORK_ORDERS.md).
+_SIGNOFF_FIELDS = ("foreman_name", "foreman_sign", "foreman_date")
+
+
+def _is_open_status(status: Optional[str]) -> bool:
+    """True unless the job is terminal (completed/cancelled/not-done)."""
+    return (status or "pending") not in _TERMINAL_STATUSES
+
+
+def _is_overdue_row(record: dict, today) -> bool:
+    """Open with a due date in the past (Harare day), like stats/overdue."""
+    if not _is_open_status(record.get("status")):
+        return False
+    due = (record.get("due_date") or "").strip()
+    if not due:
+        return False
+    try:
+        return datetime.strptime(due, "%Y-%m-%d").date() < today
+    except (ValueError, TypeError):
+        return False
+
+
+def _is_awaiting_signoff_row(record: dict) -> bool:
+    """Finished by the artisan but the foreman has not signed yet."""
+    return record.get("status") == "completed" and not (record.get("foreman_sign") or "").strip()
+
+
+def _norm_person(value) -> str:
+    """One space between words, lower-cased: "Alex  Moyo" and "alex moyo" match."""
+    return " ".join(str(value or "").split()).lower()
+
+
+def _my_identities(user: dict) -> set:
+    """Who the signed-in caller is, as allocated_to/artisan_name spellings.
+
+    Exact normalized match only (name, full email) — the bell must not
+    guess that "Alex" is "Alexander Banda", so a bare first name matches
+    nobody unless it is the whole recorded name.
+    """
+    return {
+        _norm_person(user.get("name")),
+        _norm_person(user.get("email")),
+    } - {""}
+
+
+def _is_mine_row(record: dict, identities: set) -> bool:
+    """An open job allocated to (or reported by) the signed-in caller."""
+    if not identities or not _is_open_status(record.get("status")):
+        return False
+    return (
+        _norm_person(record.get("allocated_to")) in identities
+        or _norm_person(record.get("artisan_name")) in identities
+    )
+
+
 # ==================== WORK ORDERS ENDPOINTS ====================
 @router.get("/work-orders", dependencies=[Depends(get_current_user)])
 async def get_work_orders(
@@ -564,9 +621,12 @@ async def get_work_orders(
     to_department: Optional[str] = None,
     equipment_id: Optional[int] = None,
     schedule_id: Optional[int] = None,
-    # A caller that only needs the N most recent rows (e.g. a sidebar activity
-    # feed) can ask for them directly instead of downloading the entire table
-    # and slicing client-side.
+    # M8 notification slices (additive): the bell asks for overdue,
+    # awaiting-sign-off and mine instead of downloading the table.
+    # Most recent first; limit slices after the M8 filters below.
+    overdue: bool = False,
+    awaiting_signoff: bool = False,
+    mine: bool = False,
     limit: Optional[int] = None,
     current_user: dict = Depends(get_current_user),
 ):
@@ -574,8 +634,13 @@ async def get_work_orders(
         "work_orders", scope=viewer_scope(current_user), status=status, priority=priority, department=department,
         allocated_to=allocated_to, to_department=to_department, limit=limit,
         equipment_id=equipment_id, schedule_id=schedule_id,
+        overdue=overdue, awaiting_signoff=awaiting_signoff, mine=mine,
     )
-    cached_result = await cache_get(cache_key)
+    # M8: the mine slice varies by caller (the session's name/email), but
+    # cache keys vary by scope only — caching it would serve one person's
+    # jobs to the next. The bell's other slices are scope-level and cache.
+    use_cache = not mine
+    cached_result = await cache_get(cache_key) if use_cache else None
     if cached_result is not None:
         return cached_result
     try:
@@ -603,18 +668,34 @@ async def get_work_orders(
         query = apply_list_scope(query, current_user, "work_orders")
 
         query = query.order("created_at", desc=True).order("id", desc=True)
-        if limit:
+        notify_slice = overdue or awaiting_signoff or mine
+        if limit and not notify_slice:
             records = rows(query.limit(limit).execute())
         else:
             # PostgREST cuts a plain select at 1,000 rows, which would silently drop the oldest
             # work orders from the register once the table grows past that; page through it.
             records = fetch_all_pages(lambda start, end: query.range(start, end).execute(), extract_rows=rows)
+        if notify_slice:
+            # M8: the bell's slices, over the scoped rows above (so the counts
+            # reconcile with the register). Python-side like stats/overdue.
+            today = today_harare()
+            identities = _my_identities(current_user) if mine else set()
+            if overdue:
+                records = [r for r in records if _is_overdue_row(r, today)]
+                records.sort(key=lambda r: (r.get("due_date") or ""))
+            if awaiting_signoff:
+                records = [r for r in records if _is_awaiting_signoff_row(r)]
+            if mine:
+                records = [r for r in records if _is_mine_row(r, identities)]
+            if limit:
+                records = records[:limit]
         processed_records = []
         for record in records:
             processed_record = prepare_data_for_response(record)
             processed_records.append(processed_record)
 
-        await cache_set(cache_key, processed_records, ttl=60, namespace="work_orders")
+        if use_cache:
+            await cache_set(cache_key, processed_records, ttl=60, namespace="work_orders")
         return processed_records
 
     except Exception as e:
@@ -758,6 +839,15 @@ async def update_work_order(work_order_id: int, updated: WorkOrderUpdate, curren
         # being silently ignored. Without this there is no way to clear a due date —
         # the save would report success and change nothing.
         data_to_update = updated.model_dump(exclude_unset=True)
+        # M8 role check: writing the foreman block (signing, re-signing or
+        # unsigning) needs manager+. Clearing counts too: revoking a sign-off
+        # is the same authority as giving one. Any other field stays open to
+        # any signed-in user.
+        for _key in _SIGNOFF_FIELDS:
+            if _key in data_to_update and (data_to_update[_key] or "") != (before.get(_key) or ""):
+                if not role_at_least(current_user.get("role", "viewer"), "manager"):
+                    raise HTTPException(status_code=403, detail="Foreman sign-off needs a manager account.")
+                break
         if viewer_scope(current_user) is not None:
             merged = {**before, **data_to_update}
             assert_row_visible(current_user, "work_orders", merged, detail="Work order not found")
