@@ -177,11 +177,11 @@ where schedule_id is not null and classification is null;
 update work_orders set
   started_at = ((artisan_date::text || ' ' || time_work_started)::timestamp at time zone 'Africa/Harare')
 where status = 'completed' and started_at is null
-  and artisan_date is not null and time_work_started ~ '^\d{2}:\d{2}(:\d{2})?$';
+  and artisan_date is not null and time_work_started is not null;
 update work_orders set
   completed_at = ((artisan_date::text || ' ' || time_work_finished)::timestamp at time zone 'Africa/Harare')
 where status = 'completed' and completed_at is null
-  and artisan_date is not null and time_work_finished ~ '^\d{2}:\d{2}(:\d{2})?$';
+  and artisan_date is not null and time_work_finished is not null;
 update work_orders set
   signed_off_at = (foreman_date::timestamp at time zone 'Africa/Harare')
 where status = 'completed' and signed_off_at is null
