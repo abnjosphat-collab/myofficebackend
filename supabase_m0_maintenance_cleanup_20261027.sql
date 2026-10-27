@@ -9,8 +9,8 @@
 -- max id 431, nothing newer. This file regenerates the lists rather than forcing:
 --   1. Deletes 116 remaining test work orders (120 minus owner-deleted
 --      377/378/380/382), their runs, and test schedules 5 and 6. Runs on 5/6
---      are 117 (115 + 2 orphans pointing at owner-deleted 394/407); both
---      orphan run ids are pinned below.
+--      are 117 (111 linked + 6 orphans pointing at owner-deleted
+--      377/378/380/382/394/407); all 6 orphan run ids are pinned below.
 --   2. Marks the same 35 missed routine jobs "not-done" (all still present).
 --      The newest-per-schedule keepers are gone (owner-deleted); the next-
 --      newest (354/349/352) are NOT promoted to pending — the owner removed
@@ -134,8 +134,9 @@ begin
     raise exception 'M0 guard: % non-delete event rows now exist on listed rows', n;
   end if;
 
-  -- 2. runs of the two test schedules: exactly 117 — 115 linked to the delete
-  --    list plus the 2 orphan runs (ids 166/179) pointing at owner-deleted 394/407
+  -- 2. runs of the two test schedules: exactly 117 — 111 linked to the delete
+  --    list plus 6 orphan runs pointing at owner-deleted rows (run ids
+  --    160/161/163/165 -> WOs 377/378/380/382, 166/179 -> WOs 394/407)
   select count(*) into n from maintenance_schedule_runs r
     where r.schedule_id in (5, 6);
   if n <> 117 then
@@ -143,7 +144,7 @@ begin
   end if;
   select count(*) into n from maintenance_schedule_runs r
     where r.schedule_id in (5, 6)
-      and r.id not in (166, 179)
+      and r.id not in (160, 161, 163, 165, 166, 179)
       and (r.work_order_id is null or r.work_order_id not in (select id from _m0_del_wo));
   if n <> 0 then
     raise exception 'M0 guard: % runs on schedules 5/6 fall outside the delete list (fresh cron rows?)', n;
