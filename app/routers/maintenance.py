@@ -221,6 +221,13 @@ class WorkOrderBulkClose(WorkOrderClose):
     ids: List[int] = Field(..., min_length=1, max_length=100)
 
 
+class WorkOrderBulkDelete(BaseModel):
+    """Bulk delete (B0): up to 100 work-order ids, deleted one row at a time
+    with per-row results. Manager-only; the server is the rule."""
+
+    ids: List[int] = Field(..., min_length=1, max_length=100)
+
+
 class WorkOrderCommentCreate(BaseModel):
     body: str = Field(..., min_length=1, max_length=4000)
 
@@ -995,6 +1002,67 @@ async def bulk_close_work_orders(body: WorkOrderBulkClose, current_user: dict = 
     return {"closed": closed, "skipped": skipped}
 
 
+def _clear_run_links(work_order_id: int) -> None:
+    """Point schedule runs back at no job after a delete.
+
+    The run rows stay, so the generator never recreates the job. Best-effort
+    like append_event: a failure is logged and the delete stands.
+    """
+    try:
+        supabase.table("maintenance_schedule_runs").update({"work_order_id": None}).eq("work_order_id", work_order_id).execute()
+    except Exception as e:
+        logger.error(f"Error clearing schedule-run links for work order {work_order_id}: {str(e)}")
+
+
+
+@router.post("/work-orders/bulk-delete")
+async def bulk_delete_work_orders(body: WorkOrderBulkDelete, current_user: dict = Depends(require_role("manager"))):
+    """Delete up to 100 work orders at once, with per-row results.
+
+    Manager-only (the server is the rule). Each row is deleted on its own:
+    the answer is always 200 with {"deleted": [ids], "failed": [{id,
+    reason}]} in the same shape as bulk-close. A deleted row leaves one
+    `deleted` audit event, and its schedule-run links are cleared while the
+    run rows stay, so the generator never recreates the job. A row that
+    fails mid-batch is reported with its reason, never as deleted, and rows
+    already deleted keep their audit events.
+    """
+    deleted: list = []
+    failed: list = []
+    for work_order_id in body.ids:
+        try:
+            before = one_row(supabase.table("work_orders").select("*").eq("id", work_order_id).execute())
+        except Exception as err:  # noqa: BLE001 - one unreadable row must not sink the batch
+            logger.error(f"Error reading work order {work_order_id} for bulk delete: {str(err)}")
+            failed.append({"id": work_order_id, "reason": "It could not be read; try again."})
+            continue
+        if before is None:
+            failed.append({"id": work_order_id, "reason": "It no longer exists."})
+            continue
+        before = dict(before)
+        if viewer_scope(current_user) is not None:
+            try:
+                assert_row_visible(current_user, "work_orders", before, detail="Work order not found")
+            except HTTPException:
+                failed.append({"id": work_order_id, "reason": "You can no longer see it."})
+                continue
+        try:
+            supabase.table("work_orders").delete().eq("id", work_order_id).execute()
+        except Exception as err:  # noqa: BLE001 - reported per row, below
+            logger.error(f"Error deleting work order {work_order_id} in bulk: {str(err)}")
+            failed.append({"id": work_order_id, "reason": "It could not be deleted; try again."})
+            continue
+        _clear_run_links(work_order_id)
+        append_event(
+            supabase, entity="work_order", entity_id=work_order_id, action="deleted",
+            user=current_user, entity_number=before.get("work_order_number"),
+            from_status=before.get("status"),
+        )
+        deleted.append(work_order_id)
+    await invalidate_namespace("work_orders")
+    return {"deleted": deleted, "failed": failed}
+
+
 @router.post("/work-orders/{work_order_id}/close")
 async def close_work_order(work_order_id: int, close: WorkOrderClose, current_user: dict = Depends(get_current_user)):
     """Close one job fast: completed, progress 100, the M1 stamps, one audit
@@ -1056,6 +1124,9 @@ async def delete_work_order(work_order_id: int, current_user: dict = Depends(req
         assert_row_visible(current_user, "work_orders", existing, detail="Work order not found")
 
         supabase.table("work_orders").delete().eq("id", work_order_id).execute()
+        # B0: a deleted job leaves no dangling run link (the run rows stay,
+        # so the generator never recreates the job).
+        _clear_run_links(work_order_id)
         append_event(
             supabase, entity="work_order", entity_id=work_order_id, action="deleted",
             user=current_user, entity_number=existing.get("work_order_number"),

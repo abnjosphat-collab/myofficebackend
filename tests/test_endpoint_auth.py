@@ -24,6 +24,7 @@ PROTECTED_WRITES = [
     ("delete", "/api/equipment/1"),
     ("post", "/api/drivers"),
     ("post", "/api/maintenance/work-orders"),
+    ("post", "/api/maintenance/work-orders/bulk-delete"),
     ("post", "/api/breakdowns/"),
     # leaves / overtime writes were unauthenticated until 2026-07-19 — a no-token
     # DELETE reached the handler and would have removed the row. Guard added.
