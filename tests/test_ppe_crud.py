@@ -418,3 +418,41 @@ async def test_employee_records_no_matches_is_empty_list(patch_supabase):
     patch_supabase([{"id": 1, "employee_id": "E1", "issue_date": "2026-01-01"}])
     result = await get_employee_ppe_records("E999")
     assert result == []
+
+
+# ─── premature failure ───────────────────────────────────────────────────────────────
+
+async def test_create_marks_a_premature_failure_with_what_failed(patch_supabase):
+    patch_supabase()
+    record = PPEIssueCreate(employee_id="E1", ppe_type="gumboots", item_name="Gumboots", issue_date="2026-10-29",
+                            premature_failure=True, failure_reason="  Sole split after 3 weeks ")
+    result = await create_ppe_record(record, current_user=_user())
+    assert result["premature_failure"] is True
+    assert result["failure_reason"] == "Sole split after 3 weeks"
+
+
+async def test_create_is_not_premature_by_default_and_drops_a_reason_without_the_flag():
+    assert PPEIssueCreate(employee_id="E1", ppe_type="helmet", item_name="Hat", issue_date="2026-10-29").premature_failure is False
+    assert PPEIssueCreate(employee_id="E1", ppe_type="helmet", item_name="Hat", issue_date="2026-10-29", failure_reason="cracked").failure_reason is None
+    assert PPEIssueCreate(employee_id="E1", ppe_type="helmet", item_name="Hat", issue_date="2026-10-29", premature_failure=True, failure_reason="  ").failure_reason is None
+
+
+async def test_unticking_premature_on_an_edit_clears_what_failed(patch_supabase):
+    state = patch_supabase([{"id": 7, "status": "active", "premature_failure": True, "failure_reason": "cracked"}])
+    await update_ppe_record(7, PPEIssueUpdate(premature_failure=False, failure_reason="cracked"), current_user=_user())
+    payload = [c for c in state["calls"] if c["mode"] == "update"][0]["payload"]
+    assert payload["premature_failure"] is False and payload["failure_reason"] is None
+
+
+async def test_a_reason_on_a_record_that_is_not_premature_is_not_stored(patch_supabase):
+    state = patch_supabase([{"id": 7, "status": "active", "premature_failure": False}])
+    await update_ppe_record(7, PPEIssueUpdate(failure_reason="torn"), current_user=_user())
+    payload = [c for c in state["calls"] if c["mode"] == "update"][0]["payload"]
+    assert payload["failure_reason"] is None
+
+
+async def test_editing_the_reason_of_a_premature_record_keeps_it(patch_supabase):
+    state = patch_supabase([{"id": 7, "status": "active", "premature_failure": True, "failure_reason": "torn"}])
+    await update_ppe_record(7, PPEIssueUpdate(failure_reason="Torn at the knee"), current_user=_user())
+    payload = [c for c in state["calls"] if c["mode"] == "update"][0]["payload"]
+    assert payload["failure_reason"] == "Torn at the knee"

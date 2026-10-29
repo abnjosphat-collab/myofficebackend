@@ -133,6 +133,17 @@ async def test_adding_accepts_exclusion_and_free_line_ids(fake):
     assert [p["record_id"] for p in f.state["calls"][0]["payload"]] == ["x:41:2026-11-01", "free:9f3b2c1d-4a5e-6f70-8b9c-0d1e2f3a4b5c"]
 
 
+async def test_a_free_line_keeps_the_section_it_is_ordered_for(fake):
+    # A free line has no person to take a section from, so the section chosen when adding it is stored with it.
+    f = fake()
+    await add_order_lines(AddLines(entries=[
+        OrderLine(record_id="free:9f3b2c1d-4a5e-6f70-8b9c-0d1e2f3a4b5c", kind="free", ppe_type="Gloves", item_name="Spare gloves", section="Electrical"),
+    ]), current_user=USER)
+    assert f.state["calls"][0]["payload"][0]["entry"]["section"] == "Electrical"
+    with pytest.raises(ValidationError):
+        OrderLine(record_id="free:9f3b2c1d-4a5e-6f70-8b9c-0d1e2f3a4b5c", section="x" * 61)
+
+
 async def test_updating_changes_quantity_size_and_note(fake):
     f = fake({"select_return": [{"record_id": "41", "entry": {"qty": 1, "size": "8"}, "added_at": "2026-10-05T08:00:00Z"}]})
     out = await update_order_line("41", PatchLine(qty=3, size="9", note="wide fit"), current_user=USER)

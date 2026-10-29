@@ -42,6 +42,9 @@ class OrderLine(BaseModel):
     source: Literal["manual"] = "manual"
     qty: int = Field(default=1, ge=1)
     note: str = ""
+    # The ordering section (Electrical, Mechanical, ...). Only free lines need it stored: a person's line takes the
+    # person's current section from the register on the page, so a section move is never stale on the list.
+    section: str = Field(default="", max_length=60)
 
 
 class AddLines(BaseModel):

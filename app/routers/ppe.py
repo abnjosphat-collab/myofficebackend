@@ -1,6 +1,6 @@
 from fastapi import APIRouter, HTTPException, Depends
 from starlette.concurrency import run_in_threadpool
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, validator
 from typing import Optional
 from datetime import datetime, date
 from app.clock import today_harare
@@ -45,6 +45,15 @@ class PPEIssueCreate(BaseModel):
     issued_by: Optional[str] = None
     location: Optional[str] = None
     mine_section: Optional[str] = None
+    # This issue replaces an item that failed before its expiry; failure_reason (optional) says what failed. A reason
+    # without the flag is dropped, so the flag alone decides what the "Premature failures" filter shows.
+    premature_failure: bool = False
+    failure_reason: Optional[str] = Field(default=None, max_length=300)
+
+    @validator('failure_reason', always=True)
+    def reason_only_with_the_flag(cls, v, values):
+        v = (v or '').strip() or None
+        return v if values.get('premature_failure') else None
 
     class Config:
         json_encoders = {
@@ -68,6 +77,8 @@ class PPEIssueUpdate(BaseModel):
     issued_by: Optional[str] = None
     location: Optional[str] = None
     mine_section: Optional[str] = None
+    premature_failure: Optional[bool] = None
+    failure_reason: Optional[str] = Field(default=None, max_length=300)
     # The updated_at the edit form was opened with; a save is refused if the record has changed since (app/concurrency.py).
     expected_updated_at: Optional[str] = None
 
@@ -108,6 +119,18 @@ def _stamp_person(data: dict, person: dict) -> dict:
     data["department"] = person.get("department") or ""
     data["mine_section"] = person.get("section") or ""
     return data
+
+
+def _settle_premature(patch: dict, existing: dict) -> None:
+    """Keep the premature-failure pair consistent on an edit: unticking clears the reason, a reason only stands with
+    the flag (sent now or already stored), and an explicit null flag means 'not premature' (the column is NOT NULL)."""
+    if "premature_failure" in patch:
+        patch["premature_failure"] = bool(patch["premature_failure"])
+    if "failure_reason" in patch:
+        patch["failure_reason"] = (patch["failure_reason"] or "").strip() or None
+    flagged = patch.get("premature_failure", bool(existing.get("premature_failure")))
+    if not flagged and ("premature_failure" in patch or patch.get("failure_reason")):
+        patch["failure_reason"] = None
 
 
 def _resolve_person_or_422(employee_id: str) -> dict:
@@ -222,6 +245,7 @@ async def update_ppe_record(record_id: int, updated: PPEIssueUpdate, current_use
         # field, not be silently dropped. See work_orders (backend edec24a).
         data_to_update = updated.model_dump(exclude_unset=True)
         assert_unchanged(existing, data_to_update.pop('expected_updated_at', None))
+        _settle_premature(data_to_update, existing)
 
         # Moving the record to another person re-stamps the copies from the register; anything else leaves them alone.
         if "employee_id" in data_to_update:
