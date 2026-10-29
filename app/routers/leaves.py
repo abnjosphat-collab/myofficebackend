@@ -174,7 +174,8 @@ async def create_leave(leave: LeaveCreate, current_user: dict = Depends(get_curr
 # ---------- GET all leaves ----------
 @router.get("", response_model=List[LeaveResponse])
 @router.get("/", response_model=List[LeaveResponse])
-async def get_leaves(status: Optional[str] = None, leave_type: Optional[str] = None, overtime_id: Optional[int] = None, current_user: dict = Depends(get_current_user)):
+async def get_leaves(status: Optional[str] = None, leave_type: Optional[str] = None, overtime_id: Optional[int] = None, employee_id: Optional[str] = None, current_user: dict = Depends(get_current_user)):
+    """Leaves, newest application first. `employee_id` narrows to one person (their record in Personnel)."""
     person_ids = person_ids_for(supabase, current_user)
     try:
         def _query():
@@ -185,6 +186,8 @@ async def get_leaves(status: Optional[str] = None, leave_type: Optional[str] = N
                 query = query.eq("leave_type", leave_type)
             if overtime_id is not None:
                 query = query.eq("overtime_id", overtime_id)
+            if employee_id:
+                query = query.eq("employee_id", employee_id)
             query = apply_list_scope(query, current_user, "leaves", supabase, person_ids)
             # Stable ordering prevents records with the same application date
             # from drifting between pages while the register is read.

@@ -235,6 +235,14 @@ async def test_get_overtime_applies_status_and_type_filters(monkeypatch):
     assert ("overtime_type", "weekend") in fake.state["last_filters"]
 
 
+async def test_get_overtime_narrows_to_one_person(monkeypatch):
+    # The Personnel detail reads one person's overtime this way.
+    fake = _PagingSupabase(pages=[[]])
+    monkeypatch.setattr(overtime_mod, "supabase", fake)
+    await get_overtime(status=None, overtime_type=None, employee_id="C0106")
+    assert ("employee_id", "C0106") in fake.state["last_filters"]
+
+
 async def test_get_overtime_paginates_past_the_1000_row_page_cap(monkeypatch):
     # A first page exactly at PAGE (1000) must trigger a second .range() call; a page
     # shorter than 1000 must stop the loop. This is the direct regression test for the

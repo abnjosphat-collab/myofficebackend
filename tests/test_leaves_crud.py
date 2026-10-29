@@ -170,6 +170,13 @@ async def test_get_leaves_filters_by_status_and_leave_type(patch_supabase):
     assert ("leave_type", "sick") in call["filters"]
 
 
+async def test_get_leaves_narrows_to_one_person(patch_supabase):
+    # The Personnel detail reads one person's leave this way.
+    state = patch_supabase({"leaves": {"select_return": [{"id": 1}]}})
+    await get_leaves(status=None, leave_type=None, overtime_id=None, employee_id="C0106")
+    assert ("employee_id", "C0106") in state["calls"][0]["filters"]
+
+
 async def test_get_leaves_reads_beyond_first_database_page(patch_supabase):
     records = [{"id": i, "status": "approved"} for i in range(1001)]
     state = patch_supabase({"leaves": {"select_return": records}})

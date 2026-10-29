@@ -177,7 +177,8 @@ class OvertimeUpdate(BaseModel):
 # GET all overtime
 @router.get("")
 @router.get("/")
-async def get_overtime(status: Optional[str] = None, overtime_type: Optional[str] = None, current_user: dict = Depends(get_current_user)):
+async def get_overtime(status: Optional[str] = None, overtime_type: Optional[str] = None, employee_id: Optional[str] = None, current_user: dict = Depends(get_current_user)):
+    """Overtime records, newest first. `employee_id` narrows to one person (their record in Personnel)."""
     person_ids = person_ids_for(supabase, current_user)
     try:
         logger.info("Fetching overtime data...")
@@ -188,6 +189,8 @@ async def get_overtime(status: Optional[str] = None, overtime_type: Optional[str
                 q = q.eq("status", status)
             if overtime_type:
                 q = q.eq("overtime_type", overtime_type)
+            if employee_id:
+                q = q.eq("employee_id", employee_id)
             q = apply_list_scope(q, current_user, "overtime", supabase, person_ids)
             return q.order("created_at", desc=True)
 
