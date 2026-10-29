@@ -18,7 +18,7 @@ from app.document_rules import (
     check_placement, clean_folder_name, descendant_ids, folder_path, name_taken,
 )
 from app.document_structure import CUSTOM_SORT_ORDER, plan_seed, summarise
-from app.documents_support import get_folder, is_uuid, load_folders, log_activity, require_upgrade
+from app.documents_support import QUICK_PRINT_KEY, get_folder, is_uuid, load_folders, log_activity, require_upgrade
 from app.db_helpers import response_rows
 from app.errors import server_error
 from app.scope import scope_root_id, scope_subtree_ids, viewer_scope
@@ -150,6 +150,8 @@ async def delete_folder(folder_id: str, current_user: dict = Depends(require_rol
     require_upgrade(supabase)
     try:
         folder = get_folder(supabase, folder_id, current_user)
+        if folder.get("seed_key") == QUICK_PRINT_KEY:
+            raise HTTPException(status_code=409, detail="Quick print is kept for the papers you print often. Move or delete the papers in it instead.")
         folders = await run_in_threadpool(lambda: load_folders(supabase))
         subfolders = [f for f in folders if str(f.get("parent_id")) == folder_id]
         if subfolders:

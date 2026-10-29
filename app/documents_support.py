@@ -17,19 +17,25 @@ from app.document_rules import (
 
 logger = logging.getLogger(__name__)
 
-UPGRADE_MESSAGE = (
-    "The document library needs its one-time upgrade. Ask the administrator to run "
-    "supabase_migration_documents_v2.sql in the Supabase SQL editor, then reload this page."
-)
+def upgrade_message(sql_file: str) -> str:
+    return (f"The document library needs its one-time upgrade. Ask the administrator to run "
+            f"{sql_file} in the Supabase SQL editor, then reload this page.")
+
+
+UPGRADE_MESSAGE = upgrade_message("supabase_migration_documents_v2.sql")
+QUICK_PRINT_SQL = "supabase_migration_documents_quick_print_2026-10-29.sql"
+# The Quick print folder is known by this key, not its name, so renaming it keeps it.
+QUICK_PRINT_KEY = "quick-print"
 
 # Everything a list needs. The words read out of a file (content_text) and the combined search text are large and only
 # ever searched, never sent to the browser.
 LIST_COLUMNS = (
     "id,created_at,updated_at,name,original_name,file_url,file_size,mime_type,file_type,ext,folder_ref,folder_path,"
-    "starred,description,tags,uploaded_by,deleted_at,deleted_by,text_indexed_at"
+    "starred,description,tags,uploaded_by,deleted_at,deleted_by,text_indexed_at,"
+    "print_copy_url,print_copy_name,print_copy_size"
 )
 FOLDER_COLUMNS = "id,parent_id,name,sort_order,seed_key,description,created_at,updated_at,created_by"
-_HIDDEN = ("content_text", "search_text", "content_hash", "storage_path", "category_id", "category_name", "folder_id")
+_HIDDEN = ("content_text", "search_text", "content_hash", "storage_path", "print_copy_path", "category_id", "category_name", "folder_id")
 
 _UUID = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
 
@@ -38,9 +44,15 @@ def is_uuid(value: Any) -> bool:
     return isinstance(value, str) and bool(_UUID.match(value))
 
 
-_NEW_COLUMNS = (
-    ("documents", ["folder_ref", "deleted_at", "tags", "content_hash", "search_text"]),
-    ("document_folders", ["parent_id", "seed_key", "sort_order"]),
+# Each upgrade file and the columns that show it has been run, in the order they must be run.
+_UPGRADES = (
+    ("supabase_migration_documents_v2.sql", (
+        ("documents", ["folder_ref", "deleted_at", "tags", "content_hash", "search_text"]),
+        ("document_folders", ["parent_id", "seed_key", "sort_order"]),
+    )),
+    (QUICK_PRINT_SQL, (
+        ("documents", ["print_copy_path", "print_copy_url", "print_copy_name", "print_copy_size"]),
+    )),
 )
 
 
@@ -58,16 +70,17 @@ def _columns_missing(db, table: str, columns: List[str]) -> bool:
 
 
 def require_upgrade(db) -> None:
-    """409 with the plain instruction until supabase_migration_documents_v2.sql has been run. Cheap once it has: a yes is
-    remembered for the life of the process, a no is re-checked after a minute (so running the SQL needs no restart)."""
-    if all(has_columns(db, table, columns) for table, columns in _NEW_COLUMNS):
-        return
-    try:
-        missing = any(_columns_missing(db, table, columns) for table, columns in _NEW_COLUMNS)
-    except Exception as exc:
-        raise server_error(exc, "Checking the document library")
-    if missing:
-        raise HTTPException(status_code=409, detail=UPGRADE_MESSAGE)
+    """409 naming the first upgrade SQL file not yet run. Cheap once they have been: a yes is remembered for the life of the
+    process, a no is re-checked after a minute (so running the SQL needs no restart)."""
+    for sql_file, checks in _UPGRADES:
+        if all(has_columns(db, table, columns) for table, columns in checks):
+            continue
+        try:
+            missing = any(_columns_missing(db, table, columns) for table, columns in checks)
+        except Exception as exc:
+            raise server_error(exc, "Checking the document library")
+        if missing:
+            raise HTTPException(status_code=409, detail=upgrade_message(sql_file))
 
 
 def shown(row: Dict[str, Any]) -> Dict[str, Any]:

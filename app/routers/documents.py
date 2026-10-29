@@ -7,6 +7,9 @@
 #   * the same file (identical content) cannot be put in one folder twice, and two files with one name get "(2)";
 #   * who uploaded and who deleted come from the sign-in, never from the browser;
 #   * every change is written to the document history.
+#
+# A print copy: a PDF of a Word or Excel file, kept on the file's own row (print_copy_*), so Print sends the exact pages the
+# author laid out instead of the browser's redrawing of them. It goes with the file: replaced in place, removed with it.
 import logging
 import re
 import uuid as uuid_module
@@ -72,7 +75,7 @@ def _copy_in(folder_ref: Optional[str], digest: Optional[str], ignore_id: Option
     return None
 
 
-def _get_doc(doc_id: str, columns: str = LIST_COLUMNS + ",content_hash,storage_path") -> Dict[str, Any]:
+def _get_doc(doc_id: str, columns: str = LIST_COLUMNS + ",content_hash,storage_path,print_copy_path") -> Dict[str, Any]:
     if not is_uuid(doc_id):
         raise HTTPException(status_code=404, detail="Document not found")
     found = response_rows(supabase.table("documents").select(columns).eq("id", doc_id).execute())
@@ -366,7 +369,7 @@ async def bulk_action(body: BulkAction, current_user: dict = Depends(get_current
     if body.action in _MANAGER_ONLY:
         _need_manager(current_user)
     try:
-        rows = {r["id"]: r for r in response_rows(supabase.table("documents").select(LIST_COLUMNS + ",content_hash,storage_path").in_("id", ids).execute())}
+        rows = {r["id"]: r for r in response_rows(supabase.table("documents").select(LIST_COLUMNS + ",content_hash,storage_path,print_copy_path").in_("id", ids).execute())}
         done: List[str] = []
         failed: List[Dict[str, str]] = []
         scope = viewer_scope(current_user)
@@ -437,10 +440,10 @@ def _apply_one(action: str, doc: Dict[str, Any], folders: List[Dict[str, Any]], 
 def _purge(doc: Dict[str, Any], user: Dict[str, Any]) -> None:
     if not doc.get("deleted_at"):
         raise HTTPException(status_code=409, detail="Move it to the trash first. Only a file in the trash can be deleted for good.")
-    path = doc.get("storage_path")
-    if path:
+    paths = [p for p in (doc.get("storage_path"), doc.get("print_copy_path")) if p]
+    if paths:
         try:
-            supabase.storage.from_(BUCKET).remove([path])
+            supabase.storage.from_(BUCKET).remove(paths)
         except Exception as e:
             raise HTTPException(status_code=502, detail="The stored file could not be removed, so nothing was deleted. Try again.") from e
     supabase.table("documents").delete().eq("id", doc["id"]).execute()
@@ -462,6 +465,79 @@ async def delete_document(doc_id: str, permanent: bool = False, current_user: di
         return {"ok": True}
     except Exception as e:
         raise server_error(e, "Deleting the document")
+
+
+# ── Print copy ───────────────────────────────────────────────────────────────────────────────────────────────────────
+
+PRINT_COPY_EXTS = {"pdf"}
+NO_PRINT_COPY = {"print_copy_path": None, "print_copy_url": None, "print_copy_name": None, "print_copy_size": None}
+
+
+def _visible_doc(doc_id: str, user: Dict[str, Any]) -> Dict[str, Any]:
+    doc = _get_doc(doc_id)
+    if viewer_scope(user) is not None:
+        assert_row_visible(user, "documents", doc, supabase, detail="Document not found")
+    if doc.get("deleted_at"):
+        raise HTTPException(status_code=409, detail="It is in the trash. Restore it first.")
+    return doc
+
+
+def _drop_stored(path: Optional[str]) -> None:
+    """Remove a replaced or removed print copy from storage. A failure only leaves an unreferenced file, so it is logged."""
+    if not path:
+        return
+    try:
+        supabase.storage.from_(BUCKET).remove([path])
+    except Exception as e:
+        logger.error("Could not remove the old print copy %s: %s", path, e)
+
+
+@router.post("/{doc_id}/print-copy")
+async def set_print_copy(doc_id: str, file: UploadFile = File(...), current_user: dict = Depends(get_current_user)):
+    """Keep a PDF with this file for printing (Word: File, Save as, PDF). Replaces the one it had."""
+    require_upgrade(supabase)
+    doc = _visible_doc(doc_id, current_user)
+    if (doc.get("ext") or "").lower() == "pdf":
+        raise HTTPException(status_code=422, detail="This file is already a PDF: it prints exactly as it is.")
+    content = await read_and_validate_upload(file, max_bytes=MAX_UPLOAD_BYTES, allowed_exts=PRINT_COPY_EXTS)
+    if not content.startswith(b"%PDF"):
+        raise HTTPException(status_code=422, detail="That file is not a PDF. In Word or Excel use File, Save as, PDF, then add that file.")
+    name = re.split(r"[\\/]", file.filename or "print copy.pdf")[-1] or "print copy.pdf"
+    path = f"print-copies/{doc_id}/{uuid_module.uuid4()}.pdf"
+    try:
+        supabase.storage.from_(BUCKET).upload(path, content, {"content-type": "application/pdf"})
+        url = supabase.storage.from_(BUCKET).get_public_url(path)
+    except Exception as e:
+        _drop_stored(path)
+        raise server_error(e, "Storing the print copy")
+    changes = {"print_copy_path": path, "print_copy_url": url, "print_copy_name": name, "print_copy_size": len(content)}
+    touch(doc, changes)
+    try:
+        supabase.table("documents").update(changes).eq("id", doc_id).execute()
+    except Exception as e:
+        _drop_stored(path)
+        raise server_error(e, "Saving the print copy")
+    _drop_stored(doc.get("print_copy_path"))
+    log_activity(supabase, current_user, "update", doc_id, name=doc["name"], print_copy=name)
+    return shown({**doc, **changes})
+
+
+@router.delete("/{doc_id}/print-copy")
+async def remove_print_copy(doc_id: str, current_user: dict = Depends(get_current_user)):
+    """Stop keeping a print copy with this file; Print goes back to drawing the file itself."""
+    require_upgrade(supabase)
+    doc = _visible_doc(doc_id, current_user)
+    if not doc.get("print_copy_path"):
+        return shown(doc)
+    changes = dict(NO_PRINT_COPY)
+    touch(doc, changes)
+    try:
+        supabase.table("documents").update(changes).eq("id", doc_id).execute()
+    except Exception as e:
+        raise server_error(e, "Removing the print copy")
+    _drop_stored(doc.get("print_copy_path"))
+    log_activity(supabase, current_user, "update", doc_id, name=doc["name"], print_copy="removed")
+    return shown({**doc, **changes})
 
 
 # ── History ──────────────────────────────────────────────────────────────────────────────────────────────────────────
