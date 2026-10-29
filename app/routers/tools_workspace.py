@@ -18,7 +18,7 @@ from app.rate_limit import limiter
 import time as _time
 
 router = APIRouter()
-TABLE = {"accounts":"tools_workspace_accounts","sessions":"tools_workspace_sessions","employees":"tools_workspace_employees","tools":"tools_workspace_equipment","history":"tools_workspace_history","changes":"tools_workspace_changes","evidence":"tools_workspace_evidence","source_registers":"tools_workspace_source_registers","usage":"tools_workspace_usage","errors":"tools_workspace_errors","feedback":"tools_workspace_feedback","notification_reads":"tools_workspace_notification_reads","competencies":"tools_workspace_competencies","inspections":"tools_workspace_inspections","incidents":"tools_workspace_incidents","gate_passes":"tools_workspace_gate_passes","gate_pass_items":"tools_workspace_gate_pass_items","gate_pass_approvals":"tools_workspace_gate_pass_approvals","password_requests":"password_reset_requests","plan":"tools_workspace_inspection_plan"}
+TABLE = {"accounts":"tools_workspace_accounts","sessions":"tools_workspace_sessions","employees":"tools_workspace_employees","tools":"tools_workspace_equipment","history":"tools_workspace_history","changes":"tools_workspace_changes","evidence":"tools_workspace_evidence","source_registers":"tools_workspace_source_registers","usage":"tools_workspace_usage","errors":"tools_workspace_errors","feedback":"tools_workspace_feedback","notification_reads":"tools_workspace_notification_reads","competencies":"tools_workspace_competencies","inspections":"tools_workspace_inspections","incidents":"tools_workspace_incidents","gate_passes":"tools_workspace_gate_passes","gate_pass_items":"tools_workspace_gate_pass_items","gate_pass_approvals":"tools_workspace_gate_pass_approvals","password_requests":"password_reset_requests","plan":"tools_workspace_inspection_plan","set_members":"tools_workspace_set_members"}
 FEEDBACK_BUCKET = "tools-workspace-feedback"
 EVIDENCE_BUCKET = "tools-workspace-evidence"
 SOURCE_REGISTERS_BUCKET = "tools-workspace-source-registers"
@@ -147,7 +147,7 @@ def _tool_state(tool: dict[str,Any], actor: str) -> dict[str,Any]:
     state.setdefault("custody",None); state.setdefault("row_version",1); state.setdefault("created_by",actor); state.setdefault("created_at",_now()); state.setdefault("updated_at",_now())
     return state
 
-def _apply_change(before: Optional[dict[str,Any]], after: dict[str,Any], action: str, actor: str, detail: str="", employee: Optional[dict[str,Any]]=None, idempotency_key: Optional[str]=None):
+def _apply_change(before: Optional[dict[str,Any]], after: dict[str,Any], action: str, actor: str, detail: str="", employee: Optional[dict[str,Any]]=None, idempotency_key: Optional[str]=None, change_group_id: Optional[str]=None):
     """Apply one equipment mutation and its audit/change records atomically in Postgres."""
     after=_tool_state(after,actor); event={"id":str(uuid.uuid4()),"detail":detail,"event_at":_now(),"employee_id":employee.get("id") if employee else None,"employee_name":employee.get("name") if employee else None,"metadata":{}}
     if _test_mode:
@@ -155,9 +155,9 @@ def _apply_change(before: Optional[dict[str,Any]], after: dict[str,Any], action:
         if existing: existing.clear(); existing.update(after); existing["row_version"]=int((before or {}).get("row_version",0))+1
         else: _memory["tools"].append(after)
         _memory["history"].append({"id":event["id"],"tool_id":after["id"],"tool_name":after["name"],"action":action,"detail":detail,"actor_name":actor,"employee_id":event["employee_id"],"employee_name":event["employee_name"],"event_at":event["event_at"],"metadata":{}})
-        change={"id":str(uuid.uuid4()),"tool_id":after["id"],"action":action,"before_state":before or after,"after_state":dict(after),"actor_name":actor,"created_at":_now(),"undone_at":None,"undone_by":None}; _memory["changes"].append(change)
+        change={"id":str(uuid.uuid4()),"tool_id":after["id"],"action":action,"before_state":before or after,"after_state":dict(after),"actor_name":actor,"created_at":_now(),"undone_at":None,"undone_by":None,"change_group_id":change_group_id}; _memory["changes"].append(change)
         return {"tool":dict(after),"change_id":change["id"]}
-    payload={"idempotency_key":idempotency_key or str(uuid.uuid4()),"tool_id":before.get("id") if before else None,"expected_version":before.get("row_version") if before else None,"before_state":before or after,"after_state":after,"action":action,"actor_name":actor,"event":event}
+    payload={"idempotency_key":idempotency_key or str(uuid.uuid4()),"tool_id":before.get("id") if before else None,"expected_version":before.get("row_version") if before else None,"before_state":before or after,"after_state":after,"action":action,"actor_name":actor,"event":event,"change_group_id":change_group_id}
     try:
         response=supabase.rpc("tools_workspace_apply_change",{"payload":payload}).execute(); data=getattr(response,"data",None) or {}
         return data.get("result",data)
@@ -166,6 +166,98 @@ def _apply_change(before: Optional[dict[str,Any]], after: dict[str,Any], action:
         if "STALE_VERSION" in message: raise HTTPException(409,"This record changed elsewhere. Refresh and try again.") from exc
         if "CONFLICT" in message or "duplicate" in message.lower(): raise HTTPException(409,"That register number already exists.") from exc
         raise
+
+SET_MEMBER_CONDITIONS=("Good","Damaged","Missing parts")
+def _set_member_rows(set_tool_id:str):
+    return [row for row in _all("set_members") if row.get("set_tool_id")==set_tool_id]
+def _set_members(set_tool_id:str):
+    tools=[]
+    for row in _set_member_rows(set_tool_id):
+        tool=_find("tools","id",row.get("member_tool_id"))
+        if tool: tools.append(tool)
+    return tools
+def _member_head_id(tool_id:str):
+    row=next((row for row in _all("set_members") if row.get("member_tool_id")==tool_id),None)
+    return row.get("set_tool_id") if row else None
+def _is_set_head(tool_id:str):
+    return any(row.get("set_tool_id")==tool_id for row in _all("set_members"))
+def _worst_condition(conditions:list[str]):
+    if all(item=="Good" for item in conditions): return "Good"
+    if any(item=="Missing parts" for item in conditions): return "Missing parts"
+    return "Damaged"
+def _apply_set_change(items:list[dict[str,Any]],actor:str,group_id:Optional[str]=None,idempotency_key:Optional[str]=None):
+    """Apply a multi-row movement (a set head plus its members) as one undoable group."""
+    group_id=group_id or str(uuid.uuid4())
+    if _test_mode:
+        tools=[]; change_ids=[]
+        for item in items:
+            result=_apply_change(item["before"],item["after"],item["action"],actor,item.get("detail",""),item.get("employee"),item.get("idempotency_key") or f"{idempotency_key or group_id}:{item['after']['id']}",change_group_id=group_id)
+            tools.append(result["tool"]); change_ids.append(result["change_id"])
+        return {"tools":tools,"change_ids":change_ids,"group_id":group_id}
+    rpc_items=[{**item,"change_id":item.get("change_id") or str(uuid.uuid4())} for item in items]
+    response=supabase.rpc("tools_workspace_apply_set_change",{"payload":{"idempotency_key":idempotency_key or str(uuid.uuid4()),"group_id":group_id,"actor_name":actor,"items":rpc_items}}).execute()
+    data=getattr(response,"data",None) or {}
+    return data.get("result",data)
+def _resolve_movement_employee(body:MovementInput,assigned_department:str):
+    employee=None
+    if body.kind in {"issue","transfer"}:
+        if body.employee_id: employee=_find("employees","id",body.employee_id) or _find("employees","employee_number",body.employee_id)
+        if not employee and body.employee_name: employee=next((row for row in _all("employees") if row.get("name","").lower()==(body.employee_name or "").lower()),None)
+        if not employee: raise HTTPException(404,"Choose an employee from the Tools employee register.")
+        if employee.get("department")!=assigned_department: raise HTTPException(403,f"Choose an employee from {assigned_department}.")
+    return employee
+def _check_loan_row(tool:dict[str,Any],employee:dict[str,Any],body:MovementInput,label:Optional[str]=None):
+    """Guards for issuing or transferring one row; returns an override note or None."""
+    name=label or "This tool"
+    if body.kind=="issue" and (tool.get("archived") or tool.get("status")!="available"): raise HTTPException(409,f"{name} is not available to issue.")
+    if body.kind=="issue" and _needs_attention(tool): raise HTTPException(409,f"{name} is not fit to issue. Record what was repaired and mark it ready first.")
+    if not _is_eligible(employee,tool): raise HTTPException(409,f"{employee.get('name')} is not currently trained, qualified and authorized for {tool.get('register_number') if label else 'this equipment'}.")
+    due_checks=_inspection_due(tool)
+    if not due_checks: return None
+    names=", ".join(item.replace("_"," ") for item in due_checks)
+    if not body.override_due_checks: raise HTTPException(409,f"The {names} check is overdue for {tool.get('register_number') if label else 'this equipment'}. Complete it, or issue anyway with a written reason (an Administrator or Issuer may override).")
+    reason=(body.override_reason or "").strip()
+    if len(reason)<5: raise HTTPException(422,"Give a reason of at least 5 characters to issue equipment with an overdue check.")
+    return f"overdue {names} check overridden{' for '+tool.get('register_number') if label else ''}: {reason}"
+def _set_movement_rows(head:dict[str,Any],members:list[dict[str,Any]],body:MovementInput,account:dict[str,Any],employee:Optional[dict[str,Any]],notes:dict[str,Optional[str]],now:str):
+    rows=[head,*members]; built=[]
+    for row in rows:
+        is_head=row["id"]==head["id"]
+        after=dict(row); location=(body.location or row.get("storage_location") or "Unspecified").strip()
+        if body.kind=="return":
+            condition=(body.member_conditions or {}).get(row["id"],body.condition or "Good")
+            if condition not in SET_MEMBER_CONDITIONS: raise HTTPException(422,"Record each member as Good, Damaged or Missing parts.")
+            after.update(storage_location=location,condition=condition,notes=body.notes,custody=None,calibration=body.calibration or row.get("calibration"),status="available" if condition=="Good" else "attention")
+        elif body.kind=="extend":
+            custody={**row["custody"],"expected_return_at":body.expected_return_at,"notes":body.notes}; after.update(status="issued",custody=custody,notes=body.notes)
+        else:
+            old=row.get("custody") or {}; custody={**old,"employee_id":employee["id"],"employee_number":employee["employee_number"],"employee_name":employee["name"],"department":employee["department"],"location":location,"job_reference":body.job_reference or old.get("job_reference"),"assigned_equipment":body.assigned_equipment or old.get("assigned_equipment",[]),"expected_return_at":body.expected_return_at or old.get("expected_return_at"),"issued_at":old.get("issued_at") or now,"original_due_at":old.get("original_due_at") or body.expected_return_at,"issued_by":account["name"],"notes":body.notes,"approval_ref":body.approval_ref,"pre_use_pending":row.get("pre_use_check_required",True)}; after.update(status="issued",storage_location=location,custody=custody,notes=body.notes,approval_ref=body.approval_ref or row.get("approval_ref"))
+        targets=", ".join(body.assigned_equipment)
+        if body.kind=="return": detail=f"Set returned to {location} ({len(members)} pieces)" if is_head else f"Returned to {location} as part of set {head['register_number']}"
+        elif body.kind=="extend": detail=f"Return date changed to {body.expected_return_at} (set {head['register_number']})"
+        else: detail=((f"Set issued to {employee['name']} ({len(members)} pieces)"+(f" for {targets}" if targets else "")) if is_head else f"Issued to {employee['name']} as part of set {head['register_number']}")
+        if notes.get(row["id"]): detail+=f" ({notes[row['id']]})"
+        built.append({"before":row,"after":after,"action":body.kind,"detail":detail,"employee":employee})
+    if body.kind=="return":
+        worst=_worst_condition([item["after"]["condition"] for item in built])
+        built[0]["after"].update(condition=worst,status="available" if worst=="Good" else "attention")
+    return built
+def _move_set(head:dict[str,Any],members:list[dict[str,Any]],body:MovementInput,account:dict[str,Any],employee:Optional[dict[str,Any]]):
+    rows=[head,*members]; notes={}
+    if body.kind in {"issue","transfer"}:
+        for row in rows:
+            label=None if row["id"]==head["id"] else row.get("register_number")
+            notes[row["id"]]=_check_loan_row(row,employee,body,label)
+    else:
+        notes={row["id"]:None for row in rows}
+    built=_set_movement_rows(head,members,body,account,employee,notes,_now())
+    group_id=str(uuid.uuid4())
+    applied=_apply_set_change([{**item,"idempotency_key":body.idempotency_key or f"{group_id}:{item['after']['id']}"} for item in built],account["name"],group_id,body.idempotency_key)
+    by_id={tool["id"]:change_id for tool,change_id in zip(applied["tools"],applied["change_ids"])}
+    head_tool=next(item for item in applied["tools"] if item["id"]==head["id"])
+    return {"tool":head_tool,"change_id":by_id[head["id"]],"group_id":group_id}
+class SetMembersInput(BaseModel):
+    member_ids:list[str]=Field(min_length=1,max_length=500)
 
 class RegisterAccount(BaseModel):
     name:str=Field(min_length=2,max_length=100); username:str=Field(min_length=3,max_length=254,pattern=r"^[^\s]+$"); password:str=Field(min_length=6,max_length=128); can_issue:bool=False
@@ -198,9 +290,9 @@ class ToolUpdate(BaseModel):
 class IssueInput(BaseModel):
     employee_id:str; location:str=Field(min_length=1,max_length=240); expected_return_at:Optional[str]=None; job_reference:Optional[str]=Field(default=None,max_length=160); assigned_equipment:list[str]=Field(default_factory=list,max_length=30); notes:Optional[str]=Field(default=None,max_length=1000); override_due_checks:bool=False; override_reason:Optional[str]=Field(default=None,max_length=500)
 class ReturnInput(BaseModel):
-    location:str=Field(min_length=1,max_length=240); condition:Literal["Good","Damaged","Missing parts"]="Good"; notes:Optional[str]=Field(default=None,max_length=1000)
+    location:str=Field(min_length=1,max_length=240); condition:Literal["Good","Damaged","Missing parts"]="Good"; notes:Optional[str]=Field(default=None,max_length=1000); member_conditions:Optional[dict[str,str]]=None
 class MovementInput(BaseModel):
-    kind:Literal["issue","return","transfer","extend"]; employee_id:Optional[str]=None; employee_name:Optional[str]=None; department:Optional[str]=None; location:Optional[str]=Field(default=None,max_length=240); expected_return_at:Optional[str]=None; job_reference:Optional[str]=Field(default=None,max_length=160); assigned_equipment:list[str]=Field(default_factory=list,max_length=30); condition:Optional[str]=Field(default="Good",max_length=60); notes:Optional[str]=Field(default=None,max_length=2000); approval_ref:Optional[str]=Field(default=None,max_length=160); calibration:Optional[str]=Field(default=None,max_length=160); pre_use_check_completed:bool=False; idempotency_key:Optional[str]=None; override_due_checks:bool=False; override_reason:Optional[str]=Field(default=None,max_length=500)
+    kind:Literal["issue","return","transfer","extend"]; employee_id:Optional[str]=None; employee_name:Optional[str]=None; department:Optional[str]=None; location:Optional[str]=Field(default=None,max_length=240); expected_return_at:Optional[str]=None; job_reference:Optional[str]=Field(default=None,max_length=160); assigned_equipment:list[str]=Field(default_factory=list,max_length=30); condition:Optional[str]=Field(default="Good",max_length=60); notes:Optional[str]=Field(default=None,max_length=2000); approval_ref:Optional[str]=Field(default=None,max_length=160); calibration:Optional[str]=Field(default=None,max_length=160); pre_use_check_completed:bool=False; idempotency_key:Optional[str]=None; override_due_checks:bool=False; override_reason:Optional[str]=Field(default=None,max_length=500); member_conditions:Optional[dict[str,str]]=None
 class ImportCommit(BaseModel):
     target:Literal["equipment","employees"]; rows:list[dict[str,Any]]=Field(max_length=500)
 class UsageInput(BaseModel): event:str=Field(min_length=1,max_length=100); detail:Optional[str]=Field(default=None,max_length=500)
@@ -666,6 +758,12 @@ def create_employee(body:EmployeeInput,account=Depends(_operator)):
 def list_tools(account=Depends(_session)):
     tools=_visible_records("tools",account)
     tool_ids={tool["id"] for tool in tools}
+    tools_by_id={tool["id"]:tool for tool in tools}
+    member_ids_by_set={}
+    head_by_member={}
+    for link in _all("set_members"):
+        member_ids_by_set.setdefault(link.get("set_tool_id"),[]).append(link.get("member_tool_id"))
+        head_by_member[link.get("member_tool_id")]=link.get("set_tool_id")
     evidence=[item for item in _all("evidence") if item.get("tool_id") in tool_ids]
     employees=[employee for employee in _visible_records("employees",account) if employee.get("active",True)]
     competencies=_all("competencies")
@@ -683,12 +781,17 @@ def list_tools(account=Depends(_session)):
         by_tool.setdefault(item["tool_id"],[]).append(row)
     result=[]
     for tool in tools:
-        eligible=[]
-        for employee in employees:
-            basis=_eligibility_basis(employee,tool,competencies)
-            if basis is None: continue
-            eligible.append({"id":employee["id"],"employee_number":employee["employee_number"],"name":employee["name"],"department":employee["department"],"job_title":employee.get("job_title"),"via_section":basis.split(":",1)[1] if basis.startswith("section:") else None})
-        result.append({**_effective_tool(tool),"evidence":by_tool.get(tool["id"],[]),"eligible_employees":eligible,"inspection_due":_inspection_due(tool,inspections,plan_rows,plan_deferred),"latest_inspections":_latest_inspections(tool["id"],inspections)})
+        pairs=[(employee,_eligibility_basis(employee,tool,competencies)) for employee in employees]
+        pairs=[(employee,basis) for employee,basis in pairs if basis is not None]
+        member_ids=member_ids_by_set.get(tool["id"])
+        if member_ids:
+            members=[tools_by_id[mid] for mid in member_ids if mid in tools_by_id]
+            if members: pairs=[(employee,basis) for employee,basis in pairs if all(_eligibility_basis(employee,member,competencies) is not None for member in members)]
+        eligible=[{"id":employee["id"],"employee_number":employee["employee_number"],"name":employee["name"],"department":employee["department"],"job_title":employee.get("job_title"),"via_section":basis.split(":",1)[1] if basis.startswith("section:") else None} for employee,basis in pairs]
+        extra={"member_ids":member_ids_by_set[tool["id"]]} if tool["id"] in member_ids_by_set else {}
+        head_id=head_by_member.get(tool["id"])
+        if head_id: extra={"set_head_id":head_id,"set_head_name":(tools_by_id.get(head_id) or {}).get("name")}
+        result.append({**_effective_tool(tool),**extra,"evidence":by_tool.get(tool["id"],[]),"eligible_employees":eligible,"inspection_due":_inspection_due(tool,inspections,plan_rows,plan_deferred),"latest_inspections":_latest_inspections(tool["id"],inspections)})
     return result
 @router.get("/tools/trade-section-suggestion")
 def suggest_tool_trade_sections(name:str="",equipment_kind:str="",category:str="",_=Depends(_session)):
@@ -721,6 +824,11 @@ def archive_tool(tool_id:str,account=Depends(_operator)):
     if not tool: raise HTTPException(404,"Tool was not found.")
     _ensure_managed_department(account,tool.get("department"))
     if tool.get("custody"): raise HTTPException(409,"Receive this tool before archiving it.")
+    if _is_set_head(tool_id): raise HTTPException(409,"Remove every member from this set before archiving it.")
+    head_id=_member_head_id(tool_id)
+    if head_id:
+        head=_find("tools","id",head_id) or {}
+        raise HTTPException(409,f"Remove this tool from set {head.get('register_number') or 'its set'} before archiving it.")
     after={**tool,"archived":not bool(tool.get("archived"))}
     action="restored" if after["archived"] is False else "archived"
     return _apply_change(tool,after,action,account["name"],f"Equipment {action}")["tool"]
@@ -733,6 +841,9 @@ def mark_tool_ready(tool_id:str,body:MarkReadyInput,account=Depends(_operator)):
     if tool.get("archived"): raise HTTPException(409,"Restore this tool before marking it ready for use.")
     if tool.get("custody"): raise HTTPException(409,"Receive this tool before marking it ready for use.")
     if tool.get("status")!="attention": raise HTTPException(409,"Only equipment held for attention can be marked ready for use.")
+    if _is_set_head(tool_id):
+        unfit=[member.get("register_number") for member in _set_members(tool_id) if member.get("status")!="available" or _needs_attention(member)]
+        if unfit: raise HTTPException(409,f"Mark each damaged member ready first: {', '.join(unfit)}.")
     note=body.resolution_note.strip()
     after={**tool,"status":"available","condition":"Good","notes":note}
     return _apply_change(tool,after,"released",account["name"],f"Marked ready for use: {note}")["tool"]
@@ -829,6 +940,7 @@ def create_gate_pass(body:GatePassInput,account=Depends(_operator)):
         if not tool: raise HTTPException(404,"One of the selected tools was not found.")
         if tool.get("department")!=body.department: raise HTTPException(409,"Every gate-pass item must belong to the selected department.")
         if tool.get("archived") or tool.get("status")=="attention": raise HTTPException(409,f"{tool.get('register_number')} is not fit for movement.")
+        if _member_head_id(tool["id"]): raise HTTPException(409,f"{tool.get('register_number')} belongs to a set. Move the whole set.")
         selected.append(tool)
     now=datetime.now(timezone.utc); pass_number=_next_number(f"GP-{now.year}"); gate_pass_id=str(uuid.uuid4())
     verification=hashlib.sha256(f"{gate_pass_id}:{pass_number}:{account['id']}".encode()).hexdigest()[:16].upper()
@@ -919,24 +1031,22 @@ def _move(tool_id:str,body:MovementInput,account:dict[str,Any]):
     if not tool: raise HTTPException(404,"Tool was not found.")
     assigned_department=(account.get("department") or "").strip()
     if tool.get("department")!=assigned_department: raise HTTPException(403,f"This Issuer may record movements only for {assigned_department} equipment.")
+    if body.kind in {"issue","return","transfer","extend"}:
+        head_id=_member_head_id(tool_id)
+        if head_id:
+            head=_find("tools","id",head_id) or {}
+            raise HTTPException(409,f"This tool belongs to set {head.get('register_number') or 'on the register'}. Record the movement on the set.")
     open_loan=bool(tool.get("custody"))
     if body.kind=="issue" and (tool.get("archived") or tool.get("status")!="available"): raise HTTPException(409,"This tool is not available to issue.")
     if body.kind=="issue" and _needs_attention(tool): raise HTTPException(409,"This tool is not fit to issue. Record what was repaired and mark it ready first.")
     if body.kind!="issue" and not open_loan: raise HTTPException(409,"This tool has no open loan.")
-    employee=None; override_note=None
+    employee=_resolve_movement_employee(body,assigned_department) if body.kind in {"issue","transfer"} else None
+    members=_set_members(tool_id) if _is_set_head(tool_id) and body.kind in {"issue","return","transfer","extend"} else []
+    if members:
+        return _move_set(tool,members,body,account,employee)
+    override_note=None
     if body.kind in {"issue","transfer"}:
-        if body.employee_id: employee=_find("employees","id",body.employee_id) or _find("employees","employee_number",body.employee_id)
-        if not employee and body.employee_name: employee=next((row for row in _all("employees") if row["name"].lower()==body.employee_name.lower()),None)
-        if not employee: raise HTTPException(404,"Choose an employee from the Tools employee register.")
-        if employee.get("department")!=assigned_department: raise HTTPException(403,f"Choose an employee from {assigned_department}.")
-        if not _is_eligible(employee,tool): raise HTTPException(409,"This employee is not currently trained, qualified and authorized for this equipment.")
-        due_checks=_inspection_due(tool)
-        if due_checks:
-            names=", ".join(item.replace("_"," ") for item in due_checks)
-            if not body.override_due_checks: raise HTTPException(409,f"The {names} check is overdue. Complete it, or issue anyway with a written reason (an Administrator or Issuer may override).")
-            reason=(body.override_reason or "").strip()
-            if len(reason)<5: raise HTTPException(422,"Give a reason of at least 5 characters to issue equipment with an overdue check.")
-            override_note=f"overdue {names} check overridden: {reason}"
+        override_note=_check_loan_row(tool,employee,body)
     now=_now(); after=dict(tool); location=(body.location or tool.get("storage_location") or "Unspecified").strip()
     if body.kind=="return":
         after.update(status="available" if body.condition=="Good" else "attention",storage_location=location,condition=body.condition or "Good",notes=body.notes,custody=None,calibration=body.calibration or tool.get("calibration"))
@@ -949,7 +1059,6 @@ def _move(tool_id:str,body:MovementInput,account:dict[str,Any]):
     if override_note: detail+=f" ({override_note})"
     result=_apply_change(tool,after,body.kind,account["name"],detail,employee,body.idempotency_key)
     return {"tool":result["tool"],"change_id":result["change_id"]}
-
 @router.post("/tools/{tool_id}/commands")
 def move_tool(tool_id:str,body:MovementInput,account=Depends(_issuer)): return _move(tool_id,body,account)
 @router.post("/tools/{tool_id}/issue")
@@ -957,8 +1066,53 @@ def issue_tool(tool_id:str,body:IssueInput,account=Depends(_issuer)):
     return _move(tool_id,MovementInput(kind="issue",employee_id=body.employee_id,location=body.location,expected_return_at=body.expected_return_at,job_reference=body.job_reference,assigned_equipment=body.assigned_equipment,notes=body.notes,pre_use_check_completed=True,override_due_checks=body.override_due_checks,override_reason=body.override_reason),account)
 @router.post("/tools/{tool_id}/return")
 def return_tool(tool_id:str,body:ReturnInput,account=Depends(_issuer)):
-    return _move(tool_id,MovementInput(kind="return",location=body.location,condition=body.condition,notes=body.notes),account)
+    return _move(tool_id,MovementInput(kind="return",location=body.location,condition=body.condition,notes=body.notes,member_conditions=body.member_conditions),account)
 
+@router.get("/tools/{tool_id}/members")
+def list_set_members(tool_id:str,account=Depends(_session)):
+    head=_find("tools","id",tool_id)
+    if not head: raise HTTPException(404,"Tool was not found.")
+    scope=_department_scope(account)
+    if scope is not None and head.get("department")!=scope: raise HTTPException(403,"This set belongs to another department.")
+    return {"set_tool":head,"members":_set_members(tool_id)}
+@router.post("/tools/{tool_id}/members",status_code=201)
+def add_set_members(tool_id:str,body:SetMembersInput,account=Depends(_operator)):
+    """Form a set: link available same-department tools to a set head. The head and every member must be off-loan; members must be fit to issue; no nesting and no double membership."""
+    head=_find("tools","id",tool_id)
+    if not head: raise HTTPException(404,"Tool was not found.")
+    _ensure_managed_department(account,head.get("department"))
+    if head.get("archived"): raise HTTPException(409,"Restore this tool before building a set on it.")
+    if head.get("custody"): raise HTTPException(409,"Receive this set back before changing its members.")
+    if _member_head_id(tool_id): raise HTTPException(409,"A set cannot hold another set.")
+    picked=[]
+    for member_id in list(dict.fromkeys(body.member_ids)):
+        member=_find("tools","id",member_id)
+        if not member: raise HTTPException(404,"One of the selected tools was not found.")
+        if member["id"]==head["id"]: raise HTTPException(422,"A set cannot hold itself.")
+        if member.get("department")!=head.get("department"): raise HTTPException(409,f"{member.get('register_number')} belongs to another department.")
+        if member.get("archived"): raise HTTPException(409,f"{member.get('register_number')} is archived.")
+        if member.get("custody"): raise HTTPException(409,f"{member.get('register_number')} is on loan. Receive it back first.")
+        if member.get("status")!="available" or _needs_attention(member): raise HTTPException(409,f"{member.get('register_number')} is not fit to join a set.")
+        if _member_head_id(member["id"]): raise HTTPException(409,f"{member.get('register_number')} already belongs to a set.")
+        if _is_set_head(member["id"]): raise HTTPException(409,f"{member.get('register_number')} is itself a set head.")
+        picked.append(member)
+    for member in picked:
+        _insert("set_members",{"id":str(uuid.uuid4()),"set_tool_id":head["id"],"member_tool_id":member["id"],"qty":1,"created_by":account["name"],"created_at":_now()})
+    names=", ".join(member.get("register_number") for member in picked)
+    result=_apply_change(head,head,"members_updated",account["name"],f"Set now holds {len(_set_members(head['id']))} piece(s): {names}")
+    return {"set_tool":result["tool"],"members":_set_members(head["id"])}
+@router.delete("/tools/{tool_id}/members/{member_id}")
+def remove_set_member(tool_id:str,member_id:str,account=Depends(_operator)):
+    head=_find("tools","id",tool_id)
+    if not head: raise HTTPException(404,"Tool was not found.")
+    _ensure_managed_department(account,head.get("department"))
+    if head.get("custody"): raise HTTPException(409,"Receive this set back before changing its members.")
+    link=next((row for row in _set_member_rows(tool_id) if row.get("member_tool_id")==member_id),None)
+    if not link: raise HTTPException(404,"That tool is not a member of this set.")
+    member=_find("tools","id",member_id) or {}
+    _delete_where("set_members","id",link["id"])
+    result=_apply_change(head,head,"members_updated",account["name"],f"Removed {member.get('register_number','a piece')} from the set ({len(_set_members(head['id']))} left)")
+    return {"set_tool":result["tool"],"members":_set_members(head["id"])}
 @router.post("/tools/{tool_id}/evidence",status_code=201)
 async def upload_evidence(tool_id:str,files:list[UploadFile]=File(...),account=Depends(_operator)):
     tool=_find("tools","id",tool_id)
@@ -1019,6 +1173,21 @@ def restore_change(direction:Literal["undo","redo"],account=Depends(_operator)):
     own=[row for row in _all("changes",True) if row.get("actor_name")==account["name"]]
     change=next((row for row in own if bool(row.get("undone_at"))==(direction=="redo")),None)
     if not change: raise HTTPException(409,f"Nothing to {direction}.")
+    group=change.get("change_group_id")
+    if group:
+        grouped=sorted((row for row in _all("changes") if row.get("change_group_id")==group),key=lambda row:row.get("created_at"),reverse=(direction=="undo"))
+        if _test_mode:
+            if direction=="redo" and any(not row.get("undone_at") for row in grouped): raise HTTPException(409,"This change is not undone.")
+            if direction=="undo" and any(row.get("undone_at") for row in grouped): raise HTTPException(409,"This change was already undone.")
+            restored=[]
+            for row in grouped:
+                desired=row["after_state"] if direction=="redo" else row["before_state"]
+                _update("tools",row["tool_id"],desired)
+                _update("changes",row["id"],{"undone_at":None if direction=="redo" else _now(),"undone_by":None if direction=="redo" else account["name"]})
+                restored.append(desired)
+            return {"tools":restored,"group_id":group,"redo":direction=="redo"}
+        response=supabase.rpc("tools_workspace_restore_change_group",{"group_id":group,"actor":account["name"],"redo":direction=="redo"}).execute()
+        return getattr(response,"data",None)
     if _test_mode:
         desired=change["after_state"] if direction=="redo" else change["before_state"]; _update("tools",change["tool_id"],desired)
         _update("changes",change["id"],{"undone_at":None if direction=="redo" else _now(),"undone_by":None if direction=="redo" else account["name"]})
