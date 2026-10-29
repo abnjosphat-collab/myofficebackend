@@ -18,7 +18,7 @@ from app.rate_limit import limiter
 import time as _time
 
 router = APIRouter()
-TABLE = {"accounts":"tools_workspace_accounts","sessions":"tools_workspace_sessions","employees":"tools_workspace_employees","tools":"tools_workspace_equipment","history":"tools_workspace_history","changes":"tools_workspace_changes","evidence":"tools_workspace_evidence","source_registers":"tools_workspace_source_registers","usage":"tools_workspace_usage","errors":"tools_workspace_errors","feedback":"tools_workspace_feedback","notification_reads":"tools_workspace_notification_reads","competencies":"tools_workspace_competencies","inspections":"tools_workspace_inspections","incidents":"tools_workspace_incidents","gate_passes":"tools_workspace_gate_passes","gate_pass_items":"tools_workspace_gate_pass_items","gate_pass_approvals":"tools_workspace_gate_pass_approvals","password_requests":"password_reset_requests","plan":"tools_workspace_inspection_plan","set_members":"tools_workspace_set_members"}
+TABLE = {"accounts":"tools_workspace_accounts","sessions":"tools_workspace_sessions","employees":"tools_workspace_employees","tools":"tools_workspace_equipment","history":"tools_workspace_history","changes":"tools_workspace_changes","evidence":"tools_workspace_evidence","source_registers":"tools_workspace_source_registers","usage":"tools_workspace_usage","errors":"tools_workspace_errors","feedback":"tools_workspace_feedback","notification_reads":"tools_workspace_notification_reads","competencies":"tools_workspace_competencies","inspections":"tools_workspace_inspections","incidents":"tools_workspace_incidents","gate_passes":"tools_workspace_gate_passes","gate_pass_items":"tools_workspace_gate_pass_items","gate_pass_approvals":"tools_workspace_gate_pass_approvals","password_requests":"password_reset_requests","plan":"tools_workspace_inspection_plan","set_members":"tools_workspace_set_members","set_lines":"tools_workspace_set_lines","toolbox_checks":"tools_workspace_toolbox_checks","toolbox_check_items":"tools_workspace_toolbox_check_items"}
 FEEDBACK_BUCKET = "tools-workspace-feedback"
 EVIDENCE_BUCKET = "tools-workspace-evidence"
 SOURCE_REGISTERS_BUCKET = "tools-workspace-source-registers"
@@ -599,6 +599,17 @@ def _active_notifications():
         elif kind=="attention": alerts.append({"key":_notification_key(tool,kind),"kind":kind,"tool_id":tool["id"],"tool_name":tool.get("name","Equipment"),"department":tool.get("department","Engineering")})
         for inspection_type in _inspection_due(tool,None,plan_rows,plan_deferred):
             alerts.append({"key":f"inspection:{tool['id']}:{inspection_type}","kind":"inspection_due","inspection_type":inspection_type,"tool_id":tool["id"],"tool_name":tool.get("name","Equipment"),"department":tool.get("department","Engineering")})
+    current_period,previous_period=_toolbox_periods()
+    submitted={(row.get("set_tool_id"),row.get("period")) for row in _all("toolbox_checks") if row.get("status")=="submitted"}
+    for stored_tool in _all("tools"):
+        tool=_effective_tool(stored_tool)
+        if tool.get("archived") or not tool.get("custody"): continue
+        if not _is_toolbox_set(tool["id"]): continue
+        tid=tool["id"]
+        if (tid,current_period) not in submitted:
+            alerts.append({"key":f"toolbox:{tid}:{current_period}","kind":"toolbox_due","tool_id":tid,"tool_name":tool.get("name","Equipment"),"department":tool.get("department","Engineering"),"period":current_period})
+        if (tid,previous_period) not in submitted:
+            alerts.append({"key":f"toolbox:{tid}:{previous_period}","kind":"toolbox_overdue","tool_id":tid,"tool_name":tool.get("name","Equipment"),"department":tool.get("department","Engineering"),"period":previous_period})
     for incident in _all("incidents"):
         if incident.get("status")=="closed": continue
         due=_parse_datetime(incident.get("investigation_due_at"))
@@ -758,6 +769,10 @@ def create_employee(body:EmployeeInput,account=Depends(_operator)):
 def list_tools(account=Depends(_session)):
     tools=_visible_records("tools",account)
     tool_ids={tool["id"] for tool in tools}
+    line_counts={}; line_pieces={}
+    for line in _all("set_lines"):
+        line_counts[line.get("set_tool_id")]=line_counts.get(line.get("set_tool_id"),0)+1
+        line_pieces[line.get("set_tool_id")]=line_pieces.get(line.get("set_tool_id"),0)+(line.get("qty") or 1)
     tools_by_id={tool["id"]:tool for tool in tools}
     member_ids_by_set={}
     head_by_member={}
@@ -789,6 +804,7 @@ def list_tools(account=Depends(_session)):
             if members: pairs=[(employee,basis) for employee,basis in pairs if all(_eligibility_basis(employee,member,competencies) is not None for member in members)]
         eligible=[{"id":employee["id"],"employee_number":employee["employee_number"],"name":employee["name"],"department":employee["department"],"job_title":employee.get("job_title"),"via_section":basis.split(":",1)[1] if basis.startswith("section:") else None} for employee,basis in pairs]
         extra={"member_ids":member_ids_by_set[tool["id"]]} if tool["id"] in member_ids_by_set else {}
+        if tool["id"] in line_counts: extra={**extra,"line_count":line_counts[tool["id"]],"line_pieces":line_pieces.get(tool["id"],0)}
         head_id=head_by_member.get(tool["id"])
         if head_id: extra={"set_head_id":head_id,"set_head_name":(tools_by_id.get(head_id) or {}).get("name")}
         result.append({**_effective_tool(tool),**extra,"evidence":by_tool.get(tool["id"],[]),"eligible_employees":eligible,"inspection_due":_inspection_due(tool,inspections,plan_rows,plan_deferred),"latest_inspections":_latest_inspections(tool["id"],inspections)})
@@ -859,7 +875,8 @@ def compliance(account=Depends(_session)):
     gate_passes=[_gate_pass_view(item) for item in _all("gate_passes",True) if department is None or item.get("department")==department]
     year,quarter=_quarter_of(today_harare())
     plan=[row for row in _ensure_quarter_plan(year,quarter) if department is None or row.get("tool_id") in tool_ids]
-    return {"competencies":competencies,"inspections":inspections,"incidents":incidents,"gate_passes":gate_passes,"inspection_plan":plan}
+    toolbox=[row for row in _all("toolbox_checks",True) if department is None or (_find("tools","id",row.get("set_tool_id")) or {}).get("department")==department]
+    return {"competencies":competencies,"inspections":inspections,"incidents":incidents,"gate_passes":gate_passes,"inspection_plan":plan,"toolbox_checks":toolbox}
 
 @router.post("/competencies",status_code=201)
 def save_competency(body:CompetencyInput,account=Depends(_operator)):
@@ -1068,6 +1085,71 @@ def issue_tool(tool_id:str,body:IssueInput,account=Depends(_issuer)):
 def return_tool(tool_id:str,body:ReturnInput,account=Depends(_issuer)):
     return _move(tool_id,MovementInput(kind="return",location=body.location,condition=body.condition,notes=body.notes,member_conditions=body.member_conditions),account)
 
+TOOLBOX_STATES=("available","missing","damaged","borrowed","stolen")
+class SetLineInput(BaseModel):
+    name:str=Field(min_length=1,max_length=160); size:Optional[str]=Field(default=None,max_length=40); qty:int=Field(default=1,ge=1,le=500); notes:Optional[str]=Field(default=None,max_length=500)
+class SetLineUpdate(BaseModel):
+    name:Optional[str]=Field(default=None,min_length=1,max_length=160); size:Optional[str]=Field(default=None,max_length=40); qty:Optional[int]=Field(default=None,ge=1,le=500); notes:Optional[str]=Field(default=None,max_length=500)
+class ToolboxOpenInput(BaseModel):
+    set_tool_id:str; period:Optional[str]=None
+class ToolboxItemInput(BaseModel):
+    kind:Literal["member","line"]; ref_id:str; state:Literal["available","missing","damaged","borrowed","stolen"]; qty_found:Optional[int]=None; note:Optional[str]=Field(default="",max_length=2000); how_happened:Optional[str]=Field(default=None,max_length=2000); prevention:Optional[str]=Field(default=None,max_length=2000); follow_up:Optional[str]=Field(default=None,max_length=500)
+class ToolboxSubmitInput(BaseModel):
+    items:list[ToolboxItemInput]=Field(min_length=1,max_length=2000)
+def _set_lines(set_tool_id:str):
+    return [row for row in _all("set_lines") if row.get("set_tool_id")==set_tool_id]
+def _is_toolbox_set(tool_id:str):
+    return _is_set_head(tool_id) or bool(_set_lines(tool_id))
+def _toolbox_periods():
+    today=today_harare()
+    current=f"{today.year:04d}-{today.month:02d}"
+    previous=f"{today.year-1:04d}-12" if today.month==1 else f"{today.year:04d}-{today.month-1:02d}"
+    return current,previous
+def _toolbox_composition(head:dict[str,Any]):
+    return {"members":_set_members(head["id"]),"lines":_set_lines(head["id"])}
+def _toolbox_header(head_id:str,period:str):
+    return next((row for row in _all("toolbox_checks") if row.get("set_tool_id")==head_id and row.get("period")==period),None)
+def _validate_toolbox_items(head:dict[str,Any],items:list[ToolboxItemInput]):
+    members={head["id"]:head}
+    members.update({row["id"]:row for row in _set_members(head["id"])})
+    lines={row["id"]:row for row in _set_lines(head["id"])}
+    seen=set(); normalised=[]
+    for item in items:
+        key=(item.kind,item.ref_id)
+        if key in seen: raise HTTPException(422,"Each piece is checked once.")
+        seen.add(key)
+        if item.kind=="member":
+            target=members.get(item.ref_id)
+            if not target: raise HTTPException(422,"That checklist entry does not belong to this set.")
+            expected=1; snapshot_name=f"{target.get('register_number')} \u00b7 {target.get('name')}"; snapshot_size=None
+        else:
+            target=lines.get(item.ref_id)
+            if not target: raise HTTPException(422,"That checklist entry does not belong to this set.")
+            expected=target.get("qty",1); snapshot_name=target.get("name"); snapshot_size=target.get("size")
+        if item.state not in TOOLBOX_STATES: raise HTTPException(422,"Record each piece as available, missing, damaged, borrowed or stolen.")
+        found=item.qty_found if item.qty_found is not None else (expected if item.state in ("available","damaged") else 0)
+        if found<0 or found>expected: raise HTTPException(422,f"Found count for {snapshot_name} is outside 0 to {expected}.")
+        note=(item.note or "").strip()
+        if item.state!="available" and not note: raise HTTPException(422,f"Give a reason for {snapshot_name}.")
+        how=(item.how_happened or "").strip() or None
+        if item.state in ("damaged","stolen") and not how: raise HTTPException(422,f"Say how {snapshot_name} was damaged." if item.state=="damaged" else f"Say how {snapshot_name} was stolen.")
+        prevention=(item.prevention or "").strip() or None
+        if item.state=="stolen" and not prevention: raise HTTPException(422,f"Say how a repeat theft of {snapshot_name} will be prevented.")
+        follow=(item.follow_up or "").strip() or None
+        normalised.append({"kind":item.kind,"ref_id":item.ref_id,"member_tool_id":item.ref_id if item.kind=="member" else None,"line_id":item.ref_id if item.kind=="line" else None,"name":snapshot_name,"size":snapshot_size,"expected":expected,"found":found,"state":item.state,"note":note,"how":how,"prevention":prevention,"follow":follow})
+    missing=[f"{row.get('register_number')} \u00b7 {row.get('name')}" for row in members.values() if ("member",row["id"]) not in seen]
+    missing+=[row.get("name") for row in lines.values() if ("line",row["id"]) not in seen]
+    if missing: raise HTTPException(422,f"Check every piece before submitting. Missing: {', '.join(missing[:5])}.")
+    return normalised
+def _raise_toolbox_incidents(head:dict[str,Any],holder:Optional[dict[str,Any]],normalised:list[dict[str,Any]],account:dict[str,Any]):
+    mapping={"stolen":"stolen","damaged":"damaged","missing":"lost"}
+    for entry in normalised:
+        if entry["kind"]!="member" or entry["state"] not in mapping: continue
+        incident_type=mapping[entry["state"]]
+        open_same=next((row for row in _all("incidents") if row.get("tool_id")==entry["member_tool_id"] and row.get("incident_type")==incident_type and row.get("status")!="closed"),None)
+        if open_same: continue
+        explanation=f"Monthly toolbox check {head.get('register_number')}: {entry['note']}" + (f" How it happened: {entry['how']}" if entry["how"] else "") + (f" Prevention: {entry['prevention']}" if entry["prevention"] else "")
+        _insert("incidents",{"id":str(uuid.uuid4()),"tool_id":entry["member_tool_id"],"incident_type":incident_type,"occurred_at":_now(),"reported_at":_now(),"reported_by_account_id":account["id"],"reported_by":account["name"],"employee_id":holder.get("id") if holder else None,"explanation":explanation[:2000],"investigation_due_at":(datetime.now(timezone.utc)+timedelta(hours=24)).isoformat(),"status":"open","negligence_confirmed":None,"replacement_cost":None,"recovery_months":None,"investigation_outcome":None,"closed_at":None,"closed_by":None})
 @router.get("/tools/{tool_id}/members")
 def list_set_members(tool_id:str,account=Depends(_session)):
     head=_find("tools","id",tool_id)
@@ -1113,6 +1195,106 @@ def remove_set_member(tool_id:str,member_id:str,account=Depends(_operator)):
     _delete_where("set_members","id",link["id"])
     result=_apply_change(head,head,"members_updated",account["name"],f"Removed {member.get('register_number','a piece')} from the set ({len(_set_members(head['id']))} left)")
     return {"set_tool":result["tool"],"members":_set_members(head["id"])}
+@router.get("/sets/{tool_id}/contents")
+def set_contents(tool_id:str,account=Depends(_session)):
+    head=_find("tools","id",tool_id)
+    if not head: raise HTTPException(404,"Tool was not found.")
+    scope=_department_scope(account)
+    if scope is not None and head.get("department")!=scope: raise HTTPException(403,"This set belongs to another department.")
+    return {"set_tool":head,**_toolbox_composition(head)}
+@router.post("/sets/{tool_id}/lines",status_code=201)
+def add_set_line(tool_id:str,body:SetLineInput,account=Depends(_operator)):
+    """Add a loose content line (name/size/qty) to a set. Lines are checklist entries, never individually tracked tools."""
+    head=_find("tools","id",tool_id)
+    if not head: raise HTTPException(404,"Tool was not found.")
+    _ensure_managed_department(account,head.get("department"))
+    if _member_head_id(tool_id): raise HTTPException(409,"A set member cannot hold its own content lines. Add them to the set head.")
+    line=_insert("set_lines",{"id":str(uuid.uuid4()),"set_tool_id":tool_id,"name":body.name.strip(),"size":(body.size or "").strip() or None,"qty":body.qty,"notes":(body.notes or "").strip() or None,"created_by":account["name"],"created_at":_now()})
+    line_name=line.get("name")
+    _apply_change(head,head,"contents_updated",account["name"],f"Added content line: {line_name}")
+    return {"set_tool":head,"lines":_set_lines(tool_id)}
+@router.patch("/sets/lines/{line_id}")
+def edit_set_line(line_id:str,body:SetLineUpdate,account=Depends(_operator)):
+    line=next((row for row in _all("set_lines") if row.get("id")==line_id),None)
+    if not line: raise HTTPException(404,"That content line was not found.")
+    head=_find("tools","id",line.get("set_tool_id")) or {}
+    _ensure_managed_department(account,head.get("department"))
+    values={}
+    if body.name is not None: values["name"]=body.name.strip()
+    if body.size is not None: values["size"]=body.size.strip() or None
+    if body.qty is not None: values["qty"]=body.qty
+    if body.notes is not None: values["notes"]=body.notes.strip() or None
+    return _update("set_lines",line_id,values)
+@router.delete("/sets/lines/{line_id}")
+def remove_set_line(line_id:str,account=Depends(_operator)):
+    line=next((row for row in _all("set_lines") if row.get("id")==line_id),None)
+    if not line: raise HTTPException(404,"That content line was not found.")
+    head=_find("tools","id",line.get("set_tool_id")) or {}
+    _ensure_managed_department(account,head.get("department"))
+    line_name=line.get("name")
+    _delete_where("set_lines","id",line_id)
+    _apply_change(head,head,"contents_updated",account["name"],f"Removed content line: {line_name}")
+    return {"set_tool":head,"lines":_set_lines(head.get("id"))}
+@router.get("/toolbox-checks")
+def list_toolbox_checks(period:Optional[str]=None,employee_id:Optional[str]=None,state:Optional[str]=None,account=Depends(_session)):
+    """Monthly check headers with per-state exception counts. Filter by period (YYYY-MM), holder, or exception state."""
+    tool_ids={tool["id"] for tool in _visible_records("tools",account)}
+    department=_department_scope(account)
+    if state is not None and state not in TOOLBOX_STATES: raise HTTPException(422,"Filter by available, missing, damaged, borrowed or stolen.")
+    out=[]
+    for row in _all("toolbox_checks",True):
+        head=_find("tools","id",row.get("set_tool_id")) or {}
+        if department is not None and head.get("id") not in tool_ids: continue
+        if period and row.get("period")!=period: continue
+        if employee_id and row.get("holder_employee_id")!=employee_id: continue
+        items=[item for item in _all("toolbox_check_items") if item.get("check_id")==row["id"]]
+        counts={name:sum(1 for item in items if item.get("state")==name) for name in TOOLBOX_STATES}
+        if state and not counts.get(state): continue
+        out.append({**row,"set_register_number":head.get("register_number"),"set_name":head.get("name"),"department":head.get("department"),"item_count":len(items),"exceptions":counts})
+    return out
+@router.get("/toolbox-checks/{check_id}")
+def toolbox_check_detail(check_id:str,account=Depends(_session)):
+    row=_find("toolbox_checks","id",check_id)
+    if not row: raise HTTPException(404,"That toolbox check was not found.")
+    head=_find("tools","id",row.get("set_tool_id")) or {}
+    scope=_department_scope(account)
+    if scope is not None and head.get("department")!=scope: raise HTTPException(403,"That check belongs to another department.")
+    items=[item for item in _all("toolbox_check_items") if item.get("check_id")==check_id]
+    return {"check":{**row,"set_register_number":head.get("register_number"),"set_name":head.get("name"),"department":head.get("department")},"items":items}
+@router.post("/toolbox-checks",status_code=201)
+def open_toolbox_check(body:ToolboxOpenInput,account=Depends(_operator)):
+    """Open this months check for an issued set. Idempotent: re-opening returns the blank checklist again."""
+    head=_find("tools","id",body.set_tool_id)
+    if not head: raise HTTPException(404,"Tool was not found.")
+    _ensure_managed_department(account,head.get("department"))
+    if _member_head_id(head["id"]): raise HTTPException(409,"A set member is checked with its set, never on its own.")
+    if not head.get("custody"): raise HTTPException(409,"Issue this set before opening its monthly check.")
+    current,_previous=_toolbox_periods()
+    period=(body.period or "").strip() or current
+    if len(period)!=7 or period[4]!="-" or not (period[:4]+period[5:]).isdigit(): raise HTTPException(422,"Period looks like YYYY-MM.")
+    existing=_toolbox_header(head["id"],period)
+    if existing: return {"check":existing,**_toolbox_composition(head),"items":[]}
+    custody=head.get("custody") or {}
+    holder=_find("employees","id",custody.get("employee_id")) if custody.get("employee_id") else None
+    header=_insert("toolbox_checks",{"id":str(uuid.uuid4()),"set_tool_id":head["id"],"period":period,"holder_employee_id":holder.get("id") if holder else None,"holder_name":custody.get("employee_name") or "Unknown holder","status":"open","checked_by_account_id":None,"checked_by_name":None,"checked_at":None,"created_at":_now()})
+    return {"check":header,**_toolbox_composition(head),"items":[]}
+@router.post("/toolbox-checks/{check_id}/submit")
+def submit_toolbox_check(check_id:str,body:ToolboxSubmitInput,account=Depends(_operator)):
+    """Submit the months checklist: every member tool and content line exactly once. Damaged, stolen and missing register members raise follow-up incidents (deduped against open ones)."""
+    header=_find("toolbox_checks","id",check_id)
+    if not header: raise HTTPException(404,"That toolbox check was not found.")
+    if header.get("status")=="submitted": raise HTTPException(409,"That months check is already submitted.")
+    head=_find("tools","id",header.get("set_tool_id")) or {}
+    _ensure_managed_department(account,head.get("department"))
+    normalised=_validate_toolbox_items(head,body.items)
+    holder=_find("employees","id",header.get("holder_employee_id")) if header.get("holder_employee_id") else None
+    for entry in normalised:
+        _insert("toolbox_check_items",{"id":str(uuid.uuid4()),"check_id":check_id,"kind":entry["kind"],"member_tool_id":entry["member_tool_id"],"line_id":entry["line_id"],"name_snapshot":entry["name"],"size_snapshot":entry["size"],"qty_expected":entry["expected"],"qty_found":entry["found"],"state":entry["state"],"note":entry["note"],"how_happened":entry["how"],"prevention":entry["prevention"],"follow_up":entry["follow"],"created_at":_now()})
+    _raise_toolbox_incidents(head,holder,normalised,account)
+    done=_update("toolbox_checks",check_id,{"status":"submitted","checked_by_account_id":account["id"],"checked_by_name":account["name"],"checked_at":_now()})
+    period=header.get("period"); holder_label=holder.get("name") if holder else header.get("holder_name")
+    _apply_change(head,head,"toolbox_checked",account["name"],f"Monthly toolbox check {period} submitted for {holder_label}")
+    return {"check":done,"items":[item for item in _all("toolbox_check_items") if item.get("check_id")==check_id]}
 @router.post("/tools/{tool_id}/evidence",status_code=201)
 async def upload_evidence(tool_id:str,files:list[UploadFile]=File(...),account=Depends(_operator)):
     tool=_find("tools","id",tool_id)
