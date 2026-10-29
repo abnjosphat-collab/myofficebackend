@@ -14,6 +14,9 @@ from app.serialization import encode_json_fields, decode_json_fields
 from app.errors import server_error
 import logging
 from datetime import date, datetime
+import re
+
+_CLOCK_TIME = re.compile(r'^([01]\d|2[0-3]):[0-5]\d(:[0-5]\d)?$')
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -91,21 +94,40 @@ class BulkStatusResponse(BaseModel):
 
 class BulkEditUpdate(BaseModel):
     # Bulk field edit. Identity fields (employee_*, position, department),
-    # times/hours, spares and every lifecycle field are deliberately absent:
-    # bulk-overwriting who worked the hours, or flipping approval state without
-    # the signature gate, is never a bulk operation. extra='forbid' so a
-    # mistyped field 422s loudly instead of silently editing nothing.
+    # spares and every lifecycle field are deliberately absent: bulk-overwriting
+    # who worked the hours, or flipping approval state without the signature
+    # gate, is never a bulk operation. Times travel as a pair (a crew's shift
+    # moved together); the endpoint clears any directly-entered hours so the new
+    # times drive them, as a single edit does. extra='forbid' so a mistyped
+    # field 422s loudly instead of silently editing nothing.
     class Config:
         extra = 'forbid'
 
     ids: List[int] = Field(..., min_length=1)
     date: Optional[str] = None
+    start_time: Optional[str] = None
+    end_time: Optional[str] = None
     overtime_type: Optional[str] = None
     planning_status: Optional[str] = None
     payout_method: Optional[str] = None
     cost_centre: Optional[str] = None
     reason: Optional[str] = None
     notes: Optional[str] = None
+
+    @validator('start_time', 'end_time')
+    def validate_clock_time(cls, v):
+        if v is not None and not _CLOCK_TIME.match(v):
+            raise ValueError('Times must be HH:MM, for example 17:30.')
+        return v
+
+    @validator('end_time', always=True)
+    def validate_time_pair(cls, v, values):
+        start = values.get('start_time')
+        if (start is None) != (v is None):
+            raise ValueError('Give both a start and an end time.')
+        if start is not None and start[:5] == v[:5]:
+            raise ValueError('The start and end time are the same, so no hours were worked.')
+        return v
 
 
 class BulkEditResponse(BaseModel):
@@ -351,14 +373,18 @@ async def bulk_edit_overtime(
                 locked = []
             except HTTPException:
                 errors.extend(f"Request #{i} is {status_of.get(i)} — only a manager can change it." for i in locked)
-        if "date" in patch and patch["date"]:
-            # Moving requests to another date must not land them on top of the person's other live requests.
+        if "start_time" in patch:
+            # New times drive the hours, exactly as a single edit that switches to times does.
+            patch["hours"] = None
+        if patch.get("date") or "start_time" in patch:
+            # Moving requests to another date or time must not land them on top of the person's other live requests.
             by_id = {row.get("id"): row for row in existing}
             for i in list(editable):
                 row = by_id.get(i)
                 if not row or str(row.get("status") or "pending").lower() in INACTIVE_STATUSES:
                     continue
-                clash = _overlapping_request(row.get("employee_id"), patch["date"], row.get("start_time"), row.get("end_time"), ignore_id=i)
+                merged = {**row, **{k: patch[k] for k in ("date", "start_time", "end_time") if patch.get(k)}}
+                clash = _overlapping_request(row.get("employee_id"), merged.get("date"), merged.get("start_time"), merged.get("end_time"), ignore_id=i)
                 if clash:
                     editable.remove(i)
                     errors.append(f"Request #{i} was not moved: {conflict_message(clash)}")

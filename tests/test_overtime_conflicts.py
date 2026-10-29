@@ -201,3 +201,31 @@ async def test_bulk_moving_to_a_date_skips_requests_that_would_overlap(fake):
     assert result.succeeded == 0 and result.failed == 1
     assert any("was not moved" in e for e in result.errors)
     assert [c for c in f.calls if c[0] == "update"] == []
+
+
+async def test_bulk_new_times_skip_requests_that_would_overlap_on_their_own_date(fake):
+    # Same person, same day, already approved 18:00-20:00: moving the pending 05:00-07:00 request to 17:00-19:00 clashes.
+    mover = {"id": 5, "employee_id": "PM486", "employee_name": "Reason Muzondo", "date": "2026-03-04", "start_time": "05:00", "end_time": "07:00", "status": "pending"}
+    f = fake([row(211, start="18:00", end="20:00", status="approved")], existing=[mover])
+    result = await bulk_edit_overtime(BulkEditUpdate(ids=[5], start_time="17:00", end_time="19:00"), authorization=None, current_user=USER)
+    assert result.succeeded == 0 and result.failed == 1
+    assert any("was not moved" in e for e in result.errors)
+    assert [c for c in f.calls if c[0] == "update"] == []
+
+
+async def test_bulk_new_times_that_fit_are_saved_and_clear_typed_hours(fake):
+    mover = {"id": 1, "employee_id": "PM486", "employee_name": "Reason Muzondo", "date": "2026-03-04", "start_time": None, "end_time": None, "status": "pending"}
+    f = fake([row(211, start="07:00", end="16:00", status="approved")], existing=[mover])
+    result = await bulk_edit_overtime(BulkEditUpdate(ids=[1], start_time="17:00", end_time="20:00"), authorization=None, current_user=USER)
+    assert result.succeeded == 1 and result.errors == []
+    update = next(c for c in f.calls if c[0] == "update")
+    assert update[1] == {"start_time": "17:00", "end_time": "20:00", "hours": None}
+
+
+async def test_bulk_new_date_and_times_are_checked_together(fake):
+    # Neither the new date alone (old times 05:00-07:00) nor the new times alone (old date) clash; together they do.
+    mover = {"id": 5, "employee_id": "PM486", "employee_name": "Reason Muzondo", "date": "2026-03-10", "start_time": "05:00", "end_time": "07:00", "status": "pending"}
+    f = fake([row(211, date="2026-03-04", start="18:00", end="20:00", status="approved")], existing=[mover])
+    result = await bulk_edit_overtime(BulkEditUpdate(ids=[5], date="2026-03-04", start_time="19:00", end_time="21:00"), authorization=None, current_user=USER)
+    assert result.succeeded == 0 and any("was not moved" in e for e in result.errors)
+    assert [c for c in f.calls if c[0] == "update"] == []

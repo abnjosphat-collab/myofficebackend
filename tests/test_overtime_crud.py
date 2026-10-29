@@ -918,3 +918,24 @@ async def test_get_overtime_by_id_db_error_is_500(patch_supabase):
         await get_overtime_by_id(7)
     assert exc.value.status_code == 500
     assert exc.value.detail.startswith("Loading overtime failed. Please try again. (ref ")
+
+
+async def test_bulk_edit_times_travel_as_a_valid_pair():
+    # One time without the other would leave a request half-moved.
+    with pytest.raises(ValidationError):
+        BulkEditUpdate(ids=[1], start_time="17:00")
+    with pytest.raises(ValidationError):
+        BulkEditUpdate(ids=[1], end_time="20:00")
+    # A zero-length window is no hours at all; a garbled clock time never reaches the database.
+    with pytest.raises(ValidationError):
+        BulkEditUpdate(ids=[1], start_time="17:00", end_time="17:00")
+    with pytest.raises(ValidationError):
+        BulkEditUpdate(ids=[1], start_time="25:00", end_time="20:00")
+    with pytest.raises(ValidationError):
+        BulkEditUpdate(ids=[1], start_time="5pm", end_time="20:00")
+    # Overnight is fine (22:00 -> 06:00 is 8 hours), and so are seconds from a time input.
+    assert BulkEditUpdate(ids=[1], start_time="22:00", end_time="06:00").end_time == "06:00"
+    assert BulkEditUpdate(ids=[1], start_time="17:00:00", end_time="20:30:00").start_time == "17:00:00"
+    # Hours still cannot be bulk-typed directly.
+    with pytest.raises(ValidationError):
+        BulkEditUpdate(ids=[1], hours=3)
