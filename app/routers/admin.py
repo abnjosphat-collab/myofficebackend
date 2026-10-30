@@ -22,6 +22,8 @@ import logging
 from app.supabase_client import supabase, SUPABASE_URL, SUPABASE_KEY
 from app.auth import get_current_user, require_role, ROLE_ORDER, invalidate_user
 from app.db_helpers import fetch_all_pages
+from app.scope import SEPARATE_DEPARTMENTS
+from app.module_access import ROUTER_MODULES
 from app.rate_limit import limiter
 from app.errors import server_error
 
@@ -56,6 +58,15 @@ class SetScopeRequest(BaseModel):
     # The section this account is limited to — must match the section name on
     # the data itself (e.g. "Projects"). Null/"" lifts the limit entirely.
     scope: Optional[str] = None
+    # A department limit instead (e.g. "Mining"): stored as
+    # {"department": name}. Give a section or a department, not both. The
+    # field you name wins; null/"" for it clears the limit. A field you omit
+    # leaves that part of the limit as it is.
+    department: Optional[str] = None
+    # Module hrefs the account may use (e.g. ["/employees", "/ppe"]).
+    # Omitted leaves them as they are; null clears to full module access;
+    # [] is an explicit empty limit (no modules). Unknown hrefs are refused.
+    modules: Optional[list[str]] = None
 
 
 class PasswordResetAsk(BaseModel):
@@ -246,17 +257,33 @@ async def set_user_scope(
     body: SetScopeRequest,
     current_user: dict = Depends(require_role("admin")),
 ):
-    """Limit an account to one section (or lift the limit with null).
+    """Limit an account to one section or department, and/or its modules.
 
-    The limit lives in user_profiles.permissions.scope and is enforced by
-    the server on every scoped read; the account keeps full module access
-    with filtered data. Same self/super_admin guard as every other admin
+    The scope limit lives in user_profiles.permissions.scope and is enforced
+    by the server on every scoped read; modules (default: every module) live
+    in permissions.modules. Same self/super_admin guard as every other admin
     action on a user, and the auth cache is dropped so the change bites on
     the very next request."""
     target = _load_target_for_self_admin_check(user_id)
-    _assert_may_act_on(current_user["role"], current_user["user_id"], target, "limit to a section")
+    _assert_may_act_on(current_user["role"], current_user["user_id"], target, "change the limits of")
 
-    scope = (body.scope or "").strip() or None
+    fields = body.model_fields_set
+    scope: Any = (body.scope or "").strip() or None
+    department = (body.department or "").strip() or None
+    if scope and department:
+        raise HTTPException(status_code=400, detail="Give a section or a department, not both.")
+    if department is not None:
+        if len(department) > 64:
+            raise HTTPException(status_code=400, detail="Department scope is too long (max 64 characters).")
+        canonical = next((s for s in SEPARATE_DEPARTMENTS if s.lower() == department.lower()), None)
+        if canonical is None:
+            raise HTTPException(status_code=400, detail=f"Unknown department '{department}'. Allowed: {', '.join(SEPARATE_DEPARTMENTS)}.")
+        department = canonical
+    if "modules" in fields and body.modules is not None:
+        known = {m for m in ROUTER_MODULES.values() if m}
+        bad = [m for m in body.modules if not isinstance(m, str) or m not in known]
+        if bad:
+            raise HTTPException(status_code=400, detail=f"Unknown module(s): {', '.join(str(b) for b in bad[:5])}.")
     if scope is not None and len(scope) > 64:
         raise HTTPException(status_code=400, detail="Section scope is too long (max 64 characters).")
 
@@ -266,10 +293,21 @@ async def set_user_scope(
         permissions = first_row.get("permissions") or {}
         if not isinstance(permissions, dict):
             permissions = {}
-        if scope is None:
-            permissions.pop("scope", None)
-        else:
-            permissions["scope"] = scope
+        if "scope" in fields or "department" in fields:
+            # The named limit wins; a blank value for it clears the limit.
+            # Assigning through `scope` reuses the legacy tail below, which
+            # stores whatever it holds (section string or department object).
+            if department:
+                scope = {"department": department}
+            if scope is None:
+                permissions.pop("scope", None)
+            else:
+                permissions["scope"] = scope
+        if "modules" in fields:
+            if body.modules is None:
+                permissions.pop("modules", None)
+            else:
+                permissions["modules"] = [m for m in body.modules if isinstance(m, str)]
         result = supabase.table(TABLE).update({
             "permissions": permissions,
             "updated_at": datetime.now(timezone.utc).isoformat(),
@@ -282,7 +320,7 @@ async def set_user_scope(
         raise
     except Exception as e:
         logger.error(f"Error updating scope for {user_id}: {e}")
-        raise server_error(e, "Updating section limit")
+        raise server_error(e, "Updating account limits")
 
 
 @router.post("/users/{user_id}/reset-password")

@@ -20,6 +20,19 @@ class _Resp:
         self.data = data
 
 
+def _or_match(row, expr):
+    for term in str(expr).split(","):
+        term = term.strip()
+        if ".not.in.(" in term:
+            col, rest = term.split(".not.in.(", 1)
+            if row.get(col) not in [v for v in rest.rstrip(")").split(",")]:
+                return True
+        elif term.endswith(".is.null"):
+            if row.get(term[: -len(".is.null")]) is None:
+                return True
+    return False
+
+
 class _FakeQuery:
     def __init__(self, table_name, state):
         self.table_name = table_name
@@ -41,6 +54,12 @@ class _FakeQuery:
     def ilike(self, col, val):
         # The register stamp matches case-insensitively, verified exactly in Python; the fake emulates the composed result.
         self._filters.append((col, val, "ilike"))
+        return self
+
+    def or_(self, expr):
+        # Emulates the composed "not-in OR is-null" exclusion the register
+        # queries use so separate-department rows stay out but NULLs survive.
+        self._filters.append(("__or__", expr))
         return self
 
     def order(self, col, desc=False):
@@ -79,6 +98,8 @@ class _FakeQuery:
             return _Resp([row])
 
         def _hit(row, f):
+            if len(f) == 2 and f[0] == "__or__":
+                return _or_match(row, f[1])
             if len(f) == 2:
                 col, val = f
                 return row.get(col) == val

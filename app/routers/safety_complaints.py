@@ -6,7 +6,7 @@ from typing import Optional, List
 from app.supabase_client import supabase
 from app.auth import get_current_user, require_role
 from app.db_helpers import apply_date_range
-from app.scope import assert_row_visible, filter_rows, stamp_create, viewer_scope
+from app.scope import assert_row_visible, filter_rows, stamp_create, viewer_scope, section_of
 from app.errors import server_error
 import logging
 from datetime import datetime, date
@@ -225,7 +225,7 @@ async def update_complaint(complaint_id: str, payload: SafetyComplaintUpdate, cu
                 # or become the viewer's scope — never anything else.
                 new_section = updates["section"]
                 old_section = found[0].get("section") if found else None
-                if new_section != scope and new_section != old_section:
+                if new_section != section_of(current_user) and new_section != old_section:
                     raise HTTPException(status_code=404, detail="Complaint not found")
         result = supabase.table("safety_complaints").update(updates).eq("id", complaint_id).execute()
         if not result.data:

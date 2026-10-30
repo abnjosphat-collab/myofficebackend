@@ -35,7 +35,7 @@ import httpx
 import json
 import os
 import time
-from typing import Optional
+from typing import Any, Optional
 from app.supabase_client import supabase, SUPABASE_URL, SUPABASE_KEY
 from app.audit import set_actor
 import logging
@@ -239,12 +239,30 @@ def display_name(user) -> str:
     return ' '.join(part.capitalize() for part in local.replace('_', '.').replace('-', '.').split('.') if part)
 
 
+def _parse_limits(payload: Any) -> tuple[Any, Optional[list]]:
+    """Split a get_user_limits_by_id answer into (raw scope, modules).
+
+    Raw scope stays raw (a section string, a {"department": name} object, or
+    None) — app.scope._coerce_scope() normalises it per request. Modules is
+    the stored href list, or None when the account has no module limit. A
+    missing profile row (None payload) is unscoped with no limit.
+    """
+    if not isinstance(payload, dict):
+        return None, None
+    raw = payload.get("scope")
+    if isinstance(raw, str) and not raw.strip():
+        raw = None
+    mods = payload.get("modules")
+    modules = [str(m) for m in mods if isinstance(m, str) and m] if isinstance(mods, list) else None
+    return raw, modules
+
+
 async def get_current_user(authorization: Optional[str] = Header(None)) -> dict:
     """
     Verify the Bearer [REDACTED] and fetch the caller's role and section scope.
     Raises 401 if unauthenticated or the token is invalid/expired.
     Returns {'user_id': str, 'email': str, 'role': str, 'name': str,
-    'scope': Optional[str]} (scope None = not limited to a section).
+    'scope': raw scope (str or dict, None = not limited), 'modules': Optional[list]}
     """
     if not authorization or not authorization.startswith('Bearer '):
         raise HTTPException(status_code=401, detail='Sign in required.')
@@ -315,17 +333,28 @@ async def get_current_user(authorization: Optional[str] = Header(None)) -> dict:
             detail='Could not verify your permissions right now. Please try again in a moment.',
         )
 
-    # Section scope comes from the sibling RPC over
-    # user_profiles.permissions->>'scope' (NULL/empty = not limited). Same
-    # failure contract as the role lookup: an RPC error is a loud retryable
-    # 503 — including a missing function before the Batch 1 migration is
-    # applied — never a silent "unscoped", which would leak cross-section
-    # data to a limited account.
+    # Scope + module limits come from user_profiles.permissions via the
+    # limits RPC ({"scope": raw scope JSON, "modules": [hrefs] or null}).
+    # The raw scope stays raw here (a section string or {"department": name});
+    # app.scope normalises it per request. Fail loud on outage: a 503, never
+    # a silent "unscoped". When only the new function is missing
+    # (a deploy that lands before the Batch 4 SQL), the older string-scope
+    # RPC below is the fallback; modules are then None.
+    modules: Optional[list] = None
     try:
-        scope_resp = await run_in_threadpool(
+        try:
+            limits_resp = (await run_in_threadpool(
+                lambda: supabase.rpc('get_user_limits_by_id', {'user_id': str(user.id)}).execute()
+            )
+            )
+            parsed = _parse_limits(limits_resp.data)
+            scope, modules = parsed
+        except Exception as _first_err:
+            logger.warning(f'Limits lookup failed for {user.id}, trying legacy scope RPC: {_first_err}')
+            scope_resp = await run_in_threadpool(
             lambda: supabase.rpc('get_user_scope_by_id', {'user_id': str(user.id)}).execute()
         )
-        scope = scope_resp.data.strip() if isinstance(scope_resp.data, str) and scope_resp.data.strip() else None
+            scope = scope_resp.data.strip() if isinstance(scope_resp.data, str) and scope_resp.data.strip() else None
     except Exception as e:
         logger.error(f'Scope lookup failed for {user.id}: {e}')
         raise HTTPException(
@@ -333,7 +362,7 @@ async def get_current_user(authorization: Optional[str] = Header(None)) -> dict:
             detail='Could not verify your permissions right now. Please try again in a moment.',
         )
 
-    result = {'user_id': str(user.id), 'email': user.email or '', 'role': role, 'name': display_name(user), 'scope': scope}
+    result = {'user_id': str(user.id), 'email': user.email or '', 'role': role, 'name': display_name(user), 'scope': scope, 'modules': modules}
     # Only verified successes are cached — 401s, 503s and the MFA 401 above
     # raise before reaching here, so failures are never served from cache.
     _store_auth_cache(cache_key, result, mfa_ok)

@@ -34,7 +34,7 @@ from app.documents_support import (
     LIST_COLUMNS, apply_filters, found_inside, get_folder, is_uuid, load_folders, log_activity, relevance, require_upgrade, shown,
 )
 from app.errors import server_error
-from app.scope import assert_row_visible, scope_subtree_ids, viewer_scope
+from app.scope import assert_row_visible, scope_subtree_ids, viewer_scope, scope_value
 from app.supabase_client import supabase
 from app.uploads import read_and_validate_upload
 
@@ -213,7 +213,7 @@ async def upload_document(
     folders = await run_in_threadpool(lambda: load_folders(supabase))
     folder = get_folder(supabase, folder_id.strip(), current_user, folders) if folder_id.strip() else None
     if scope is not None and folder is None:
-        raise HTTPException(status_code=404, detail=f"Choose a folder inside {scope}.")
+        raise HTTPException(status_code=404, detail=f"Choose a folder inside {scope_value(scope)}.")
     try:
         wanted_tags = normalise_tags(t for t in tags.split(","))
     except ValueError as e:
@@ -378,7 +378,7 @@ async def bulk_action(body: BulkAction, current_user: dict = Depends(get_current
         target = body.folder_id or None
         sub = set(scope_subtree_ids(folders, scope)) if scope is not None else set()
         if scope is not None and body.action == "move" and (target is None or target not in sub):
-            raise HTTPException(status_code=404, detail=f"Choose a folder inside {scope}.")
+            raise HTTPException(status_code=404, detail=f"Choose a folder inside {scope_value(scope)}.")
 
         for doc_id in ids:
             doc = rows.get(doc_id)

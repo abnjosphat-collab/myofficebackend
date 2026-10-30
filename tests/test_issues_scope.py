@@ -36,7 +36,7 @@ def _split_top(expr):
 
 
 def _apply_or(rows, expr):
-    """Honour PostgREST or_() filters: ilike search, in.(...) lists, is.null."""
+    """Honour PostgREST or_() filters: ilike search, in.(...) and not.in.(...) lists, is.null."""
     kept = []
     for part in _split_top(expr):
         if ".ilike." in part:
@@ -45,6 +45,15 @@ def _apply_or(rows, expr):
             # the LIKE match; unquoted patterns pass through unchanged.
             term = pat.strip().strip('"').strip("%").lower()
             kept += [r for r in rows if term in str(r.get(col) or "").lower()]
+        elif ".not.in.(" in part:
+            # Before ".in.(": "not.in.(" contains ".in.(" as a substring.
+            col, rest = part.split(".not.in.(", 1)
+            try:
+                vals = json.loads("[" + rest.rstrip(")") + "]")
+            except json.JSONDecodeError:
+                # Unquoted values (department.not.in.(Mining)): raw strings.
+                vals = [v for v in rest.rstrip(")").split(",")]
+            kept += [r for r in rows if r.get(col) not in vals]
         elif ".in.(" in part:
             col, rest = part.split(".in.(", 1)
             vals = json.loads("[" + rest.rstrip(")") + "]")

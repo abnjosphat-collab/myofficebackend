@@ -77,14 +77,16 @@ def db():
 
 
 def test_viewer_scope_reads_top_level_first_and_tolerates_old_sessions():
-    assert viewer_scope(SCOPED) == "Projects"
+    assert viewer_scope(SCOPED) == {"kind": "section", "value": "Projects"}
     assert viewer_scope(UNSCOPED) is None
     assert viewer_scope(LEGACY) is None
     assert viewer_scope(None) is None
     assert viewer_scope({"role": "user", "permissions": {"scope": ""}}) is None
     # Raw profile rows (permissions nested, no top-level key) still resolve.
-    assert viewer_scope({"role": "user", "permissions": {"scope": "Projects"}}) == "Projects"
-    assert viewer_scope({"role": "user", "scope": "", "permissions": {"scope": "Projects"}}) == "Projects"
+    assert viewer_scope({"role": "user", "permissions": {"scope": "Projects"}}) == {"kind": "section", "value": "Projects"}
+    assert viewer_scope({"role": "user", "scope": "", "permissions": {"scope": "Projects"}}) == {"kind": "section", "value": "Projects"}
+    # A department-shaped scope resolves to the department kind.
+    assert viewer_scope({"role": "user", "permissions": {"scope": {"kind": "department", "value": "Mining"}}}) == {"kind": "department", "value": "Mining"}
 
 
 def test_registry_covers_the_batch_0_inventory():
@@ -270,6 +272,27 @@ def test_stamp_create_validates_the_parent(db):
     assert out["inspection_id"] == 41
     with pytest.raises(HTTPException):
         stamp_create(SCOPED, "sheq_findings", {"inspection_id": 42}, db)
+
+
+def test_coerce_scope_accepts_every_stored_shape():
+    from app.scope import _coerce_scope
+    assert _coerce_scope("Projects") == {"kind": "section", "value": "Projects"}
+    assert _coerce_scope("  Mechanical  ") == {"kind": "section", "value": "Mechanical"}
+    assert _coerce_scope({"department": "Mining"}) == {"kind": "department", "value": "Mining"}
+    assert _coerce_scope({"department": "  Mining "}) == {"kind": "department", "value": "Mining"}
+    assert _coerce_scope({"section": "Projects"}) == {"kind": "section", "value": "Projects"}
+    assert _coerce_scope({"kind": "department", "value": "Mining"}) == {"kind": "department", "value": "Mining"}
+    assert _coerce_scope({"kind": "section", "value": "Projects"}) == {"kind": "section", "value": "Projects"}
+    # Anything else is not a limit.
+    for bad in (None, "", "   ", {}, {"department": ""}, {"department": 42},
+                {"kind": "department"}, {"kind": "mine", "value": "Mining"},
+                {"section": "Projects", "extra": 1}, {"department": "Mining", "kind": "x"},
+                42, ["Mining"]):
+        assert _coerce_scope(bad) is None, bad
+    assert viewer_scope({"role": "user", "permissions": {"scope": {"department": "Mining"}}}) == \
+        {"kind": "department", "value": "Mining"}
+    assert viewer_scope({"role": "user", "scope": {"department": "Mining"}}) == \
+        {"kind": "department", "value": "Mining"}
 
 
 def test_every_registry_entry_names_a_known_rule():

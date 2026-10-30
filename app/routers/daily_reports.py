@@ -13,7 +13,7 @@ import os
 from dotenv import load_dotenv
 import traceback
 from app.supabase_client import rows, one_row
-from app.scope import apply_list_scope, assert_row_visible, stamp_create, viewer_scope
+from app.scope import apply_list_scope, assert_row_visible, stamp_create, viewer_scope, section_of
 from app.errors import server_error
 
 # Load environment variables
@@ -187,10 +187,13 @@ async def create_report(report: DailyReportCreate, current_user: dict = Depends(
         if existing_row:
             # Update existing
             scope = viewer_scope(current_user)
-            if scope is not None:
+            section = section_of(current_user)
+            if scope is not None and section is None:
+                raise HTTPException(status_code=404, detail="Daily report not found")
+            if section is not None:
                 if report_data.get("section") is None:
-                    report_data["section"] = scope
-                elif report_data["section"] != scope:
+                    report_data["section"] = section
+                elif report_data["section"] != section:
                     raise HTTPException(status_code=404, detail="Daily report not found")
             report_data['updated_at'] = now
             _up_q = supabase.table("daily_reports").update(report_data).eq("date", report.date)

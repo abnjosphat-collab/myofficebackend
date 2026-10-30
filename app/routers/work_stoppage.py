@@ -10,7 +10,7 @@ from app.supabase_client import supabase, rows, one_row
 from app.auth import get_current_user, require_role
 from app.aggregation import count_by
 from app.db_helpers import get_or_404, apply_date_range, or_ilike, distinct_suggestions, status_choice_validator
-from app.scope import apply_list_scope, assert_row_visible, stamp_create, viewer_scope
+from app.scope import apply_list_scope, assert_row_visible, stamp_create, viewer_scope, scope_value, scope_section
 from app.errors import server_error
 import logging
 from datetime import datetime
@@ -458,7 +458,7 @@ async def get_stats(current_user: dict = Depends(get_current_user)):
         actions = rows(actions_response)
         scope = viewer_scope(current_user)
         if scope is not None:
-            reports = [r for r in reports if r.get("section") == scope]
+            reports = [r for r in reports if r.get("section") == scope_value(scope)]
             visible_ids = {r.get("id") for r in reports}
             actions = [a for a in actions if a.get("report_id") in visible_ids]
         
@@ -471,8 +471,9 @@ async def get_stats(current_user: dict = Depends(get_current_user)):
             "Electrical": 0,
             "General": 0
         }
-        if scope is not None and scope not in by_section:
-            by_section[scope] = 0
+        section = scope_section(scope)
+        if section is not None and section not in by_section:
+            by_section[section] = 0
         
         # Count by inspector
         by_inspector = count_by((r.get("stoppage_by") for r in reports if r.get("stoppage_by")), lambda name: name)

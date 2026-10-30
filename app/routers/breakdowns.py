@@ -13,7 +13,7 @@ from app.cache import cached, cache_get, cache_set, build_key, invalidate_namesp
 from app.serialization import encode_json_fields, decode_json_fields
 from app.supabase_client import rows, one_row
 from app.db_helpers import fetch_all_pages
-from app.scope import apply_list_scope, assert_row_visible, stamp_create, viewer_scope
+from app.scope import apply_list_scope, assert_row_visible, stamp_create, viewer_scope, scope_value
 from app.errors import server_error
 from app.clock import today_harare, week_start_harare
 from app.breakdown_links import (
@@ -637,7 +637,7 @@ async def get_dashboard_overview(current_user: Optional[dict] = Depends(get_curr
         records = rows(response)
         scope = viewer_scope(current_user)
         if scope is not None:
-            records = [r for r in records if r.get("section") == scope]
+            records = [r for r in records if r.get("section") == scope_value(scope)]
         
         total = len(records)
         open_count = sum(1 for r in records if r.get('status') in ['logged', 'in_progress'])
