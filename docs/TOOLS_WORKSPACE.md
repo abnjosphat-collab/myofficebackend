@@ -1,6 +1,6 @@
-# Tools & Equipment backend contract
+# Tools backend contract
 
-`app/routers/tools_workspace.py` is the API for the standalone `/tools` workspace. `supabase_migration_tools_workspace.sql` contains the complete schema and atomic change RPCs. Incremental production changes remain in separately named migrations.
+`app/routers/tools_workspace.py` is the API for the standalone `/tools` workspace (`app/routers/tools_workspace_set_types.py` adds set types, physical sets and per-piece flows on the same prefix). `supabase_migration_tools_workspace.sql` contains the complete schema and atomic change RPCs. Incremental production changes remain in separately named migrations.
 
 ## Business rules
 
@@ -22,6 +22,7 @@
 - Saving a quick tool-specific eligibility decision updates only the supplied fields and preserves existing certificate references, qualification references, expiry dates and notes.
 - Browser audio codec parameters are normalized before storage so recorded feedback remains playable across supported browsers.
 - Flexible equipment specifications are stored in `tools_workspace_equipment.specifications`; custody can retain multiple `assigned_equipment` names and a free-text work location.
+- Sets are entered once as rows in `tools_workspace_set_types` (+ `tools_workspace_set_type_lines`), then made as ordinary equipment rows with `set_type_id` and numbered pieces in `tools_workspace_set_lines` (`line_no`, unique `piece_number` like SET-03/017, condition, status). `POST /tools/{id}/members` answers 410; GET/DELETE stay for old tabs. Issuing to several people, per-piece return and piece edits are atomic per set with per-person idempotency keys.
 
 ## Verification
 

@@ -1,4 +1,6 @@
 """Monthly toolbox checks: set content lines and per-person monthly verification."""
+import uuid
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -55,8 +57,10 @@ def make_eligible(auth, employee, tool):
 
 
 def make_set(auth, head, members=(), lines=()):
+    # Member linking through the API is retired (POST answers 410); legacy
+    # links are rows in the table, so tests build them directly.
     for member in members:
-        assert client.post(f"/api/tools-workspace/tools/{head['id']}/members", headers=auth, json={"member_ids": [member["id"]]}).status_code == 201
+        tools_workspace._insert("set_members", {"id": str(uuid.uuid4()), "set_tool_id": head["id"], "member_tool_id": member["id"], "qty": 1, "created_by": "tests", "created_at": tools_workspace._now()})
     for name, size, qty in lines:
         assert client.post(f"/api/tools-workspace/sets/{head['id']}/lines", headers=auth, json={"name": name, "size": size, "qty": qty}).status_code == 201
 
