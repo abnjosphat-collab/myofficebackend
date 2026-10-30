@@ -1,4 +1,6 @@
 """Tool sets: a set head fans a loan out to its members as one atomic movement."""
+import uuid
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -59,9 +61,11 @@ def make_eligible_and_current(admin_auth, employee, tool):
 
 
 def make_set(admin_auth, head, members):
-    response = client.post(f"/api/tools-workspace/tools/{head['id']}/members", headers=admin_auth, json={"member_ids": [member["id"] for member in members]})
-    assert response.status_code == 201
-    return response.json()
+    # Member linking through the API is retired (POST answers 410); legacy
+    # links are rows in the table, so tests build them directly.
+    for member in members:
+        tools_workspace._insert("set_members", {"id": str(uuid.uuid4()), "set_tool_id": head["id"], "member_tool_id": member["id"], "qty": 1, "created_by": "tests", "created_at": tools_workspace._now()})
+    return client.get(f"/api/tools-workspace/tools/{head['id']}/members", headers=admin_auth).json()
 
 
 def test_set_forms_lists_members_and_intersects_eligibility():
@@ -137,39 +141,43 @@ def test_partial_ineligibility_blocks_the_whole_set():
     assert "T-2" in refused.json()["detail"]
 
 
-def test_set_membership_guards():
+def test_member_link_endpoint_is_retired_but_reads_and_removals_stay():
+    admin, token = admin_and_issuer()
+    admin_auth = {"Authorization": f"Bearer {admin}"}
+    head = make_tool(admin_auth, "SET-1", "Gedore set")
+    first = make_tool(admin_auth, "T-1", "Spanner")
+    # New links are refused with a plain sentence, even for valid tools.
+    refused = client.post(f"/api/tools-workspace/tools/{head['id']}/members", headers=admin_auth, json={"member_ids": [first["id"]]})
+    assert refused.status_code == 410
+    assert "set type" in refused.json()["detail"]
+    assert client.post(f"/api/tools-workspace/tools/missing/members", headers=admin_auth, json={"member_ids": [first["id"]]}).status_code == 404
+    # Reading and removing legacy links still works for old browser tabs.
+    make_set(admin_auth, head, [first])
+    assert client.get(f"/api/tools-workspace/tools/{head['id']}/members", headers=admin_auth).json()["members"][0]["id"] == first["id"]
+    removed = client.delete(f"/api/tools-workspace/tools/{head['id']}/members/{first['id']}", headers=admin_auth)
+    assert removed.status_code == 200
+    assert removed.json()["members"] == []
+
+
+def test_legacy_links_still_guard_loans_archives_and_gate_passes():
     admin, token = admin_and_issuer()
     admin_auth = {"Authorization": f"Bearer {admin}"}
     auth = {"Authorization": f"Bearer {token}"}
     holder = make_employee(admin_auth, "E-1")
     head = make_tool(admin_auth, "SET-1", "Gedore set")
     first = make_tool(admin_auth, "T-1", "Spanner")
-    second = make_tool(admin_auth, "T-2", "Ratchet")
-    other_head = make_tool(admin_auth, "SET-2", "Other set")
-    for tool in (head, first, second):
-        make_eligible_and_current(admin_auth, holder, tool)
+    for tool in (head, first):
+        competency = client.post("/api/tools-workspace/competencies", headers=admin_auth, json={"employee_id": holder["id"], "tool_id": tool["id"], "trained": True, "qualified": True, "authorized": True})
+        assert competency.status_code == 201
     make_set(admin_auth, head, [first])
-    # Double membership and nesting are refused.
-    assert client.post(f"/api/tools-workspace/tools/{other_head['id']}/members", headers=admin_auth, json={"member_ids": [first["id"]]}).status_code == 409
-    assert client.post(f"/api/tools-workspace/tools/{head['id']}/members", headers=admin_auth, json={"member_ids": [head["id"]]}).status_code == 422
-    assert client.post(f"/api/tools-workspace/tools/{first['id']}/members", headers=admin_auth, json={"member_ids": [second["id"]]}).status_code == 409
-    # A member on loan cannot join, and joined members block archiving.
-    client.post(f"/api/tools-workspace/tools/{second['id']}/issue", headers=auth, json={"employee_id": holder["id"], "location": "Pit"})
-    assert client.post(f"/api/tools-workspace/tools/{head['id']}/members", headers=admin_auth, json={"member_ids": [second["id"]]}).status_code == 409
-    assert client.post(f"/api/tools-workspace/tools/{head['id']}/archive", headers=admin_auth).status_code == 409
-    assert client.post(f"/api/tools-workspace/tools/{first['id']}/archive", headers=admin_auth).status_code == 409
-    # Membership cannot change while the set is out, then removal works back home.
-    client.post(f"/api/tools-workspace/tools/{head['id']}/issue", headers=auth, json={"employee_id": holder["id"], "location": "Pit"})
-    assert client.delete(f"/api/tools-workspace/tools/{head['id']}/members/{first['id']}", headers=admin_auth).status_code == 409
-    client.post(f"/api/tools-workspace/tools/{head['id']}/return", headers=auth, json={"location": "Workshop", "condition": "Good"})
-    removed = client.delete(f"/api/tools-workspace/tools/{head['id']}/members/{first['id']}", headers=admin_auth)
-    assert removed.status_code == 200
-    assert removed.json()["members"] == []
-    # A lone set member cannot ride a gate pass; the whole set must move.
-    make_set(admin_auth, head, [first])
+    # A legacy member still cannot move alone, and a lone member cannot ride a gate pass.
+    assert client.post(f"/api/tools-workspace/tools/{first['id']}/issue", headers=auth, json={"employee_id": holder["id"], "location": "Pit"}).status_code == 409
     refused_pass = client.post("/api/tools-workspace/gate-passes", headers=admin_auth, json={"movement_scope": "internal", "department": "Engineering", "destination": "Shaft", "purpose": "Day shift", "expected_out_at": "2030-01-02T08:00:00Z", "tool_ids": [first["id"]]})
     assert refused_pass.status_code == 409
     assert "whole set" in refused_pass.json()["detail"]
+    # Archiving is blocked while the legacy link exists.
+    assert client.post(f"/api/tools-workspace/tools/{head['id']}/archive", headers=admin_auth).status_code == 409
+    assert client.post(f"/api/tools-workspace/tools/{first['id']}/archive", headers=admin_auth).status_code == 409
 
 
 def test_set_issue_undo_redo_restores_every_member():

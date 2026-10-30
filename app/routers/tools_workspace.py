@@ -18,7 +18,7 @@ from app.rate_limit import limiter
 import time as _time
 
 router = APIRouter()
-TABLE = {"accounts":"tools_workspace_accounts","sessions":"tools_workspace_sessions","employees":"tools_workspace_employees","tools":"tools_workspace_equipment","history":"tools_workspace_history","changes":"tools_workspace_changes","evidence":"tools_workspace_evidence","source_registers":"tools_workspace_source_registers","usage":"tools_workspace_usage","errors":"tools_workspace_errors","feedback":"tools_workspace_feedback","notification_reads":"tools_workspace_notification_reads","competencies":"tools_workspace_competencies","inspections":"tools_workspace_inspections","incidents":"tools_workspace_incidents","gate_passes":"tools_workspace_gate_passes","gate_pass_items":"tools_workspace_gate_pass_items","gate_pass_approvals":"tools_workspace_gate_pass_approvals","password_requests":"password_reset_requests","plan":"tools_workspace_inspection_plan","set_members":"tools_workspace_set_members","set_lines":"tools_workspace_set_lines","toolbox_checks":"tools_workspace_toolbox_checks","toolbox_check_items":"tools_workspace_toolbox_check_items"}
+TABLE = {"accounts":"tools_workspace_accounts","sessions":"tools_workspace_sessions","employees":"tools_workspace_employees","tools":"tools_workspace_equipment","history":"tools_workspace_history","changes":"tools_workspace_changes","evidence":"tools_workspace_evidence","source_registers":"tools_workspace_source_registers","usage":"tools_workspace_usage","errors":"tools_workspace_errors","feedback":"tools_workspace_feedback","notification_reads":"tools_workspace_notification_reads","competencies":"tools_workspace_competencies","inspections":"tools_workspace_inspections","incidents":"tools_workspace_incidents","gate_passes":"tools_workspace_gate_passes","gate_pass_items":"tools_workspace_gate_pass_items","gate_pass_approvals":"tools_workspace_gate_pass_approvals","password_requests":"password_reset_requests","plan":"tools_workspace_inspection_plan","set_members":"tools_workspace_set_members","set_lines":"tools_workspace_set_lines","toolbox_checks":"tools_workspace_toolbox_checks","toolbox_check_items":"tools_workspace_toolbox_check_items","set_types":"tools_workspace_set_types","set_type_lines":"tools_workspace_set_type_lines","idempotency":"tools_workspace_idempotency"}
 FEEDBACK_BUCKET = "tools-workspace-feedback"
 EVIDENCE_BUCKET = "tools-workspace-evidence"
 SOURCE_REGISTERS_BUCKET = "tools-workspace-source-registers"
@@ -794,6 +794,15 @@ def list_tools(account=Depends(_session)):
                 row["url"]=signed.get("signedURL") or signed.get("signedUrl")
             except Exception: row["url"]=None
         by_tool.setdefault(item["tool_id"],[]).append(row)
+    type_by_id={row["id"]:row for row in _all("set_types")} if any(tool.get("set_type_id") for tool in tools) else {}
+    pieces_by_set:dict[str,list[dict[str,Any]]]={}
+    if type_by_id:
+        for line in _all("set_lines"):
+            sid=line.get("set_tool_id")
+            if sid in tool_ids:
+                pieces_by_set.setdefault(str(sid),[]).append({"id":line.get("id"),"line_no":line.get("line_no"),"piece_number":line.get("piece_number"),"name":line.get("name"),"size":line.get("size"),"condition":line.get("condition") or "Good","status":line.get("status") or "present"})
+        for value in pieces_by_set.values():
+            value.sort(key=lambda item:(item.get("line_no") or 0,item.get("piece_number") or ""))
     result=[]
     for tool in tools:
         pairs=[(employee,_eligibility_basis(employee,tool,competencies)) for employee in employees]
@@ -807,6 +816,9 @@ def list_tools(account=Depends(_session)):
         if tool["id"] in line_counts: extra={**extra,"line_count":line_counts[tool["id"]],"line_pieces":line_pieces.get(tool["id"],0)}
         head_id=head_by_member.get(tool["id"])
         if head_id: extra={"set_head_id":head_id,"set_head_name":(tools_by_id.get(head_id) or {}).get("name")}
+        if tool.get("set_type_id") and tool["id"] in pieces_by_set:
+            set_type=type_by_id.get(tool.get("set_type_id")) or {}
+            extra={**extra,"set_type_id":tool.get("set_type_id"),"set_type_title":set_type.get("title"),"pieces":pieces_by_set[tool["id"]]}
         result.append({**_effective_tool(tool),**extra,"evidence":by_tool.get(tool["id"],[]),"eligible_employees":eligible,"inspection_due":_inspection_due(tool,inspections,plan_rows,plan_deferred),"latest_inspections":_latest_inspections(tool["id"],inspections)})
     return result
 @router.get("/tools/trade-section-suggestion")
@@ -860,6 +872,9 @@ def mark_tool_ready(tool_id:str,body:MarkReadyInput,account=Depends(_operator)):
     if _is_set_head(tool_id):
         unfit=[member.get("register_number") for member in _set_members(tool_id) if member.get("status")!="available" or _needs_attention(member)]
         if unfit: raise HTTPException(409,f"Mark each damaged member ready first: {', '.join(unfit)}.")
+    if tool.get("set_type_id"):
+        unfit=[piece.get("piece_number") or piece.get("name") for piece in _set_lines(tool_id) if piece.get("status")!="present" or (piece.get("condition") or "Good")!="Good"]
+        if unfit: raise HTTPException(409,f"Mark each piece ready first: {', '.join(str(item) for item in unfit)}.")
     note=body.resolution_note.strip()
     after={**tool,"status":"available","condition":"Good","notes":note}
     return _apply_change(tool,after,"released",account["name"],f"Marked ready for use: {note}")["tool"]
@@ -1137,15 +1152,32 @@ def _validate_toolbox_items(head:dict[str,Any],items:list[ToolboxItemInput]):
         if item.state=="stolen" and not prevention: raise HTTPException(422,f"Say how a repeat theft of {snapshot_name} will be prevented.")
         follow=(item.follow_up or "").strip() or None
         normalised.append({"kind":item.kind,"ref_id":item.ref_id,"member_tool_id":item.ref_id if item.kind=="member" else None,"line_id":item.ref_id if item.kind=="line" else None,"name":snapshot_name,"size":snapshot_size,"expected":expected,"found":found,"state":item.state,"note":note,"how":how,"prevention":prevention,"follow":follow})
-    missing=[f"{row.get('register_number')} \u00b7 {row.get('name')}" for row in members.values() if ("member",row["id"]) not in seen]
+    member_tools=[row for row in members.values() if row["id"]!=head["id"]]
+    missing=[f"{row.get('register_number')} \u00b7 {row.get('name')}" for row in member_tools if ("member",row["id"]) not in seen]
+    if member_tools and ("member",head["id"]) not in seen:
+        missing=[f"{head.get('register_number')} \u00b7 {head.get('name')}"]+missing
     missing+=[row.get("name") for row in lines.values() if ("line",row["id"]) not in seen]
-    if missing: raise HTTPException(422,f"Check every piece before submitting. Missing: {', '.join(missing[:5])}.")
+    if missing: raise HTTPException(422,f"Check every piece before submitting. Missing: {', '.join(str(item) for item in missing[:5])}.")
     return normalised
 def _raise_toolbox_incidents(head:dict[str,Any],holder:Optional[dict[str,Any]],normalised:list[dict[str,Any]],account:dict[str,Any]):
     mapping={"stolen":"stolen","damaged":"damaged","missing":"lost"}
     for entry in normalised:
-        if entry["kind"]!="member" or entry["state"] not in mapping: continue
+        if entry["state"] not in mapping: continue
         incident_type=mapping[entry["state"]]
+        if entry["kind"]=="line":
+            piece=next((row for row in _all("set_lines") if row.get("id")==entry["line_id"]),None)
+            if not piece: continue
+            number=piece.get("piece_number") or entry["name"]
+            open_same=next((row for row in _all("incidents") if row.get("tool_id")==head["id"] and row.get("incident_type")==incident_type and row.get("status")!="closed" and number in (row.get("explanation") or "")),None)
+            if open_same: continue
+            values={"updated_at":_now()}
+            if entry["state"]=="damaged": values.update(status="damaged",condition="Damaged")
+            else: values.update(status="missing")
+            _update("set_lines",piece["id"],values)
+            explanation=f"Monthly toolbox check {head.get('register_number')}: piece {number} ({entry['name']}) {entry['state']}: {entry['note']}" + (f" How it happened: {entry['how']}" if entry["how"] else "") + (f" Prevention: {entry['prevention']}" if entry["prevention"] else "")
+            _insert("incidents",{"id":str(uuid.uuid4()),"tool_id":head["id"],"incident_type":incident_type,"occurred_at":_now(),"reported_at":_now(),"reported_by_account_id":account["id"],"reported_by":account["name"],"employee_id":holder.get("id") if holder else None,"explanation":explanation[:2000],"investigation_due_at":(datetime.now(timezone.utc)+timedelta(hours=24)).isoformat(),"status":"open","negligence_confirmed":None,"replacement_cost":None,"recovery_months":None,"investigation_outcome":None,"closed_at":None,"closed_by":None})
+            continue
+        if entry["kind"]!="member": continue
         open_same=next((row for row in _all("incidents") if row.get("tool_id")==entry["member_tool_id"] and row.get("incident_type")==incident_type and row.get("status")!="closed"),None)
         if open_same: continue
         explanation=f"Monthly toolbox check {head.get('register_number')}: {entry['note']}" + (f" How it happened: {entry['how']}" if entry["how"] else "") + (f" Prevention: {entry['prevention']}" if entry["prevention"] else "")
@@ -1159,30 +1191,10 @@ def list_set_members(tool_id:str,account=Depends(_session)):
     return {"set_tool":head,"members":_set_members(tool_id)}
 @router.post("/tools/{tool_id}/members",status_code=201)
 def add_set_members(tool_id:str,body:SetMembersInput,account=Depends(_operator)):
-    """Form a set: link available same-department tools to a set head. The head and every member must be off-loan; members must be fit to issue; no nesting and no double membership."""
+    """Retired: sets are made from a set type now, not by linking register tools. Reading and removing old links still works."""
     head=_find("tools","id",tool_id)
     if not head: raise HTTPException(404,"Tool was not found.")
-    _ensure_managed_department(account,head.get("department"))
-    if head.get("archived"): raise HTTPException(409,"Restore this tool before building a set on it.")
-    if head.get("custody"): raise HTTPException(409,"Receive this set back before changing its members.")
-    if _member_head_id(tool_id): raise HTTPException(409,"A set cannot hold another set.")
-    picked=[]
-    for member_id in list(dict.fromkeys(body.member_ids)):
-        member=_find("tools","id",member_id)
-        if not member: raise HTTPException(404,"One of the selected tools was not found.")
-        if member["id"]==head["id"]: raise HTTPException(422,"A set cannot hold itself.")
-        if member.get("department")!=head.get("department"): raise HTTPException(409,f"{member.get('register_number')} belongs to another department.")
-        if member.get("archived"): raise HTTPException(409,f"{member.get('register_number')} is archived.")
-        if member.get("custody"): raise HTTPException(409,f"{member.get('register_number')} is on loan. Receive it back first.")
-        if member.get("status")!="available" or _needs_attention(member): raise HTTPException(409,f"{member.get('register_number')} is not fit to join a set.")
-        if _member_head_id(member["id"]): raise HTTPException(409,f"{member.get('register_number')} already belongs to a set.")
-        if _is_set_head(member["id"]): raise HTTPException(409,f"{member.get('register_number')} is itself a set head.")
-        picked.append(member)
-    for member in picked:
-        _insert("set_members",{"id":str(uuid.uuid4()),"set_tool_id":head["id"],"member_tool_id":member["id"],"qty":1,"created_by":account["name"],"created_at":_now()})
-    names=", ".join(member.get("register_number") for member in picked)
-    result=_apply_change(head,head,"members_updated",account["name"],f"Set now holds {len(_set_members(head['id']))} piece(s): {names}")
-    return {"set_tool":result["tool"],"members":_set_members(head["id"])}
+    raise HTTPException(410,"Sets are made from a set type now. Add a set from the register instead of linking tools.")
 @router.delete("/tools/{tool_id}/members/{member_id}")
 def remove_set_member(tool_id:str,member_id:str,account=Depends(_operator)):
     head=_find("tools","id",tool_id)
@@ -1234,7 +1246,7 @@ def remove_set_line(line_id:str,account=Depends(_operator)):
     line_name=line.get("name")
     _delete_where("set_lines","id",line_id)
     _apply_change(head,head,"contents_updated",account["name"],f"Removed content line: {line_name}")
-    return {"set_tool":head,"lines":_set_lines(head.get("id"))}
+    return {"set_tool":head,"lines":_set_lines(str(head.get("id")))}
 @router.get("/toolbox-checks")
 def list_toolbox_checks(period:Optional[str]=None,employee_id:Optional[str]=None,state:Optional[str]=None,account=Depends(_session)):
     """Monthly check headers with per-state exception counts. Filter by period (YYYY-MM), holder, or exception state."""
