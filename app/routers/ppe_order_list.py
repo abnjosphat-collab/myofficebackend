@@ -8,9 +8,9 @@ Table: `ppe_order_list` (see supabase_migration_shared_lists.sql).
 """
 import logging
 import re
-from typing import Any, List, Literal, cast
+from typing import Any, List, Literal, Optional, cast
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 from starlette.concurrency import run_in_threadpool
 
@@ -18,7 +18,7 @@ from app.auth import get_current_user
 from app.db_helpers import fetch_all_pages
 from app.supabase_client import supabase
 from app.errors import server_error
-from app.scope import assert_row_visible, filter_rows, person_ids_for, row_visible, viewer_scope
+from app.scope import assert_row_visible, filter_rows, person_ids_for, row_visible, unscoped_separate_filter, viewer_scope
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -70,7 +70,7 @@ class PatchLine(BaseModel):
 
 
 @router.patch("/{record_id}")
-async def update_order_line(record_id: str, body: PatchLine, current_user: dict = Depends(get_current_user)):
+async def update_order_line(record_id: str, body: PatchLine, department: Optional[str] = Query(None), current_user: dict = Depends(get_current_user)):
     """Change a line's quantity, size or note. Kind/source only graduate a legacy line (stored without kind);
     anything else is refused. Read-modify-write with no guard: simultaneous edits last-write-wins."""
     try:
@@ -83,6 +83,11 @@ async def update_order_line(record_id: str, body: PatchLine, current_user: dict 
     rows = found.data or []
     if not rows:
         raise HTTPException(status_code=404, detail="That order line is not on the list.")
+    if viewer_scope(current_user) is None:
+        # Unscoped: a Mining line is not on your list without ?department=Mining.
+        rows = unscoped_separate_filter(supabase, current_user, department, rows, _line_person)
+        if not rows:
+            raise HTTPException(status_code=404, detail="That order line is not on the list.")
     first = rows[0] if isinstance(rows[0], dict) else {}
     if viewer_scope(current_user) is not None:
         assert_row_visible(current_user, TABLE, first, supabase,
@@ -108,6 +113,14 @@ class RemoveLines(BaseModel):
     record_ids: List[str] = Field(..., max_length=MAX_LINES_PER_REQUEST)
 
 
+def _line_person(row: dict) -> Any:
+    """The register id on an order line (inside its JSON entry). Non-dict
+    rows or entries have no person: they stay Engineering (never hidden by
+    default, never in a separate-department slice)."""
+    entry = row.get("entry") if isinstance(row, dict) else None
+    return entry.get("employee_id") if isinstance(entry, dict) else None
+
+
 def _entry_of(row: dict[str, Any]) -> dict[str, Any]:
     """The line as the page wants it: the stored entry, with the time it was added."""
     entry = dict(row.get("entry") or {})
@@ -118,7 +131,7 @@ def _entry_of(row: dict[str, Any]) -> dict[str, Any]:
 
 @router.get("")
 @router.get("/")
-async def list_order_lines(current_user: dict = Depends(get_current_user)):
+async def list_order_lines(department: Optional[str] = Query(None), current_user: dict = Depends(get_current_user)):
     try:
         data = await run_in_threadpool(lambda: fetch_all_pages(
             lambda start, end: supabase.table(TABLE).select("*").order("added_at", desc=False).order("record_id").range(start, end).execute()
@@ -128,6 +141,9 @@ async def list_order_lines(current_user: dict = Depends(get_current_user)):
         raise server_error(e, "Loading order lines")
     if viewer_scope(current_user) is not None:
         data = filter_rows(current_user, TABLE, data, supabase, person_ids_for(supabase, current_user))
+    else:
+        # Unscoped: Mining people's lines stay out unless ?department=Mining.
+        data = unscoped_separate_filter(supabase, current_user, department, data, _line_person)
     return [_entry_of(row) for row in data]
 
 
@@ -154,12 +170,21 @@ async def add_order_lines(body: AddLines, current_user: dict = Depends(get_curre
 
 
 @router.post("/remove")
-async def remove_order_lines(body: RemoveLines, current_user: dict = Depends(get_current_user)):
+async def remove_order_lines(body: RemoveLines, department: Optional[str] = Query(None), current_user: dict = Depends(get_current_user)):
     """Remove the lines for these records (a line that is not there is not an error: the list already says what was asked)."""
     if not body.record_ids:
         return {"ok": True}
     try:
         doomed = list(body.record_ids)
+        if viewer_scope(current_user) is None:
+            # Unscoped: only your own slice is removable (Mining lines need
+            # ?department=Mining). A line that is not there is not an error.
+            unscoped_found = await run_in_threadpool(
+                lambda: supabase.table(TABLE).select("*").in_("record_id", body.record_ids).execute()
+            )
+            doomed = [r.get("record_id") for r in unscoped_separate_filter(
+                supabase, current_user, department,
+                cast("list[dict]", unscoped_found.data or []), _line_person)]
         if viewer_scope(current_user) is not None:
             found = await run_in_threadpool(
                 lambda: supabase.table(TABLE).select("*").in_("record_id", body.record_ids).execute()
@@ -178,12 +203,19 @@ async def remove_order_lines(body: RemoveLines, current_user: dict = Depends(get
 
 @router.delete("")
 @router.delete("/")
-async def clear_order_list(current_user: dict = Depends(get_current_user)):
+async def clear_order_list(department: Optional[str] = Query(None), current_user: dict = Depends(get_current_user)):
     """Empty the whole list (after the order has been placed) — a scoped clear
     empties the viewer's slice, never anyone else's lines."""
     try:
         if viewer_scope(current_user) is None:
-            await run_in_threadpool(lambda: supabase.table(TABLE).delete().neq("record_id", "").execute())
+            everything = await run_in_threadpool(lambda: fetch_all_pages(
+                lambda start, end: supabase.table(TABLE).select("*").range(start, end).execute()
+            ))
+            # Unscoped: empty your own slice only (Mining lines need ?department=Mining).
+            visible = unscoped_separate_filter(supabase, current_user, department, everything, _line_person)
+            doomed = [r.get("record_id") for r in visible]
+            if doomed:
+                await run_in_threadpool(lambda: supabase.table(TABLE).delete().in_("record_id", doomed).execute())
         else:
             data = await run_in_threadpool(lambda: fetch_all_pages(
                 lambda start, end: supabase.table(TABLE).select("*").range(start, end).execute()

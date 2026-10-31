@@ -22,6 +22,7 @@ from functools import wraps
 from typing import Any, Awaitable, Optional, cast
 
 from app.redis_client import redis_client
+from app.scope import cache_scope_segment
 
 logger = logging.getLogger(__name__)
 
@@ -127,19 +128,23 @@ def _namespace_keyset(namespace: str) -> str:
     return f"{KEY_PREFIX}:{namespace}:__keys__"
 
 
-def build_key(namespace: str, scope: Optional[str] = None, **params: Any) -> str:
+def build_key(namespace: str, scope: Any = None, **params: Any) -> str:
     """A stable cache key for a namespace + a set of query params (order-
     independent, so `status=a&priority=b` and `priority=b&status=a` share a
     cache entry). Params with a None/empty value are dropped so the
     unfiltered call (the common case) gets its own clean key.
 
-    Scoped callers pass the viewer's section (app/scope.py's
-    viewer_scope(current_user)) and get their own key segment, so a cached
-    slice can never be served across scopes. Unscoped callers (scope None)
-    build byte-identical keys to before scoping existed."""
+    Scoped callers pass app/scope.py's viewer_scope(current_user) and get
+    their own key segment, so a cached slice can never be served across
+    scopes: sections keep their exact old segment, departments key as
+    kind:value ("department:Mining"). Unscoped callers (scope None) build
+    byte-identical keys to before scoping existed."""
     parts = sorted(f"{k}={v}" for k, v in params.items() if v not in (None, "", "all"))
     if scope:
-        parts.append(f"scope={scope}")
+        if isinstance(scope, dict):
+            parts.append(f"scope={scope.get('kind')}:{scope.get('value')}")
+        else:
+            parts.append(f"scope={scope}")
     suffix = "&".join(parts) if parts else "_all"
     return f"{KEY_PREFIX}:{namespace}:{suffix}"
 
@@ -234,8 +239,8 @@ def cached(namespace: str, ttl: int):
             # fold their section into the key. Anything unscoped (no
             # current_user, or scope None) builds the exact key it always did.
             viewer = kwargs.get("current_user")
-            scope = viewer.get("scope") if isinstance(viewer, dict) else None
-            key = build_key(namespace, scope=scope, _fn=fn.__name__)
+            raw = viewer.get("scope") if isinstance(viewer, dict) else None
+            key = build_key(namespace, scope=cache_scope_segment(raw), _fn=fn.__name__)
             hit = await cache_get(key)
             if hit is not None:
                 return hit

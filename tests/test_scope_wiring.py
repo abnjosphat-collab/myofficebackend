@@ -162,11 +162,16 @@ class _FakeRpcCall:
 
 class _FakeAuthSupabase:
     """Stands in for app.auth.supabase: token check + role/scope RPCs."""
-    def __init__(self, role="user", scope=None, scope_exc=None):
+    def __init__(self, role="user", scope=None, scope_exc=None, limits=None, limits_exc=None):
         self.auth = _FakeAuthApi(_fake_user())
         self._role = role
         self._scope = scope
         self._scope_exc = scope_exc
+        # No explicit limits payload: the limits answer carries the scope, as
+        # the row the Batch 4 migration writes does. limits=None can not spell
+        # a missing profile row here; that case lives in test_mining_account.
+        self._limits = {"scope": scope, "modules": None} if limits is None else limits
+        self._limits_exc = limits_exc
         self.rpc_calls = []
 
     def rpc(self, fn, params):
@@ -175,6 +180,8 @@ class _FakeAuthSupabase:
             return _FakeRpcCall(data=self._role)
         if fn == "get_user_scope_by_id":
             return _FakeRpcCall(data=self._scope, exc=self._scope_exc)
+        if fn == "get_user_limits_by_id":
+            return _FakeRpcCall(data=self._limits, exc=self._limits_exc)
         raise AssertionError(f"unexpected RPC {fn}")
 
 
@@ -186,7 +193,7 @@ async def test_auth_returns_scope_from_rpc(monkeypatch):
     assert user["scope"] == "Projects"
     assert user["role"] == "user"
     assert user["name"] == "Takudzwa Chibi"
-    assert fake.rpc_calls == ["get_user_role_by_id", "get_user_scope_by_id"]
+    assert fake.rpc_calls == ["get_user_role_by_id", "get_user_limits_by_id"]
 
 
 @pytest.mark.asyncio
@@ -196,14 +203,28 @@ async def test_auth_empty_scope_means_unscoped(monkeypatch, data):
     monkeypatch.setattr(auth_mod, "supabase", fake)
     user = await auth_mod.get_current_user("Bearer good-token")
     assert user["scope"] is None
+    assert user["modules"] is None
     assert user["role"] == "manager"
 
 
 @pytest.mark.asyncio
+async def test_auth_missing_limits_falls_back_to_legacy_scope(monkeypatch):
+    """A deploy that lands before the Batch 4 SQL: the limits function is
+    missing, so the legacy string-scope call answers and modules stay None."""
+    fake = _FakeAuthSupabase(role="user", scope="Projects",
+                             limits_exc=Exception("function public.get_user_limits_by_id does not exist"))
+    monkeypatch.setattr(auth_mod, "supabase", fake)
+    user = await auth_mod.get_current_user("Bearer good-token")
+    assert user["scope"] == "Projects"
+    assert user["modules"] is None
+    assert fake.rpc_calls == ["get_user_role_by_id", "get_user_limits_by_id", "get_user_scope_by_id"]
+
+
+@pytest.mark.asyncio
 async def test_auth_scope_lookup_failure_is_loud_503(monkeypatch):
-    """A scope RPC failure — including the function missing before the Batch 1
-    migration is applied — must never degrade to silent "unscoped"."""
-    fake = _FakeAuthSupabase(scope_exc=Exception("function public.get_user_scope_by_id does not exist"))
+    """Both lookups failing must never degrade to silent "unscoped"."""
+    fake = _FakeAuthSupabase(scope_exc=Exception("connection refused"),
+                             limits_exc=Exception("connection refused"))
     monkeypatch.setattr(auth_mod, "supabase", fake)
     with pytest.raises(HTTPException) as exc_info:
         await auth_mod.get_current_user("Bearer good-token")

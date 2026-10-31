@@ -7,7 +7,7 @@ from app.supabase_client import supabase, rows, one_row
 from app.auth import get_current_user, require_role
 from app.aggregation import count_by
 from app.db_helpers import get_or_404, apply_date_range, or_ilike
-from app.scope import apply_list_scope, assert_row_visible, stamp_create, viewer_scope
+from app.scope import apply_list_scope, assert_row_visible, stamp_create, viewer_scope, scope_value, scope_section
 from app.errors import server_error
 import logging
 from datetime import datetime
@@ -205,7 +205,7 @@ async def get_inspection_stats(current_user: dict = Depends(get_current_user)):
         findings = rows(findings_response)
         scope = viewer_scope(current_user)
         if scope is not None:
-            inspections = [i for i in inspections if i.get("section") == scope]
+            inspections = [i for i in inspections if i.get("section") == scope_value(scope)]
             visible_ids = {i.get("id") for i in inspections}
             findings = [f for f in findings if f.get("inspection_id") in visible_ids]
         
@@ -226,8 +226,9 @@ async def get_inspection_stats(current_user: dict = Depends(get_current_user)):
             },
             "byInspector": {}
         }
-        if scope is not None and scope not in stats["bySection"]:
-            stats["bySection"][scope] = 0
+        section = scope_section(scope)
+        if section is not None and section not in stats["bySection"]:
+            stats["bySection"][section] = 0
         
         # Count by section
         for inspection in inspections:
@@ -366,7 +367,7 @@ async def create_inspection(inspection: SHEQCreate, current_user: dict = Depends
                     "bywhen": finding.byWhen,                  # lowercase
                     "status": finding.status,
                     "priority": finding.priority,
-                    "section": scope or finding.section,
+                    "section": scope_section(scope) or finding.section,
                     "completeddate": finding.completedDate,    # lowercase
                     "remarks": finding.remarks
                 })
@@ -486,7 +487,7 @@ async def update_inspection(inspection_id: str, updated: SHEQUpdate, current_use
                         "bywhen": finding.byWhen,                  # lowercase
                         "status": finding.status,
                         "priority": finding.priority,
-                        "section": scope or finding.section,
+                        "section": scope_section(scope) or finding.section,
                         "completeddate": finding.completedDate,    # lowercase
                         "remarks": finding.remarks
                     })
@@ -600,7 +601,7 @@ async def add_finding(inspection_id: str, finding: FindingCreate, current_user: 
             "bywhen": finding.byWhen,                  # lowercase
             "status": finding.status,
             "priority": finding.priority,
-            "section": scope or finding.section,
+            "section": scope_section(scope) or finding.section,
             "completeddate": finding.completedDate,    # lowercase
             "remarks": finding.remarks
         }
@@ -668,7 +669,7 @@ async def update_finding(finding_id: str, updated: FindingUpdate, current_user: 
             # the parent): it may stay as it is or become the viewer's
             # scope — never anything else.
             new_section = data_to_update["section"]
-            if new_section != scope and new_section != existing_row.get("section"):
+            if new_section != scope_section(current_user) and new_section != existing_row.get("section"):
                 raise HTTPException(status_code=404, detail="Finding not found")
         if not data_to_update:
             return map_db_finding_to_camel(existing_row)

@@ -21,7 +21,7 @@ from app.document_structure import CUSTOM_SORT_ORDER, plan_seed, summarise
 from app.documents_support import QUICK_PRINT_KEY, get_folder, is_uuid, load_folders, log_activity, require_upgrade
 from app.db_helpers import response_rows
 from app.errors import server_error
-from app.scope import scope_root_id, scope_subtree_ids, viewer_scope
+from app.scope import scope_root_id, scope_subtree_ids, viewer_scope, scope_value
 from app.supabase_client import supabase
 
 logger = logging.getLogger(__name__)
@@ -58,11 +58,11 @@ async def create_folder(body: FolderCreate, current_user: dict = Depends(get_cur
         folders = await run_in_threadpool(lambda: load_folders(supabase))
         parent = body.parent_id or None
         scope = viewer_scope(current_user)
-        if scope is not None and parent is None and name.lower() != scope.lower():
+        if scope is not None and parent is None and name.lower() != (scope_value(scope) or "").lower():
             # Self-service root only: a scoped account may create the
             # top-level folder named for its scope, nothing else up there.
-            detail = (f"Create a top-level folder named {scope} first."
-                      if scope_root_id(folders, scope) is None else f"New folders go inside {scope}.")
+            detail = (f"Create a top-level folder named {scope_value(scope)} first."
+                      if scope_root_id(folders, scope) is None else f"New folders go inside {scope_value(scope)}.")
             raise HTTPException(status_code=404, detail=detail)
         if parent:
             get_folder(supabase, parent, current_user, folders)
@@ -103,17 +103,17 @@ async def update_folder(folder_id: str, body: FolderUpdate, current_user: dict =
         moved = parent != (str(current["parent_id"]) if current.get("parent_id") else None)
         if name != current["name"]:
             changes["name"] = name
-        if scope is not None and root and name.lower() != scope.lower():
+        if scope is not None and root and name.lower() != (scope_value(scope) or "").lower():
             # The root keeps the scope's name: renaming it away would orphan
             # the whole subtree from its viewers.
-            raise HTTPException(status_code=404, detail=f"The {scope} folder keeps its name.")
+            raise HTTPException(status_code=404, detail=f"The {scope_value(scope)} folder keeps its name.")
         if moved:
             if parent:
                 get_folder(supabase, parent, current_user, folders)
             if scope is not None and (root or parent is None or parent not in sub):
                 # Stay-or-scope: a scoped move lands inside the subtree, and
                 # the root itself stays where the scope can find it.
-                detail = f"The {scope} folder stays at the top level." if root else "That folder no longer exists. Reload the page."
+                detail = f"The {scope_value(scope)} folder stays at the top level." if root else "That folder no longer exists. Reload the page."
                 raise HTTPException(status_code=404, detail=detail)
             check_placement(folders, folder_id, parent)
             changes["parent_id"] = parent

@@ -1,4 +1,4 @@
-from fastapi import APIRouter, HTTPException, Depends
+from fastapi import APIRouter, HTTPException, Depends, Query
 from starlette.concurrency import run_in_threadpool
 from pydantic import BaseModel, Field, validator
 from typing import Optional
@@ -12,7 +12,7 @@ from app.db_helpers import fetch_all_pages, get_or_404
 from app.errors import server_error
 from app.concurrency import assert_unchanged, touch
 from app.ppe_conflicts import duplicate_message, existing_duplicate
-from app.scope import apply_list_scope, assert_row_visible, person_ids_for, viewer_scope
+from app.scope import apply_list_scope, assert_row_visible, person_ids_for, viewer_scope, person_in_scope, requested_department, exclude_separate_departments, SEPARATE_DEPARTMENTS
 import logging
 import json
 
@@ -152,14 +152,19 @@ async def get_ppe_records(
 ):
     person_ids = person_ids_for(supabase, current_user)
     try:
+        asked = requested_department(current_user, department)
         query = supabase.table("ppe_records").select("*")
-        
+
         if status and status != 'all':
             query = query.eq("status", status)
         if ppe_type and ppe_type != 'all':
             query = query.eq("ppe_type", ppe_type)
-        if department and department != 'all':
+        if asked:
+            query = query.eq("department", asked)
+        elif isinstance(department, str) and department and department != 'all':
             query = query.eq("department", department)
+        elif viewer_scope(current_user) is None:
+            query = exclude_separate_departments(query)
         if location and location != 'all':
             query = query.eq("location", location)
         if employee_id and employee_id != 'all':
@@ -184,7 +189,8 @@ async def create_ppe_record(record: PPEIssueCreate, current_user: dict = Depends
     try:
         # The person must be on the register; the row keeps the register's copies and spelling, not the client's.
         person = _resolve_person_or_422(record.employee_id)
-        if viewer_scope(current_user) is not None and (person.get("section") or "") != viewer_scope(current_user):
+        person_scope = viewer_scope(current_user)
+        if person_scope is not None and not person_in_scope(person, person_scope):
             raise HTTPException(status_code=404, detail="Not found")
 
         # Convert Pydantic model to dict and handle date serialization
@@ -255,7 +261,8 @@ async def update_ppe_record(record_id: int, updated: PPEIssueUpdate, current_use
                 data_to_update.pop("employee_id")
             else:
                 new_person = _resolve_person_or_422(sent or "")
-                if viewer_scope(current_user) is not None and (new_person.get("section") or "") != viewer_scope(current_user):
+                move_scope = viewer_scope(current_user)
+                if move_scope is not None and not person_in_scope(new_person, move_scope):
                     raise HTTPException(status_code=404, detail="PPE record not found")
                 _stamp_person(data_to_update, new_person)
 
@@ -307,10 +314,16 @@ async def delete_ppe_record(record_id: int, current_user: dict = Depends(require
         raise server_error(e, "Deleting PPE record")
 
 @router.get("/employee/{employee_id}")
-async def get_employee_ppe_records(employee_id: str, current_user: dict = Depends(get_current_user)):
+async def get_employee_ppe_records(employee_id: str, department: Optional[str] = Query(None), current_user: dict = Depends(get_current_user)):
     try:
+        asked = requested_department(current_user, department)
+        query = supabase.table("ppe_records").select("*").eq("employee_id", employee_id)
+        if asked:
+            query = query.eq("department", asked)
+        elif viewer_scope(current_user) is None:
+            query = exclude_separate_departments(query)
         query = apply_list_scope(
-            supabase.table("ppe_records").select("*").eq("employee_id", employee_id),
+            query,
             current_user, "ppe_records", supabase, person_ids_for(supabase, current_user),
         ).order("issue_date", desc=True).order("id", desc=True)
         records = await run_in_threadpool(
@@ -334,7 +347,7 @@ async def get_ppe_stats(current_user: dict = Depends(get_current_user)):
             lambda: fetch_all_pages(
                 lambda start, end: apply_list_scope(
                     supabase.table("ppe_records")
-                    .select("id, employee_id, status, condition, expiry_date")
+                    .select("id, employee_id, status, condition, expiry_date, department")
                     .order("id"),
                     current_user, "ppe_records", supabase, person_ids)
                     .range(start, end)
@@ -342,6 +355,8 @@ async def get_ppe_stats(current_user: dict = Depends(get_current_user)):
                 extract_rows=rows,
             )
         )
+        if viewer_scope(current_user) is None:
+            records_all = [r for r in records_all if (r.get("department") or "") not in SEPARATE_DEPARTMENTS]
         total_records = len(records_all)
         status_counts = count_by(records_all, 'status')
         condition_counts = count_by(records_all, 'condition')

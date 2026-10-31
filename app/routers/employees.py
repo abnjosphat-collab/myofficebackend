@@ -6,11 +6,11 @@ from typing import List, Optional
 from datetime import date
 from app.supabase_client import supabase
 from app.auth import get_current_user, require_role
-from app.cache import cached, invalidate_namespace
+from app.cache import cached, invalidate_namespace, build_key, cache_get, cache_set
 from app.db_helpers import fetch_all_pages, get_or_404
 from app.concurrency import assert_unchanged, touch
 from app.errors import server_error
-from app.scope import apply_list_scope, assert_row_visible, row_visible, stamp_create, viewer_scope
+from app.scope import apply_list_scope, assert_row_visible, row_visible, stamp_create, viewer_scope, section_of, requested_department, exclude_separate_departments, SEPARATE_DEPARTMENTS
 import logging
 import re
 
@@ -251,6 +251,9 @@ async def search_employees(
         rows = _data(r)
         if viewer_scope(current_user) is not None:
             rows = [e for e in rows if row_visible(current_user, "employees", e)]
+        else:
+            # Separate departments (Mining) stay out of unscoped search.
+            rows = [e for e in rows if (e.get("department") or "") not in SEPARATE_DEPARTMENTS]
         return [_dates_from_db(e) for e in rows] if rows else []
     except Exception as e:
         raise server_error(e, "Searching employees")
@@ -283,7 +286,7 @@ async def bulk_normalize_employees(body: BulkNormalizeRequest, current_user: dic
                     failed += 1
                     errors.append(f"Employee #{item.id} not found")
                     continue
-                if patch.get("section") is not None and patch["section"] != scope:
+                if patch.get("section") is not None and patch["section"] != section_of(current_user):
                     failed += 1
                     errors.append(f"Employee #{item.id} is outside your section")
                     continue
@@ -307,17 +310,39 @@ async def bulk_normalize_employees(body: BulkNormalizeRequest, current_user: dic
 
 @router.get("")
 @router.get("/")
-@cached("employees", ttl=60)
-async def get_employees(current_user: dict = Depends(get_current_user)):
-    """Return all employees."""
+async def get_employees(department: Optional[str] = Query(None), current_user: dict = Depends(get_current_user)):
+    """Return all employees. Separate departments (Mining) are left out unless
+    the request says ?department=Mining — admins and managers only, everyone
+    else gets 403. Any other department value filters to it, as before.
+    Manual build_key() caching (not @cached): the department slicer is part
+    of the key."""
     try:
+        scope = viewer_scope(current_user)
+        if scope is not None:
+            rows = await run_in_threadpool(lambda: fetch_all_pages(
+                lambda start, end: apply_list_scope(
+                    supabase.table("employees").select("*")
+                    .order("employee_id", desc=False).order("id", desc=False),
+                    current_user, "employees").range(start, end).execute()
+            ))
+            return [_dates_from_db(e) for e in rows] if rows else []
+        asked = requested_department(current_user, department)
+        wanted = asked or (department.strip() if isinstance(department, str) and department.strip() else None)
+        cache_key = build_key("employees", _fn="get_employees", department=asked or wanted or "__default__")
+        hit = await cache_get(cache_key)
+        if hit is not None:
+            return hit
+        query = supabase.table("employees").select("*").order("employee_id", desc=False).order("id", desc=False)
+        if wanted:
+            query = query.eq("department", wanted)
+        else:
+            query = exclude_separate_departments(query)
         rows = await run_in_threadpool(lambda: fetch_all_pages(
-            lambda start, end: apply_list_scope(
-                supabase.table("employees").select("*")
-                .order("employee_id", desc=False).order("id", desc=False),
-                current_user, "employees").range(start, end).execute()
+            lambda start, end: query.range(start, end).execute()
         ))
-        return [_dates_from_db(e) for e in rows] if rows else []
+        result = [_dates_from_db(e) for e in rows] if rows else []
+        await cache_set(cache_key, result, ttl=60, namespace="employees")
+        return result
     except Exception as e:
         raise server_error(e, "Loading employees")
 
@@ -394,9 +419,13 @@ async def update_employee(id: int, updated: Employee, current_user: dict = Depen
             raise HTTPException(404, detail=f"Employee #{id} not found")
 
         existing = existing_rows[0]
-        if viewer_scope(current_user) is not None:
+        scope = viewer_scope(current_user)
+        if scope is not None:
             assert_row_visible(current_user, "employees", existing, detail=f"Employee #{id} not found")
-            if updated.section != viewer_scope(current_user):
+            if scope["kind"] == "section":
+                if updated.section != scope["value"]:
+                    raise HTTPException(404, detail=f"Employee #{id} not found")
+            elif (updated.department or "") != scope["value"]:
                 raise HTTPException(404, detail=f"Employee #{id} not found")
         data = updated.model_dump()
         assert_unchanged(existing, data.pop('expected_updated_at', None))

@@ -32,7 +32,7 @@ from app.aggregation import count_by
 from app.db_helpers import fetch_all_pages, get_or_404
 from app.crud_router import CrudRouter
 from app.uploads import read_and_validate_upload, storage_content_type, NOTICE_ATTACHMENT_EXTS
-from app.scope import assert_row_visible, viewer_scope
+from app.scope import assert_row_visible, viewer_scope, scope_value
 from app.errors import server_error
 import logging, uuid as uuid_module
 
@@ -179,7 +179,7 @@ async def get_stats(current_user: dict = Depends(get_current_user)):
         ))
         scope = viewer_scope(current_user)
         if scope is not None:
-            notices = [n for n in notices if n.get("section") == scope]
+            notices = [n for n in notices if n.get("section") == scope_value(scope)]
 
         stats = {
             "total_notices": len(notices),

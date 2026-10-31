@@ -89,16 +89,25 @@ async def test_adding_nothing_does_not_touch_the_database(fake):
 
 
 async def test_removing_deletes_only_the_named_records(fake):
-    f = fake()
+    f = fake({"select_return": [
+        {"record_id": "r1", "entry": {"employee_id": "C1"}},
+        {"record_id": "r2", "entry": {"employee_id": "M1"}},
+    ]})
     assert await remove_order_lines(RemoveLines(record_ids=["r1", "r2"]), current_user=USER) == {"ok": True}
     assert f.state["calls"][0]["filters"] == [("in", "record_id", ["r1", "r2"])]
+    last = f.state["calls"][-1]
+    assert last["op"] == "delete"
+    assert last["filters"] == [("in", "record_id", ["r1", "r2"])]
 
-
-async def test_clearing_empties_the_list(fake):
-    f = fake()
+async def test_clearing_empties_only_the_viewers_slice(fake):
+    f = fake({"select_return": [
+        {"record_id": "r1", "entry": {"employee_id": "C1"}},
+        {"record_id": "r2", "entry": {"employee_id": "M1"}},
+    ]})
     assert await clear_order_list(current_user=USER) == {"ok": True}
-    assert f.state["calls"][0]["op"] == "delete"
-
+    last = f.state["calls"][-1]
+    assert last["op"] == "delete"
+    assert last["filters"] == [("in", "record_id", ["r1", "r2"])]
 
 @pytest.mark.parametrize("op,call", [
     ("select", lambda: list_order_lines()),
@@ -107,7 +116,9 @@ async def test_clearing_empties_the_list(fake):
     ("delete", lambda: clear_order_list(current_user=USER)),
 ])
 async def test_database_errors_are_500_not_an_empty_success(fake, op, call):
-    fake({"raise_op": op, "raise_msg": "db down"})
+    fake({"raise_op": op, "raise_msg": "db down", "select_return": [
+        {"record_id": "r1", "entry": {"employee_id": "C1"}},
+    ]})
     with pytest.raises(HTTPException) as exc:
         await call()
     # 500s are generic since the server_error codemod: no internal text leaks.

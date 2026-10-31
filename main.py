@@ -13,6 +13,7 @@ from contextlib import asynccontextmanager
 # Import supabase client (used only for health check, standby router uses its own import)
 from app.supabase_client import supabase
 from app.auth import get_current_user, require_role
+from app.module_access import ROUTER_MODULES, require_module_access
 from app.redis_client import ping_redis, close_redis
 from app.cache import cache_stats
 from app.audit import audit_status
@@ -220,12 +221,19 @@ def register_router(module_name: str, prefix: str | None = None, tags: list[str]
         if router_obj is None:
             raise ImportError(f"module app.routers.{module_name} has no 'router' attribute")
         kwargs = {}
+        # Module limit (Batch 4): a module-limited account (Mining) may only
+        # call its own modules. Unknown routers fail closed for those accounts
+        # (their own href, which no account lists) and fail the route-guard
+        # test. Router-level dependencies run before each route's own auth, so
+        # anonymous callers still reach the route's own gate (401/None there).
+        module = ROUTER_MODULES.get(dict_key, f"/{dict_key}")
+        module_deps = [Depends(require_module_access(module))]
         if prefix is not None:
             kwargs["prefix"] = prefix
         if tags is not None:
             kwargs["tags"] = tags
-        if dependencies is not None:
-            kwargs["dependencies"] = dependencies
+        kwargs["dependencies"] = module_deps + list(dependencies or [])
+
         app.include_router(router_obj, **kwargs)
         loaded_routers[dict_key] = router_obj
         logger.info(f"Router loaded: {dict_key}" + (f" at {prefix}" if prefix else ""))
@@ -281,6 +289,7 @@ for _name, _prefix, _tags, _key in [
     ("ppe_order_list", "/api/ppe-order-list", ["PPE Order List"], None),
     ("ppe_budget", "/api/ppe/budget", ["PPE Budget"], "ppe_budget"),
     ("saved_quotations", "/api/quotations", ["Saved Quotations"], None),
+    ("employee_import", None, ["Employee Import"], None),
     ("duty_roster", "/api/duty-roster", ["Duty Roster"], None),
     ("standby_rotations", "/api/standby-rotations", ["Standby Rotations"], None),
     ("duty_rotations", "/api/duty-rotations", ["Duty Rotations"], None),

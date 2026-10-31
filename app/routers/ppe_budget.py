@@ -4,7 +4,7 @@
 # This router only stores the manager-edited settings in `ppe_budgets` (one row
 # per year; the defaults live in code and nothing is seeded) and serves the
 # calendar built from `app/zim_holidays.py`, so the screen and the downloads
-# use the same working days. Everyone signed in may read; only managers save,
+# use the same working days. Everyone signed in may read (department-scoped viewers see nothing here); only managers save,
 # and a save is refused with 409 when the row changed since it was opened.
 from __future__ import annotations
 
@@ -18,6 +18,7 @@ from pydantic import BaseModel, Field
 from app.auth import get_current_user, require_role
 from app.concurrency import assert_unchanged, touch
 from app.errors import server_error
+from app.scope import viewer_scope
 from app.supabase_client import supabase, rows
 from app.zim_holidays import zim_holidays_for_year
 
@@ -130,6 +131,15 @@ def year_calendar(year: int) -> dict:
     }
 
 
+def _require_engineering(current_user: dict) -> None:
+    """The budget is Engineering-only: department-scoped viewers (Mining) get
+    403 on read and save alike. Their people, records and starters are never
+    part of it, and their managers must not overwrite Engineering's prices."""
+    scope = viewer_scope(current_user)
+    if scope is not None and scope["kind"] == "department":
+        raise HTTPException(status_code=403, detail="The PPE budget is Engineering-only.")
+
+
 def _check_year(year: int) -> None:
     if year < 2000 or year > 2100:
         raise HTTPException(status_code=422, detail="Year must be between 2000 and 2100.")
@@ -148,6 +158,7 @@ def _read_row(year: int) -> Optional[dict]:
 async def get_budget(year: int, current_user: dict = Depends(get_current_user)):
     """Saved settings (or the defaults) with the year's calendar."""
     _check_year(year)
+    _require_engineering(current_user)
     row = _read_row(year)
     return {
         "year": year,
@@ -162,6 +173,7 @@ async def get_budget(year: int, current_user: dict = Depends(get_current_user)):
 async def save_budget(year: int, payload: BudgetSave, current_user: dict = Depends(require_role("manager"))):
     """Save the manager-edited settings. Refused with 409 when stale."""
     _check_year(year)
+    _require_engineering(current_user)
     existing = _read_row(year)
     assert_unchanged(existing or {}, payload.expected_updated_at)
     data = {"year": year, "settings": payload.settings.dict()}
