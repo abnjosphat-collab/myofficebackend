@@ -215,8 +215,9 @@ async def get_overtime(status: Optional[str] = None, overtime_type: Optional[str
         # keep those calls from stalling other requests on the async event loop.
         data = await run_in_threadpool(_fetch_pages)
 
+        # The list is the whole register on a slow link: leave each row's drawn approval signature (a data-URL image) out of it. Nothing on the list reads it back, and the single-record read below keeps the full row.
         logger.info(f"Returning {len(data)} records")
-        return [decode_json_fields(record, ['spares_used']) for record in data]
+        return [decode_json_fields({k: v for k, v in record.items() if k != 'approval_signature'}, ['spares_used']) for record in data]
 
     except Exception as e:
         logger.error(f"Error fetching overtime: {str(e)}")
