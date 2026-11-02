@@ -225,6 +225,23 @@ async def test_get_overtime_returns_decoded_records(monkeypatch):
     assert result == [{"id": 1, "employee_name": "Alice", "spares_used": [{"name": "Bolt"}]}]
 
 
+async def test_get_overtime_list_leaves_the_approval_signature_image_out(monkeypatch):
+    # The list response is the whole register on a slow link: signature data-URLs
+    # (tens of KB each, one per approved row) make it megabytes. Nothing on the
+    # list reads them back — approval sends a fresh one — so the list must not
+    # carry them. The single-record read keeps the full row.
+    big = "data:image/png;base64," + "AAAA" * 20000
+    row = {"id": 1, "employee_name": "Alice", "status": "approved",
+           "approval_signature": big, "spares_used": None}
+    fake = _PagingSupabase(pages=[[row]])
+    monkeypatch.setattr(overtime_mod, "supabase", fake)
+
+    result = await get_overtime(status=None, overtime_type=None)
+
+    assert result == [{"id": 1, "employee_name": "Alice", "status": "approved", "spares_used": None}]
+    assert "approval_signature" not in result[0]
+
+
 async def test_get_overtime_applies_status_and_type_filters(monkeypatch):
     fake = _PagingSupabase(pages=[[]])
     monkeypatch.setattr(overtime_mod, "supabase", fake)
