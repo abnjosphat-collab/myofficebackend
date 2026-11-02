@@ -1,5 +1,6 @@
 from fastapi import APIRouter, HTTPException, Header, Depends
 from starlette.concurrency import run_in_threadpool
+import httpx
 from pydantic import BaseModel, Field, validator
 from typing import Optional, List, Dict, Any, cast
 from app.supabase_client import supabase, rows
@@ -219,6 +220,8 @@ async def get_overtime(status: Optional[str] = None, overtime_type: Optional[str
         logger.info(f"Returning {len(data)} records")
         return [decode_json_fields({k: v for k, v in record.items() if k != 'approval_signature'}, ['spares_used']) for record in data]
 
+    except httpx.TransportError as e:
+        raise server_error(e, "Loading overtime", status_code=503)
     except Exception as e:
         logger.error(f"Error fetching overtime: {str(e)}")
         raise server_error(e, "Loading overtime")
@@ -252,6 +255,12 @@ def _overlapping_request(employee_id: Optional[str], day: Optional[str], start: 
 @router.post("")
 @router.post("/")
 async def create_overtime(overtime: OvertimeCreate, current_user: dict = Depends(get_current_user)):
+    """Keep blocking Supabase scope, conflict, insert and audit work off the event loop."""
+    return await run_in_threadpool(_create_overtime, overtime, current_user)
+
+
+def _create_overtime(overtime: OvertimeCreate, current_user: dict):
+    """Perform one save, preserving actor context and never replaying an uncertain write."""
     if viewer_scope(current_user) is not None:
         stamp_create(current_user, "overtime", {"employee_id": overtime.employee_id},
                      supabase, person_ids_for(supabase, current_user))
@@ -302,6 +311,8 @@ async def create_overtime(overtime: OvertimeCreate, current_user: dict = Depends
 
     except HTTPException:
         raise
+    except httpx.TransportError as e:
+        raise server_error(e, "Creating overtime", status_code=503)
     except Exception as e:
         logger.error(f"Error creating overtime: {str(e)}")
         raise server_error(e, "Creating overtime")
