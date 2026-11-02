@@ -534,3 +534,73 @@ async def apply_ppe_matrix_all(current_user: dict = Depends(require_role('manage
     # for a caller that reads it carefully, but nothing surfaced it if they only checked
     # the aggregate `total_updated` — `failed` makes it explicit rather than implicit.
     return {"results": results, "total_updated": sum(v for v in results.values() if v), "failed": failed}
+
+
+
+
+@router.get("/requirements")
+
+async def list_ppe_requirements(department: Optional[str] = Query(None),
+
+                                current_user: dict = Depends(get_current_user)):
+
+    """Size requirements with derived fulfilment, scoped like the register.
+
+    Requirements are planned allocations, never issues: fulfilment is derived
+    from active issue records sharing the mine number and PPE type. Unmatched
+    rows (no mine number yet) stay visible and are never fulfilled."""
+
+    try:
+
+        asked = requested_department(current_user, department)
+
+        query = supabase.table("ppe_requirements").select("*")
+
+        if asked:
+
+            query = query.eq("department", asked)
+
+        elif viewer_scope(current_user) is None:
+
+            query = exclude_separate_departments(query)
+
+        found = await run_in_threadpool(
+
+            lambda: fetch_all_pages(lambda start, end: query.range(start, end).execute(), extract_rows=rows)
+
+        )
+
+        numbers = sorted({str(row["employee_id"]) for row in found if row.get("employee_id")})
+
+        fulfilled: set[str] = set()
+
+        if numbers:
+
+            records = await run_in_threadpool(
+
+                lambda: fetch_all_pages(
+
+                    lambda start, end: supabase.table("ppe_records").select("employee_id,ppe_type")
+
+                    .eq("status", "active").in_("employee_id", numbers)
+
+                    .range(start, end).execute(),
+
+                    extract_rows=rows)
+
+            )
+
+            fulfilled = {str(row["employee_id"]) for row in records
+                         if row.get("ppe_type") == "rainsuit" and row.get("employee_id")}
+
+        return [{**row, "fulfilled": row.get("employee_id") in fulfilled} for row in found]
+
+    except HTTPException:
+
+        raise
+
+    except Exception as e:
+
+        logger.error(f"Error fetching PPE requirements: {str(e)}")
+
+        raise server_error(e, "Loading PPE requirements")
