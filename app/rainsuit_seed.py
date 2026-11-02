@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import uuid
+from typing import Optional
 
 from app.rainsuit_workbook import SOURCE_REF, RequirementRow
 
@@ -22,12 +23,13 @@ def _lit(value: str) -> str:
     return "'" + value.replace("'", "''") + "'"
 
 
-def _nullable(value: str) -> str:
+def _nullable(value: Optional[str]) -> str:
     return 'NULL' if not value else _lit(value)
 
 
-def render_seed_sql(rows: list[RequirementRow]) -> str:
+def render_seed_sql(rows: list[RequirementRow], links: Optional[dict[str, dict[str, str]]] = None) -> str:
     """Render the full requirements seed for the parsed allocation rows."""
+    links = links or {}
     people = len(rows)
     total = sum(item.quantity for item in rows)
     out = [
@@ -48,13 +50,16 @@ def render_seed_sql(rows: list[RequirementRow]) -> str:
         '',
     ]
     for item in rows:
+        link = links.get(item.name, {})
+        number = link.get('mine_number') or None
+        size = link.get('size_canonical') or item.size_canonical or ''
         out.append(
             "insert into public.ppe_requirements"
             " (id, employee_id, source_name, employee_name, department, mine_section,"
             " ppe_type, size_source, size_canonical, quantity, status, source_ref, notes, created_by, row_version) values"
-            f" ({_lit(_row_id(item.name))}::uuid, NULL, {_lit(item.name)}, {_lit(item.name)},"
-            f" {_nullable(item.department)}, NULL,"
-            f" 'rainsuit', {_nullable(item.size_source)}, {_nullable(item.size_canonical or '')},"
+            f" ({_lit(_row_id(item.name))}::uuid, {_nullable(number)}, {_lit(item.name)}, {_lit(item.name)},"
+            f" {_nullable(item.department)}, {_nullable(link.get('section') or '')},"
+            f" 'rainsuit', {_nullable(item.size_source)}, {_nullable(size)},"
             f" {item.quantity}, 'required', {_lit(SOURCE_REF)}, {_nullable(item.notes)},"
             f" 'workbook-import', 1)"
             f" ON CONFLICT DO NOTHING; -- allocation row {item.row}"

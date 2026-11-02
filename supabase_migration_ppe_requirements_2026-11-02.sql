@@ -34,8 +34,14 @@ exception when undefined_table then
 end $$;
 
 -- Backup (empty today, but the file owns it from the start).
-create table if not exists public.ppe_requirements_backup_2026_11_02 as
-  select * from public.ppe_requirements where false;
+do $$
+begin
+  if exists (select 1 from information_schema.tables
+             where table_schema = 'public' and table_name = 'ppe_requirements') then
+    create table if not exists public.ppe_requirements_backup_2026_11_02 as
+      select * from public.ppe_requirements where false;
+  end if;
+end $$;
 
 -- Requirements register.
 create table if not exists public.ppe_requirements (

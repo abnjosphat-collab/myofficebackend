@@ -33,6 +33,17 @@ def test_seed_output_is_deterministic():
     assert render_seed_sql(_rows()) == render_seed_sql(_rows())
 
 
+def test_seed_applies_reviewed_links():
+    sql = render_seed_sql(_rows(), links={
+        'David Muronda': {'mine_number': 'PM341', 'section': 'Mechanical'},
+        'L. Phiri': {'mine_number': '', 'size_canonical': 'XL', 'section': ''},
+    })
+    assert "'PM341', 'David Muronda'" in sql
+    assert "'Engineering', 'Mechanical'" in sql
+    assert "'XL', 'XL'" in sql
+    assert "'L. Phiri'" in sql and "'PM341', 'L. Phiri'" not in sql
+
+
 def test_seed_keeps_source_size_beside_canonical():
     sql = render_seed_sql(_rows())
     assert "'L', 'L'" in sql
