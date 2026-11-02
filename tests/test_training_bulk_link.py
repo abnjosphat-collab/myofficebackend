@@ -48,18 +48,20 @@ def db(monkeypatch):
 
 
 def add_single(employee="c1165", name="Nobody Here", dept="Submitted Dept", cert="Safety Induction",
-               expiry=None, refresher="", provider="", training_date=None, user=USER):
+               expiry="default", refresher="", provider="", training_date=None, user=USER):
     return run(create_new_certification(
         employee_id=employee, employee_name=name, department=dept, certification_name=cert,
-        expiry_date=expiry or (TODAY + timedelta(days=200)), required_refresher=refresher,
+        expiry_date=(TODAY + timedelta(days=200)) if expiry == "default" else expiry,
+        required_refresher=refresher,
         provider=provider, training_date=training_date, certificate_file=None, current_user=user,
     ))
 
 
-def bulk(cert="Safety Induction", day=None, expiry=None, provider="TechEdge", items=None,
+def bulk(cert="Safety Induction", day=None, expiry="default", provider="TechEdge", items=None,
          evidence=None, user=USER, batch="batch-1"):
     return run(create_bulk_certifications(BulkTrainingRequest(
-        certification_name=cert, expiry_date=expiry or (TODAY + timedelta(days=365)),
+        certification_name=cert,
+        expiry_date=(TODAY + timedelta(days=365)) if expiry == "default" else expiry,
         training_date=day or TODAY, provider=provider, required_refresher="Annual",
         group_evidence_url=evidence, batch_id=batch,
         items=items if items is not None else [BulkTrainingItem(employee_id="C1165")],
@@ -197,6 +199,39 @@ def test_repointing_onto_the_register_refreshes_snapshots(db):
     assert moved.employee_name == "Rudo Moyo"
     assert moved.snapshot_designation == "Fitter Class 1"
     assert moved.snapshot_section == "Mechanical"
+
+
+def test_training_without_expiry_never_lapses(db):
+    created = add_single(employee="C1165", cert="Induction", training_date=TODAY, expiry=None)
+    assert created.expiry_date is None
+    assert created.status == "Valid"
+    listed = run(get_all_certifications(current_user=USER))
+    assert listed[0].expiry_date is None
+    assert listed[0].status == "Valid"
+
+
+def test_expiry_can_be_cleared_on_update(db):
+    created = add_single(employee="C1165", cert="Induction", training_date=TODAY)
+    assert created.expiry_date is not None
+    cleared = run(update_certification(
+        str(created.id), employee_id=None, employee_name=None, department=None,
+        certification_name=None, expiry_date=None, required_refresher=None,
+        provider=None, training_date=None, no_expiry=True,
+        certificate_file=None, current_user=USER))
+    assert cleared.expiry_date is None
+    assert cleared.status == "Valid"
+
+
+def test_bulk_without_expiry_and_duplicate_guard_still_applies(db):
+    res = bulk(cert="Induction", day=TODAY, expiry=None,
+               items=[BulkTrainingItem(employee_id="C1165")])
+    assert (res.created, res.failed) == (1, 0)
+    again = bulk(cert="Induction", day=TODAY, expiry=None,
+                 items=[BulkTrainingItem(employee_id="C1165")])
+    assert (again.created, again.skipped) == (0, 1)
+    renewal = bulk(cert="Induction", day=TODAY + timedelta(days=30), expiry=None,
+                   items=[BulkTrainingItem(employee_id="C1165")])
+    assert renewal.created == 1
 
 
 def test_free_text_edits_cannot_overwrite_linked_register_values(db):

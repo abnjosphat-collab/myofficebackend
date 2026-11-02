@@ -36,8 +36,11 @@ CERTIFICATE_EXTS = {"pdf", "jpg", "jpeg", "png", "webp", "heic"}
 MAX_CERTIFICATE_BYTES = 15 * 1024 * 1024
 
 
-def check_status(expiry_date: date) -> str:
-    """Compliance status from the expiry date: Expired, Due Soon (within 90 days) or Valid."""
+def check_status(expiry_date: Optional[date]) -> str:
+    """Compliance status from the expiry date: Expired, Due Soon (within 90 days) or Valid.
+    A training with no expiry never lapses, so it always reads Valid."""
+    if expiry_date is None:
+        return "Valid"
     today = today_harare()
     if expiry_date < today:
         return "Expired"
@@ -60,7 +63,7 @@ class CertificateRecord(BaseModel):
     employee_name: str
     department: str
     certification_name: str
-    expiry_date: date
+    expiry_date: Optional[date] = None
     required_refresher: str
     certificate_url: Optional[str] = None
     status: str
@@ -85,8 +88,8 @@ def _training_date(value: Any) -> Optional[date]:
 
 
 def _record(row: dict[str, Any]) -> CertificateRecord:
-    expiry = row["expiry_date"]
-    expiry = expiry if isinstance(expiry, date) else date.fromisoformat(str(expiry)[:10])
+    raw_expiry = row.get("expiry_date")
+    expiry = _training_date(raw_expiry)
     return CertificateRecord(
         id=str(row["id"]),
         employee_id=row.get("employee_id") or "",
@@ -257,7 +260,7 @@ async def create_new_certification(
     employee_name: str = Form(...),
     department: str = Form(...),
     certification_name: str = Form(...),
-    expiry_date: date = Form(..., description="Format: YYYY-MM-DD"),
+    expiry_date: Optional[date] = Form(None, description="Format: YYYY-MM-DD; omit when the training does not expire"),
     required_refresher: str = Form(...),
     provider: str = Form(""),
     training_date: Optional[date] = Form(None),
@@ -274,6 +277,7 @@ async def create_new_certification(
     normalized_id = _normalize_employee_id(employee_id)
     training_date = training_date if isinstance(training_date, date) else None
     provider = provider if isinstance(provider, str) else ""
+    expiry_date = expiry_date if isinstance(expiry_date, date) else None
     if viewer_scope(current_user) is not None:
         stamp_create(current_user, TABLE, {"employee_id": normalized_id},
                      supabase, person_ids_for(supabase, current_user))
@@ -288,7 +292,8 @@ async def create_new_certification(
     row = {
         "employee_id": normalized_id, "employee_name": snapshot["employee_name"],
         "department": snapshot["department"],
-        "certification_name": certification_name.strip(), "expiry_date": expiry_date.isoformat(),
+        "certification_name": certification_name.strip(),
+        "expiry_date": expiry_date.isoformat() if expiry_date else None,
         "required_refresher": required_refresher.strip(), "certificate_url": url, "certificate_path": path,
         "provider": (provider or "").strip(),
         "training_date": training_date.isoformat() if training_date else None,
@@ -321,7 +326,7 @@ class BulkTrainingItem(BaseModel):
 
 class BulkTrainingRequest(BaseModel):
     certification_name: str
-    expiry_date: date
+    expiry_date: Optional[date] = None
     training_date: date
     provider: str = ""
     required_refresher: str = ""
@@ -409,7 +414,8 @@ async def create_bulk_certifications(payload: BulkTrainingRequest,
         row = {
             "employee_id": normalized, "employee_name": snapshot["employee_name"],
             "department": snapshot["snapshot_department"],
-            "certification_name": cert_name, "expiry_date": eff_expiry.isoformat(),
+            "certification_name": cert_name,
+            "expiry_date": eff_expiry.isoformat() if eff_expiry else None,
             "required_refresher": (item.required_refresher if item.required_refresher is not None
                                    else payload.required_refresher).strip(),
             "provider": (item.provider if item.provider is not None else payload.provider).strip(),
@@ -468,6 +474,7 @@ async def update_certification(
     required_refresher: str = Form(None),
     provider: str = Form(None),
     training_date: date = Form(None),
+    no_expiry: bool = Form(False),
     certificate_file: Optional[UploadFile] = File(None),
     current_user: dict = Depends(get_current_user),
 ):
@@ -480,6 +487,7 @@ async def update_certification(
     existing = _one_row(record_id)
     provider = provider if isinstance(provider, str) else None
     training_date = training_date if isinstance(training_date, date) else None
+    clear_expiry = no_expiry is True or (isinstance(no_expiry, str) and no_expiry.strip().lower() in {"1", "true", "yes", "on"})
     if viewer_scope(current_user) is not None:
         person_ids = person_ids_for(supabase, current_user)
         assert_row_visible(current_user, TABLE, existing, supabase, person_ids,
@@ -492,7 +500,9 @@ async def update_certification(
                        ("provider", provider)):
         if value is not None:
             patch[key] = value.strip()
-    if expiry_date is not None:
+    if clear_expiry:
+        patch["expiry_date"] = None
+    elif expiry_date is not None:
         patch["expiry_date"] = expiry_date.isoformat()
     if training_date is not None:
         patch["training_date"] = training_date.isoformat()
