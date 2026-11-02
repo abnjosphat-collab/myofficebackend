@@ -165,7 +165,7 @@ def reconcile_people(rows: list[dict[str, Any]], register: list[dict[str, Any]])
         hits: list[dict[str, Any]] = []
         for token in _surname_tokens(item.get('name', '')):
             hits.extend(by_surname.get(token, []))
-        unique = {h.get('id'): h for h in hits}
+        unique: dict[str, dict[str, Any]] = {h['id']: h for h in hits if h.get('id')}
         if len(unique) == 1:
             emp = next(iter(unique.values()))
             out.matched.append({'source_name': item.get('name'), 'row': item.get('row'),
