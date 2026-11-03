@@ -1,4 +1,4 @@
-# tests/test_training_bulk_link.py — employee-linked training records and bulk entry.
+﻿# tests/test_training_bulk_link.py â€” employee-linked training records and bulk entry.
 #
 # Pins the behavior change with the project's TableFake recipe (same as
 # test_training_endpoints.py): exact register matches snapshot official values,
@@ -298,3 +298,11 @@ def test_legacy_training_date_still_guards_without_completion(db):
     with pytest.raises(HTTPException) as err:
         add_single(employee="C1165", cert="Winder Driving", training_date=TODAY)
     assert err.value.status_code == 409
+
+
+def test_whitespace_variant_cert_is_a_duplicate(db):
+    add_single(employee="C1165", cert="Winder Driving", training_date=TODAY)
+    with pytest.raises(HTTPException) as err:
+        add_single(employee="C1165", cert="  Winder   Driving ", training_date=TODAY)
+    assert err.value.status_code == 409
+
