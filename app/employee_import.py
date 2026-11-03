@@ -170,18 +170,32 @@ def _normalize_mapping(mapping: Any) -> dict[int, dict]:
     return out
 
 
-def _live_matrix(db: Any) -> dict:
-    """Saved ppe_matrix rows, or {} when the table is unreachable (the
-    defaults still apply; a missing matrix must not block an import)."""
+def _live_matrix(db: Any, department: str = "") -> dict:
+    """Saved ppe_matrix rows for the company ('') overlaid with `department`
+    rows -- the same layering the PPE matrix endpoint serves, so an import
+    bakes the importing department's intervals. Company rows apply first,
+    department rows second, so a shared type resolves deterministically
+    instead of by row order. A missing matrix still falls back to defaults."""
+    wanted = (department or "").strip()
     try:
-        resp = db.table("ppe_matrix").select("ppe_type, interval_months").execute()
-        return {r["ppe_type"]: r["interval_months"] for r in (resp.data or [])}
+        resp = db.table("ppe_matrix").select(
+            "ppe_type, interval_months, department").execute()
+        rows = list(resp.data or [])
     except Exception as e:
         logger.info(f"ppe_matrix unavailable for import, using defaults: {e}")
         return {}
+    layered: dict = {}
+    for r in rows:
+        if (r.get("department") or "") == "":
+            layered[normalize_type(r["ppe_type"])] = r["interval_months"]
+    if wanted:
+        for r in rows:
+            if (r.get("department") or "") == wanted:
+                layered[normalize_type(r["ppe_type"])] = r["interval_months"]
+    return layered
 
 
-def _known_types(db: Any) -> tuple[dict, dict]:
+def _known_types(db: Any, department: str = "") -> tuple[dict, dict]:
     """({normalized: canonical code}, {normalized: interval_months}): the saved
     matrix over the server defaults, plus every type live PPE records use
     (e.g. boots), so a mapped column to a type people actually hold is never
@@ -190,7 +204,7 @@ def _known_types(db: Any) -> tuple[dict, dict]:
     from app.routers.ppe import PPE_MATRIX_DEFAULTS
     canonical = {normalize_type(k): k for k in PPE_MATRIX_DEFAULTS}
     intervals: dict[str, Optional[int]] = {normalize_type(k): v for k, v in PPE_MATRIX_DEFAULTS.items()}
-    for k, v in _live_matrix(db).items():
+    for k, v in _live_matrix(db, department).items():
         canonical.setdefault(normalize_type(k), k)
         intervals[normalize_type(k)] = v
     try:
@@ -373,7 +387,7 @@ def plan_import(db: Any, rows: Any, mapping: Any, layout: str = "wide",
     if not isinstance(rows, list) or len(rows) > MAX_ROWS:
         raise PlanError(f"Send at most {MAX_ROWS} rows.")
     mapped = _normalize_mapping(mapping)
-    canonical, intervals = _known_types(db)
+    canonical, intervals = _known_types(db, dept)
     _check_columns(mapped, layout, canonical)
     by_number, ambiguous = _load_register(db)
 

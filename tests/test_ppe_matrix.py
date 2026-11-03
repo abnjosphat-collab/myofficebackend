@@ -125,7 +125,7 @@ async def test_set_matrix_entry_saves_and_recalculates_existing_records(patch_su
         {"id": 10, "ppe_type": "respirator", "issue_date": "2026-06-01", "status": "active"},
     ]
     result = await set_ppe_matrix_entry(MatrixEntry(ppe_type="respirator", interval_months=1), current_user=_manager())
-    assert result == {"ppe_type": "respirator", "interval_months": 1, "updated": 1}
+    assert result == {"ppe_type": "respirator", "interval_months": 1, "department": None, "updated": 1}
     assert patch_supabase["updates"][0]["expiry_date"] == "2026-07-01"
     # The interval itself was persisted too.
     assert {"ppe_type": "respirator", "interval_months": 1} in patch_supabase["overrides"]
@@ -134,7 +134,7 @@ async def test_set_matrix_entry_saves_and_recalculates_existing_records(patch_su
 async def test_set_matrix_entry_zero_records_updated_still_saves(patch_supabase):
     patch_supabase["records"] = []
     result = await set_ppe_matrix_entry(MatrixEntry(ppe_type="harness", interval_months=24), current_user=_manager())
-    assert result == {"ppe_type": "harness", "interval_months": 24, "updated": 0}
+    assert result == {"ppe_type": "harness", "interval_months": 24, "department": None, "updated": 0}
 
 
 # ─── apply_ppe_matrix (single type) ─────────────────────────────────────────────
@@ -143,7 +143,7 @@ async def test_apply_single_type_uses_override_over_default(patch_supabase):
     patch_supabase["overrides"] = [{"ppe_type": "vest", "interval_months": 3}]
     patch_supabase["records"] = [{"id": 20, "ppe_type": "vest", "issue_date": "2026-01-01", "status": "active"}]
     result = await apply_ppe_matrix("vest", current_user=_manager())
-    assert result == {"ppe_type": "vest", "interval_months": 3, "updated": 1}
+    assert result == {"ppe_type": "vest", "interval_months": 3, "department": None, "updated": 1}
 
 
 async def test_apply_single_type_unknown_type_rejected(patch_supabase):
