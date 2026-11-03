@@ -48,12 +48,15 @@ def db(monkeypatch):
 
 
 def add_single(employee="c1165", name="Nobody Here", dept="Submitted Dept", cert="Safety Induction",
-               expiry="default", refresher="", provider="", training_date=None, user=USER):
+               expiry="default", refresher="", provider="", training_date=None, user=USER,
+               start=None, completion=None, grade="", details="", trainers="", venue=""):
     return run(create_new_certification(
         employee_id=employee, employee_name=name, department=dept, certification_name=cert,
         expiry_date=(TODAY + timedelta(days=200)) if expiry == "default" else expiry,
         required_refresher=refresher,
         provider=provider, training_date=training_date, certificate_file=None, current_user=user,
+        start_date=start, completion_date=completion, grade=grade, details=details,
+        trainers=trainers, venue=venue,
     ))
 
 
@@ -243,3 +246,55 @@ def test_free_text_edits_cannot_overwrite_linked_register_values(db):
     assert edited.employee_name == "Rudo Moyo"
     assert edited.department == "Engineering"
     assert edited.snapshot_designation == "Fitter Class 1"
+
+
+def test_full_details_round_trip(db):
+    created = add_single(employee="C1165", cert="Winder Driving", training_date=TODAY,
+                         start=TODAY - timedelta(days=5), completion=TODAY, grade="Merit",
+                         details="Rope inspection, brake tests", trainers="T. Moyo, J. Sithole",
+                         venue="Tech Edge Centre")
+    assert created.start_date == TODAY - timedelta(days=5)
+    assert created.completion_date == TODAY
+    assert created.grade == "Merit"
+    assert created.details == "Rope inspection, brake tests"
+    assert created.trainers == "T. Moyo, J. Sithole"
+    assert created.venue == "Tech Edge Centre"
+    listed = run(get_all_certifications(current_user=USER))
+    assert listed[0].completion_date == TODAY
+    assert listed[0].grade == "Merit"
+
+
+def test_unknown_grade_is_refused(db):
+    with pytest.raises(HTTPException) as err:
+        add_single(employee="C1165", cert="Winder Driving", training_date=TODAY, grade="First Class")
+    assert err.value.status_code == 422
+
+
+def test_start_after_completion_is_refused(db):
+    with pytest.raises(HTTPException) as err:
+        add_single(employee="C1165", cert="Winder Driving", training_date=TODAY,
+                   start=TODAY, completion=TODAY - timedelta(days=1))
+    assert err.value.status_code == 422
+    res = bulk(cert="Winder Driving", day=TODAY,
+               items=[BulkTrainingItem(employee_id="C1165")])
+    assert res.created == 1
+
+
+def test_duplicate_guard_keys_on_completion_date(db):
+    add_single(employee="C1165", cert="Winder Driving", training_date=TODAY,
+               completion=TODAY)
+    with pytest.raises(HTTPException) as err:
+        add_single(employee="C1165", cert="Winder Driving",
+                   training_date=TODAY + timedelta(days=10), completion=TODAY)
+    assert err.value.status_code == 409
+    renewal = add_single(employee="C1165", cert="Winder Driving",
+                         training_date=TODAY + timedelta(days=10),
+                         completion=TODAY + timedelta(days=10))
+    assert renewal.completion_date == TODAY + timedelta(days=10)
+
+
+def test_legacy_training_date_still_guards_without_completion(db):
+    add_single(employee="C1165", cert="Winder Driving", training_date=TODAY)
+    with pytest.raises(HTTPException) as err:
+        add_single(employee="C1165", cert="Winder Driving", training_date=TODAY)
+    assert err.value.status_code == 409

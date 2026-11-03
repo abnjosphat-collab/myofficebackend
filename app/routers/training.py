@@ -34,6 +34,24 @@ TABLE = "training_certifications"
 BUCKET = "ams-documents"  # shared with the Document Hub; certificates sit under training/
 CERTIFICATE_EXTS = {"pdf", "jpg", "jpeg", "png", "webp", "heic"}
 MAX_CERTIFICATE_BYTES = 15 * 1024 * 1024
+# Optional pass level, dropdown-closed on the page and enforced here so the
+# register never accumulates free-text variants ("merit", "Merit ", ...).
+GRADES = ("Distinction", "Merit", "Pass", "Fail")
+
+
+def _checked_grade(value: Any) -> str:
+    grade = str(value or "").strip()
+    if grade and grade not in GRADES:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Grade must be one of: {', '.join(GRADES)}. Leave it empty when not recorded.",
+        )
+    return grade
+
+
+def _checked_window(start_date: Optional[date], completion_date: Optional[date]) -> None:
+    if start_date and completion_date and start_date > completion_date:
+        raise HTTPException(status_code=422, detail="The start date cannot be after the completion date.")
 
 
 def check_status(expiry_date: Optional[date]) -> str:
@@ -69,6 +87,12 @@ class CertificateRecord(BaseModel):
     status: str
     provider: str = ""
     training_date: Optional[date] = None
+    start_date: Optional[date] = None
+    completion_date: Optional[date] = None
+    grade: str = ""
+    details: str = ""
+    trainers: str = ""
+    venue: str = ""
     snapshot_designation: str = ""
     snapshot_section: str = ""
     snapshot_department: str = ""
@@ -102,6 +126,12 @@ def _record(row: dict[str, Any]) -> CertificateRecord:
         status=check_status(expiry),
         provider=row.get("provider") or "",
         training_date=_training_date(row.get("training_date")),
+        start_date=_training_date(row.get("start_date")),
+        completion_date=_training_date(row.get("completion_date")) or _training_date(row.get("training_date")),
+        grade=row.get("grade") or "",
+        details=row.get("details") or "",
+        trainers=row.get("trainers") or "",
+        venue=row.get("venue") or "",
         snapshot_designation=row.get("snapshot_designation") or "",
         snapshot_section=row.get("snapshot_section") or "",
         snapshot_department=row.get("snapshot_department") or "",
@@ -161,19 +191,22 @@ def _snapshots_for(employee_id: str, submitted_name: str, submitted_department: 
     }
 
 
-def _duplicate_of(employee_id: str, certification_name: str, training_date: Optional[date],
+def _duplicate_of(employee_id: str, certification_name: str, training_date: Optional[date] = None, completion_date: Optional[date] = None,
                   exclude_id: Optional[str] = None) -> Optional[dict[str, Any]]:
-    """An existing row for the same person, certification and training date.
+    """An existing row for the same person, certification and completion date.
 
-    Date-keyed: a different training date (or expiry) is a legitimate renewal
-    or repeat, never a duplicate. Rows without a training date predate this
+    Date-keyed: a different completion date (or expiry) is a legitimate renewal
+    or repeat, never a duplicate. Rows without any date predate this
     guard and never block, so legacy workflows keep working.
     """
-    if not isinstance(training_date, date):
+    key_date = completion_date if isinstance(completion_date, date) else None
+    if key_date is None and not isinstance(training_date, date):
         # Direct coroutine calls in tests leave FastAPI's Form() marker as the
         # default; only a real date guards.
         training_date = _training_date(training_date) if isinstance(training_date, str) else None
-    if training_date is None:
+    if key_date is None:
+        key_date = training_date if isinstance(training_date, date) else None
+    if key_date is None:
         return None
     normalized = _normalize_employee_id(employee_id)
     wanted = (certification_name or "").strip().lower()
@@ -183,7 +216,6 @@ def _duplicate_of(employee_id: str, certification_name: str, training_date: Opti
         rows = response_rows(
             supabase.table(TABLE).select("*")
             .eq("employee_id", normalized)
-            .eq("training_date", training_date.isoformat())
             .execute()
         )
     except Exception as e:
@@ -191,6 +223,8 @@ def _duplicate_of(employee_id: str, certification_name: str, training_date: Opti
         raise HTTPException(status_code=502, detail="Training records could not be read from the database.")
     for row in rows:
         if exclude_id is not None and str(row.get("id")) == str(exclude_id):
+            continue
+        if (_training_date(row.get("completion_date")) or _training_date(row.get("training_date"))) != key_date:
             continue
         if str(row.get("certification_name") or "").strip().lower() == wanted:
             return row
@@ -264,6 +298,12 @@ async def create_new_certification(
     required_refresher: str = Form(...),
     provider: str = Form(""),
     training_date: Optional[date] = Form(None),
+    start_date: Optional[date] = Form(None),
+    completion_date: Optional[date] = Form(None),
+    grade: str = Form(""),
+    details: str = Form(""),
+    trainers: str = Form(""),
+    venue: str = Form(""),
     certificate_file: Optional[UploadFile] = File(None),
     current_user: dict = Depends(get_current_user),
 ):
@@ -278,13 +318,20 @@ async def create_new_certification(
     training_date = training_date if isinstance(training_date, date) else None
     provider = provider if isinstance(provider, str) else ""
     expiry_date = expiry_date if isinstance(expiry_date, date) else None
+    start_date = start_date if isinstance(start_date, date) else None
+    completion_date = completion_date if isinstance(completion_date, date) else None
+    grade = _checked_grade(grade) if isinstance(grade, str) else ""
+    details = details if isinstance(details, str) else ""
+    trainers = trainers if isinstance(trainers, str) else ""
+    venue = venue if isinstance(venue, str) else ""
+    _checked_window(start_date, completion_date)
     if viewer_scope(current_user) is not None:
         stamp_create(current_user, TABLE, {"employee_id": normalized_id},
                      supabase, person_ids_for(supabase, current_user))
-    if _duplicate_of(normalized_id, certification_name, training_date) is not None:
+    if _duplicate_of(normalized_id, certification_name, training_date, completion_date) is not None:
         raise HTTPException(
             status_code=409,
-            detail="This certification was already recorded for this employee on that training date. "
+            detail="This certification was already recorded for this employee with the same completion date. "
                    "A renewal uses a different training date.",
         )
     snapshot = _snapshots_for(normalized_id, employee_name, department)
@@ -297,6 +344,12 @@ async def create_new_certification(
         "required_refresher": required_refresher.strip(), "certificate_url": url, "certificate_path": path,
         "provider": (provider or "").strip(),
         "training_date": training_date.isoformat() if training_date else None,
+        "start_date": start_date.isoformat() if start_date else None,
+        "completion_date": completion_date.isoformat() if completion_date else None,
+        "grade": grade,
+        "details": details.strip(),
+        "trainers": trainers.strip(),
+        "venue": venue.strip(),
         "snapshot_designation": snapshot["snapshot_designation"],
         "snapshot_section": snapshot["snapshot_section"],
         "snapshot_department": snapshot["snapshot_department"],
@@ -320,6 +373,12 @@ class BulkTrainingItem(BaseModel):
     employee_name: Optional[str] = None
     expiry_date: Optional[date] = None
     required_refresher: Optional[str] = None
+    start_date: Optional[date] = None
+    completion_date: Optional[date] = None
+    grade: Optional[str] = None
+    details: Optional[str] = None
+    trainers: Optional[str] = None
+    venue: Optional[str] = None
     provider: Optional[str] = None
     training_date: Optional[date] = None
 
@@ -330,6 +389,12 @@ class BulkTrainingRequest(BaseModel):
     training_date: date
     provider: str = ""
     required_refresher: str = ""
+    start_date: Optional[date] = None
+    completion_date: Optional[date] = None
+    grade: str = ""
+    details: str = ""
+    trainers: str = ""
+    venue: str = ""
     group_evidence_url: Optional[str] = None
     batch_id: Optional[str] = None
     items: List[BulkTrainingItem]
@@ -388,8 +453,20 @@ async def create_bulk_certifications(payload: BulkTrainingRequest,
                                           reason="Enter the employee ID.", uncertain=False))
             continue
         eff_date = item.training_date or payload.training_date
+        eff_done = item.completion_date or payload.completion_date
+        eff_start = item.start_date or payload.start_date
+        if eff_start and (eff_done or eff_date) and eff_start > (eff_done or eff_date):
+            results.append(BulkItemResult(employee_id=normalized, outcome="failed",
+                                          reason="The start date is after the completion date.", uncertain=False))
+            continue
+        try:
+            eff_grade = _checked_grade(item.grade if item.grade is not None else payload.grade)
+        except HTTPException:
+            results.append(BulkItemResult(employee_id=normalized, outcome="failed",
+                                          reason=f"Grade must be one of: {', '.join(GRADES)}.", uncertain=False))
+            continue
         eff_expiry = item.expiry_date or payload.expiry_date
-        key = (normalized, cert_name.lower(), eff_date.isoformat())
+        key = (normalized, cert_name.lower(), (eff_done or eff_date).isoformat())
         if key in seen:
             results.append(BulkItemResult(employee_id=normalized, outcome="skipped",
                                           reason="Included twice in this batch; recorded once.", uncertain=False))
@@ -400,9 +477,9 @@ async def create_bulk_certifications(payload: BulkTrainingRequest,
                                           reason="Outside your visible employees; not recorded.", uncertain=False))
             continue
         try:
-            if _duplicate_of(normalized, cert_name, eff_date) is not None:
+            if _duplicate_of(normalized, cert_name, eff_date, eff_done) is not None:
                 results.append(BulkItemResult(employee_id=normalized, outcome="skipped",
-                                              reason="Already recorded for this employee on that training date; "
+                                              reason="Already recorded for this employee with the same completion date; "
                                                      "not stored again.", uncertain=False))
                 continue
         except HTTPException as e:
@@ -420,6 +497,12 @@ async def create_bulk_certifications(payload: BulkTrainingRequest,
                                    else payload.required_refresher).strip(),
             "provider": (item.provider if item.provider is not None else payload.provider).strip(),
             "training_date": eff_date.isoformat(),
+            "start_date": eff_start.isoformat() if eff_start else None,
+            "completion_date": eff_done.isoformat() if eff_done else None,
+            "grade": eff_grade,
+            "details": (item.details if item.details is not None else payload.details).strip(),
+            "trainers": (item.trainers if item.trainers is not None else payload.trainers).strip(),
+            "venue": (item.venue if item.venue is not None else payload.venue).strip(),
             "snapshot_designation": snapshot["snapshot_designation"],
             "snapshot_section": snapshot["snapshot_section"],
             "snapshot_department": snapshot["snapshot_department"],
@@ -475,6 +558,12 @@ async def update_certification(
     provider: str = Form(None),
     training_date: date = Form(None),
     no_expiry: bool = Form(False),
+    start_date: date = Form(None),
+    completion_date: date = Form(None),
+    grade: str = Form(None),
+    details: str = Form(None),
+    trainers: str = Form(None),
+    venue: str = Form(None),
     certificate_file: Optional[UploadFile] = File(None),
     current_user: dict = Depends(get_current_user),
 ):
@@ -488,6 +577,12 @@ async def update_certification(
     provider = provider if isinstance(provider, str) else None
     training_date = training_date if isinstance(training_date, date) else None
     clear_expiry = no_expiry is True or (isinstance(no_expiry, str) and no_expiry.strip().lower() in {"1", "true", "yes", "on"})
+    start_date = start_date if isinstance(start_date, date) else None
+    completion_date = completion_date if isinstance(completion_date, date) else None
+    grade = _checked_grade(grade) if isinstance(grade, str) else None
+    details = details if isinstance(details, str) else None
+    trainers = trainers if isinstance(trainers, str) else None
+    venue = venue if isinstance(venue, str) else None
     if viewer_scope(current_user) is not None:
         person_ids = person_ids_for(supabase, current_user)
         assert_row_visible(current_user, TABLE, existing, supabase, person_ids,
@@ -497,6 +592,7 @@ async def update_certification(
             raise HTTPException(status_code=404, detail="Certification record not found")
     patch: dict[str, Any] = {}
     for key, value in (("certification_name", certification_name), ("required_refresher", required_refresher),
+                       ("details", details), ("trainers", trainers), ("venue", venue),
                        ("provider", provider)):
         if value is not None:
             patch[key] = value.strip()
@@ -506,6 +602,16 @@ async def update_certification(
         patch["expiry_date"] = expiry_date.isoformat()
     if training_date is not None:
         patch["training_date"] = training_date.isoformat()
+    if start_date is not None:
+        patch["start_date"] = start_date.isoformat()
+    if completion_date is not None:
+        patch["completion_date"] = completion_date.isoformat()
+    if grade is not None:
+        patch["grade"] = grade
+    _checked_window(
+        start_date or _training_date(existing.get("start_date")),
+        completion_date or _training_date(existing.get("completion_date")),
+    )
     if employee_id is not None:
         normalized = _normalize_employee_id(employee_id)
         snapshot = _snapshots_for(
@@ -532,10 +638,12 @@ async def update_certification(
     eff_cert = patch.get("certification_name", str(existing.get("certification_name") or ""))
     eff_date_raw = patch.get("training_date", existing.get("training_date"))
     eff_date = eff_date_raw if isinstance(eff_date_raw, date) else _training_date(eff_date_raw)
-    if _duplicate_of(eff_employee, eff_cert, eff_date, exclude_id=record_id) is not None:
+    eff_done_raw = patch.get("completion_date", existing.get("completion_date"))
+    eff_done = eff_done_raw if isinstance(eff_done_raw, date) else _training_date(eff_done_raw)
+    if _duplicate_of(eff_employee, eff_cert, eff_date, eff_done, exclude_id=record_id) is not None:
         raise HTTPException(
             status_code=409,
-            detail="Another record already holds this certification for this employee on that training date.",
+            detail="Another record already holds this certification for this employee with the same completion date.",
         )
     new_path = None
     if certificate_file:
