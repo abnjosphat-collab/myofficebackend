@@ -349,3 +349,26 @@ def test_preview_endpoint_matches_plan(imp_client):
     assert body["counts"]["people_new"] == 1
     assert body["counts"]["ppe_new"] == 2
     assert len(imp_client.scope_store["employee_imports"]) == 0
+
+def _plan_matrix(matrix_rows, rows, department="Mining"):
+    store = _store()
+    store["ppe_matrix"] = matrix_rows
+    db = FakeSupabase(store, [])
+    return plan_import(db, rows, WIDE_MAPPING, "wide", department)
+
+
+def test_preview_matrix_scoped_by_department():
+    # Same type saved for company and Mining must resolve deterministically:
+    # a Mining import uses the Mining interval even when the company row
+    # sorts last (dict last-wins used to leak the company interval in).
+    rows = [["M0004", "Rudo Moyo", "", "", "15/01/2024", "", "", "", ""]]
+    mining_first = [
+        {"ppe_type": "helmet", "interval_months": 24, "department": "Mining"},
+        {"ppe_type": "helmet", "interval_months": 30, "department": ""},
+    ]
+    company_first = list(reversed(mining_first))
+    for matrix in (mining_first, company_first):
+        plan = _plan_matrix(matrix, rows)
+        helmets = [e for e in plan["ppe"] if e["action"] == "add" and e["ppe_type"] == "helmet"]
+        assert [(e["mine_number"], e["expiry_date"]) for e in helmets] == [(
+            "M0004", "2026-01-15")]
