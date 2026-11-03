@@ -54,6 +54,10 @@ def _checked_window(start_date: Optional[date], completion_date: Optional[date])
         raise HTTPException(status_code=422, detail="The start date cannot be after the completion date.")
 
 
+def _collapse_name(value: Any) -> str:
+    return " ".join(str(value or "").split()).lower()
+
+
 def check_status(expiry_date: Optional[date]) -> str:
     """Compliance status from the expiry date: Expired, Due Soon (within 90 days) or Valid.
     A training with no expiry never lapses, so it always reads Valid."""
@@ -209,7 +213,7 @@ def _duplicate_of(employee_id: str, certification_name: str, training_date: Opti
     if key_date is None:
         return None
     normalized = _normalize_employee_id(employee_id)
-    wanted = (certification_name or "").strip().lower()
+    wanted = _collapse_name(certification_name)
     if not normalized or not wanted:
         return None
     try:
@@ -226,7 +230,7 @@ def _duplicate_of(employee_id: str, certification_name: str, training_date: Opti
             continue
         if (_training_date(row.get("completion_date")) or _training_date(row.get("training_date"))) != key_date:
             continue
-        if str(row.get("certification_name") or "").strip().lower() == wanted:
+        if _collapse_name(row.get("certification_name")) == wanted:
             return row
     return None
 
@@ -331,8 +335,8 @@ async def create_new_certification(
     if _duplicate_of(normalized_id, certification_name, training_date, completion_date) is not None:
         raise HTTPException(
             status_code=409,
-            detail="This certification was already recorded for this employee with the same completion date. "
-                   "A renewal uses a different training date.",
+            detail="This certification was already recorded for this employee. "
+                   "A renewal uses a different completion date.",
         )
     snapshot = _snapshots_for(normalized_id, employee_name, department)
     path, url = (await _store_certificate(certificate_file)) if certificate_file else (None, None)
@@ -466,7 +470,7 @@ async def create_bulk_certifications(payload: BulkTrainingRequest,
                                           reason=f"Grade must be one of: {', '.join(GRADES)}.", uncertain=False))
             continue
         eff_expiry = item.expiry_date or payload.expiry_date
-        key = (normalized, cert_name.lower(), (eff_done or eff_date).isoformat())
+        key = (normalized, _collapse_name(cert_name), (eff_done or eff_date).isoformat())
         if key in seen:
             results.append(BulkItemResult(employee_id=normalized, outcome="skipped",
                                           reason="Included twice in this batch; recorded once.", uncertain=False))
@@ -643,7 +647,7 @@ async def update_certification(
     if _duplicate_of(eff_employee, eff_cert, eff_date, eff_done, exclude_id=record_id) is not None:
         raise HTTPException(
             status_code=409,
-            detail="Another record already holds this certification for this employee with the same completion date.",
+            detail="Another record already holds this certification for this employee. A renewal uses a different completion date.",
         )
     new_path = None
     if certificate_file:
