@@ -55,6 +55,8 @@ async def test_transport_outage_is_service_unavailable_without_replaying_a_save(
         raise httpx.ReadError('[Errno 11] Resource temporarily unavailable')
 
     monkeypatch.setattr(overtime, 'supabase', SimpleNamespace(table=unavailable))
+    # Isolate the operation from the optional decision-column schema probe.
+    monkeypatch.setattr(overtime, 'has_columns', lambda *args: False)
     with pytest.raises(HTTPException) as caught:
         if operation == 'list':
             await overtime.get_overtime(status=None, overtime_type=None, employee_id=None, current_user={'role': 'admin'})

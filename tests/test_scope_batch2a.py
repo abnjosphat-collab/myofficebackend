@@ -48,7 +48,8 @@ def test_overtime_scoped_list_is_predicated(ot_client):
 def test_overtime_unscoped_list_query_is_unchanged(ot_client):
     ot_client.as_user(UNSCOPED)
     resp = ot_client.get("/api/overtime")
-    assert [r["id"] for r in resp.json()] == [1, 2]
+    # Tied/missing creation times use descending IDs for stable paging.
+    assert [r["id"] for r in resp.json()] == [2, 1]
     assert _predicates(ot_client) == []
 
 

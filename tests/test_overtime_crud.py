@@ -173,6 +173,98 @@ def _create_input(**overrides):
 
 # ─── get_overtime ────────────────────────────────────────────────────────────────────
 
+async def test_delete_overtime_does_not_block_event_loop(monkeypatch, patch_supabase, patch_auth):
+    """A slow delete/scope/audit query must not hold every other request."""
+    import threading
+    patch_supabase({"select_return": [{"id": 3, "status": "pending"}]})
+    patch_auth(role="manager")
+    original = overtime_mod.get_or_404
+
+    def checked(*args, **kwargs):
+        assert threading.get_ident() != threading.main_thread().ident
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(overtime_mod, "get_or_404", checked)
+    await delete_overtime(3, authorization="Bearer good-token", current_user=CURRENT_USER)
+
+
+async def test_overtime_detail_does_not_block_event_loop(monkeypatch, patch_supabase):
+    import threading
+    patch_supabase({"select_return": [{"id": 3, "spares_used": "[]"}]})
+    original = overtime_mod.get_or_404
+
+    def checked(*args, **kwargs):
+        assert threading.get_ident() != threading.main_thread().ident
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(overtime_mod, "get_or_404", checked)
+    await get_overtime_by_id(3, current_user=CURRENT_USER)
+
+
+async def test_analysis_runs_off_the_event_loop(monkeypatch):
+    import threading
+
+    def analyze(data):
+        assert threading.get_ident() != threading.main_thread().ident
+        return {"checked": True}
+
+    monkeypatch.setattr(overtime_mod, "_analyze_overtime", analyze)
+    assert await overtime_mod.analyze_overtime(overtime_mod.OvertimeAnalysisInput()) == {"checked": True}
+
+
+async def test_create_recovers_committed_insert_after_lost_response(monkeypatch, patch_supabase):
+    import httpx
+    fake = patch_supabase({})
+    original = _Query.execute
+
+    def lost_response(query):
+        if query._op == "insert":
+            query.state["calls"].append({"op": "insert", "payload": query._payload})
+            query.cfg["select_return"] = [{"id": 73, **query._payload}]
+            raise httpx.ReadTimeout("response lost after commit")
+        return original(query)
+
+    monkeypatch.setattr(_Query, "execute", lost_response)
+    result = await create_overtime(_create_input(), current_user=CURRENT_USER)
+    assert result["id"] == 73
+    assert sum(call["op"] == "insert" for call in fake.state["calls"]) == 1
+    recovery = [call for call in fake.state["calls"] if call["op"] == "select"][-1]
+    stamp = fake.state["calls"][0]["payload"]["applied_date"]
+    assert ("applied_date", stamp) in recovery["filters"]
+
+
+async def test_create_transport_error_without_commit_is_retryable_not_replayed(monkeypatch, patch_supabase):
+    import httpx
+    fake = patch_supabase({})
+    original = _Query.execute
+
+    def failed_insert(query):
+        if query._op == "insert":
+            query.state["calls"].append({"op": "insert"})
+            raise httpx.ReadTimeout("no response")
+        return original(query)
+
+    monkeypatch.setattr(_Query, "execute", failed_insert)
+    with pytest.raises(HTTPException) as exc:
+        await create_overtime(_create_input(), current_user=CURRENT_USER)
+    assert exc.value.status_code == 503
+    assert sum(call["op"] == "insert" for call in fake.state["calls"]) == 1
+
+
+async def test_list_excludes_signature_images_in_database_query(monkeypatch):
+    selected = []
+    original = _PagingQuery.select
+
+    def capture(query, *args, **kwargs):
+        selected.append(args[0])
+        return original(query, *args, **kwargs)
+
+    monkeypatch.setattr(_PagingQuery, "select", capture)
+    monkeypatch.setattr(overtime_mod, "has_columns", lambda *args: False)
+    monkeypatch.setattr(overtime_mod, "supabase", _PagingSupabase([[]]))
+    await get_overtime(status=None, overtime_type=None, employee_id=None, current_user=CURRENT_USER)
+    assert selected and all(value != "*" and "approval_signature" not in value for value in selected)
+
 # get_overtime's pagination loop needs its own fake — it calls .range() repeatedly and
 # must stop only once a batch comes back shorter than the 1000-row page size (this loop
 # exists specifically because a single unbounded .execute() used to silently drop every
