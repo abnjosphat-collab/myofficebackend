@@ -111,9 +111,12 @@ def patch_supabase(monkeypatch):
     return _patch
 
 
-def test_employee_id_validator_rejects_blank_id():
-    with pytest.raises(Exception):
-        _employee(employee_id="   ")
+def test_employee_id_validator_collapses_blank_to_empty_string():
+    # The mine number is optional at registration: blank collapses to ''
+    # (never NULL) instead of raising.
+    assert _employee(employee_id="   ").employee_id == ""
+    assert _employee(employee_id="").employee_id == ""
+    assert _employee(employee_id=None).employee_id == ""
 
 
 def test_employee_id_validator_strips_and_uppercases():
@@ -540,3 +543,99 @@ def test_names_are_trimmed_and_single_spaced():
 def test_a_blank_name_is_refused():
     with pytest.raises(Exception):
         _employee(first_name="   ")
+
+
+# ─── input validation port: optional IDs, name case, phone caps ───────────────
+
+def test_id_number_is_optional_and_collapses_blank():
+    assert _employee(id_number="").id_number == ""
+    assert _employee(id_number="   ").id_number == ""
+    assert _employee(id_number=None).id_number == ""
+
+
+def test_id_number_is_normalised_never_rejected():
+    assert _employee(id_number="21 - 275641 v21").id_number == "21-275641-V21"
+    assert _employee(id_number="63_1234567-a63").id_number == "63-1234567-A63"
+    # Any shape survives — normalise-only, nothing contentful is rejected.
+    assert _employee(id_number="???").id_number == "???"
+
+
+def test_names_are_case_normalised_never_rejected():
+    assert _employee(first_name="mERCY").first_name == "Mercy"
+    assert _employee(first_name="MERCY", last_name="mazarire").last_name == "Mazarire"
+    assert _employee(first_name="McDonald").first_name == "McDonald"
+    assert _employee(last_name="O'BRIEN").last_name == "O'Brien"
+
+
+def test_phone_is_optional_and_blank_clears_to_none():
+    assert _employee().phone is None
+    assert _employee(phone="").phone is None
+    assert _employee(phone="   ").phone is None
+
+
+def test_phone_zw_mobile_collapses_to_canonical():
+    assert _employee(phone="0778973142").phone == "+263 77 8973 142"
+    assert _employee(phone="00263778973142").phone == "+263 77 8973 142"
+    assert _employee(phone="+263778973142").phone == "+263 77 8973 142"
+    assert _employee(phone="077 897 3142").phone == "+263 77 8973 142"
+
+
+def test_phone_caps_are_enforced_never_truncated():
+    # 9 ZW national digits max: a 10-digit 07… number is rejected, not cut.
+    with pytest.raises(Exception):
+        _employee(phone="07789731425")
+    # E.164 max is 15 digits: 16 digits rejected.
+    with pytest.raises(Exception):
+        _employee(phone="+1234567890123456")
+    # Malformed input is a 422-style field error, never stored silently.
+    with pytest.raises(Exception):
+        _employee(phone="not-a-number")
+    # …while a valid 15-digit international passes untouched in shape.
+    assert _employee(phone="+123456789012345").phone == "+123456789012345"
+
+
+async def test_create_with_blank_employee_id_skips_the_clash_check(patch_supabase):
+    calls = patch_supabase([
+        [{"id": 10, "employee_id": "", "date_of_engagement": "2020-01-01"}],
+    ])
+    result = await create_employee(_employee(employee_id=""), current_user={"user_id": "u1"})
+    assert result["id"] == 10
+    # No clash-check select fired: straight to insert.
+    assert [c["op"] for c in calls] == ["insert"]
+    assert calls[0]["payload"]["employee_id"] == ""
+
+
+async def test_update_clearing_an_issued_id_is_422(patch_supabase):
+    calls = patch_supabase([
+        [{"id": 5, "employee_id": "C1165", "first_name": "John", "last_name": "Doe",
+          "designation": "Technician", "department": None, "section": None}],
+    ])
+    with pytest.raises(HTTPException) as exc:
+        await update_employee(5, _employee(employee_id=""), current_user={"user_id": "u1"})
+    assert exc.value.status_code == 422
+    assert "C1165" in exc.value.detail
+    assert [c["op"] for c in calls] == ["select"]
+
+
+async def test_update_issuing_an_id_to_a_blank_record_repoints_nothing(patch_supabase):
+    calls = patch_supabase([
+        [{"id": 5, "employee_id": "", "first_name": "John", "last_name": "Doe",
+          "designation": "Technician", "department": None, "section": None}],
+        [],  # clash check: no collision
+        [{"id": 5, "employee_id": "C2000"}],
+    ])
+    result = await update_employee(5, _employee(employee_id="C2000"), current_user={"user_id": "u1"})
+    assert result["employee_id"] == "C2000"
+    # The '' key cannot be attributed to one person: no overtime/leaves/PPE
+    # re-point fired, only the employees update itself.
+    assert [c["table"] for c in calls if c["op"] == "update"] == ["employees"]
+
+
+async def test_update_blank_to_blank_name_change_follows_nothing(patch_supabase):
+    calls = patch_supabase([
+        [{"id": 5, "employee_id": "", "first_name": "John", "last_name": "Doe",
+          "designation": "Technician", "department": None, "section": None}],
+        [{"id": 5, "employee_id": ""}],
+    ])
+    await update_employee(5, _employee(employee_id="", first_name="Jonathan"), current_user={"user_id": "u1"})
+    assert [c for c in calls if c["table"] != "employees"] == []

@@ -19,18 +19,126 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
+#: Canonical display for a Zimbabwe mobile number (grouping callers see).
+PHONE_EXAMPLE = "+263 77 8973 142"
+
+
+class PhoneError(ValueError):
+    """A new phone value that cannot be understood (422 field error, never silent)."""
+
+
+def _canonical_single_phone(number: str) -> str:
+    """Canonical form of one phone number; raises PhoneError when malformed.
+
+    Zimbabwe mobiles collapse to ``+263 XX XXXX XXX`` (2-4-3 grouping).
+    Zimbabwe landlines (``0...``) and other internationals (``+<cc> ...``)
+    are accepted and lightly normalised (separators removed) but keep their
+    own shape. Digit caps: 9 national digits for Zimbabwe, at most 15 digits
+    (E.164) otherwise — longer input is rejected, never silently truncated.
+    """
+    text = number.strip()
+    if text.startswith("00"):
+        text = "+" + text[2:]
+    digits = re.sub(r"[\s\-.()]", "", text)
+    if not digits or not re.fullmatch(r"\+?\d+", digits):
+        raise PhoneError(
+            f"'{number.strip()}' is not a valid phone number "
+            f"(Zimbabwe mobile example: {PHONE_EXAMPLE})."
+        )
+    if digits.startswith("+"):
+        digits = digits[1:]
+        if digits.startswith("263"):
+            national = digits[3:]
+            if len(national) == 9 and national.startswith("7") and national.isdigit():
+                return f"+263 {national[0:2]} {national[2:6]} {national[6:9]}"
+            if national.isdigit() and len(national) in (9, 10):
+                return f"+263 {national}"
+            raise PhoneError(
+                f"'{number.strip()}' is not a valid +263 number "
+                f"(Zimbabwe mobile example: {PHONE_EXAMPLE})."
+            )
+        if 7 <= len(digits) <= 15:
+            return f"+{digits}"
+        raise PhoneError(
+            f"'{number.strip()}' is not a valid international number "
+            f"(Zimbabwe mobile example: {PHONE_EXAMPLE})."
+        )
+    if digits.startswith("07") and len(digits) == 10 and digits.isdigit():
+        national = digits[1:]
+        return f"+263 {national[0:2]} {national[2:6]} {national[6:9]}"
+    if digits.startswith("0") and digits.isdigit() and len(digits) in (9, 10):
+        return f"+263 {digits[1:]}"
+    if len(digits) == 9 and digits.startswith("7") and digits.isdigit():
+        return f"+263 {digits[0:2]} {digits[2:6]} {digits[6:9]}"
+    raise PhoneError(
+        f"'{number.strip()}' is not a valid phone number "
+        f"(Zimbabwe mobile example: {PHONE_EXAMPLE})."
+    )
+
+
+def _normalize_name_part(match: "re.Match[str]") -> str:
+    """Normalise one whitespace/hyphen/apostrophe-separated part.
+
+    Uniform-case words are title-cased (``mercy``/``MERCY`` -> ``Mercy``),
+    inverted-case words too (``mERCY`` -> ``Mercy``); genuinely mixed-case
+    words keep their interior capitals (``McDonald`` stays as typed, first
+    letter uppercased) so real names survive. Never rejects.
+    """
+    word = match.group(0)
+    if word.isupper() or word.islower():
+        return word.capitalize()
+    if len(word) > 1 and word[0].islower() and word[1:].isupper():
+        return word.capitalize()
+    return word[:1].upper() + word[1:] if word[:1].isalpha() else word
+
+
+def normalize_person_name(value: object) -> str:
+    """Canonical person name: trim, collapse whitespace, then normalise each
+    space/hyphen/apostrophe-separated part (see :func:`_normalize_name_part`).
+
+    ``mercy`` / ``MERCY`` / ``mERCY mazarire`` all become ``Mercy Mazarire``,
+    while ``McDonald`` and ``O'Brien`` keep their shape. Normalise-only:
+    casing is fixed, nothing contentful is ever rejected.
+    """
+    cleaned = re.sub(r"\s+", " ", str(value or "").strip())
+    if not cleaned:
+        return ""
+    return re.sub(r"[^\s\-']+", _normalize_name_part, cleaned)
+
+
+def normalize_national_id(value: object) -> str:
+    """Canonical national ID: uppercase, dashes as the only separator.
+
+    ``21 - 275641 v21`` becomes ``21-275641-V21``. Normalise-only: shape is
+    never validated and nothing is ever rejected.
+    """
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    out = re.sub(r"[\s./_]+", "-", text.upper())
+    out = re.sub(r"-+", "-", out).strip("-")
+    return out
+
+
 class Employee(BaseModel):
     """
-    Employee record. `employee_id` is the user-visible identifier
-    (e.g. "C1165", "PM365") and is freely editable.
+    Employee record. `employee_id` (mine number) is the user-visible identifier
+    (e.g. "C1165", "PM365"), is freely editable, and is optional: a new hire
+    has none until it is issued (usually the start of the following month).
+    Blank collapses to '' (never NULL) so there is no NOT NULL risk, and a
+    blank id never clashes. Clearing an issued employee_id is rejected (422):
+    overtime, leave and PPE history is linked by that id text.
     The immutable database primary key is the integer `id` returned
     in API responses — the frontend uses that for all update/delete calls.
     """
-    employee_id: str = Field(..., min_length=1, max_length=50,
-                             description="Human-readable employee ID, e.g. C1165 or PM365")
+    employee_id: Optional[str] = Field(default='',
+                             max_length=50,
+                             description="Human-readable employee ID, e.g. C1165 or PM365; blank until issued")
     first_name: str = Field(..., min_length=1)
     last_name: str = Field(..., min_length=1)
-    id_number: str = Field(..., min_length=1, description="National ID or passport number")
+    id_number: Optional[str] = Field(default='',
+                             max_length=50,
+                             description="National ID or passport number; blank until provided")
     email: Optional[str] = None
     phone: Optional[str] = None
     address: Optional[str] = None
@@ -64,24 +172,48 @@ class Employee(BaseModel):
 
     @validator('first_name', 'last_name')
     def clean_name(cls, v: str) -> str:
-        # One space between words, none at the ends: "Tafadzwa " and "Stanley  Musevenzo" were found in live data,
-        # and names that differ by a space are treated as different people by every search and every match.
-        cleaned = ' '.join((v or '').split())
+        # Normalise case, collapse whitespace — one space between words, none
+        # at the ends: "Tafadzwa " and "Stanley  Musevenzo" were found in live
+        # data, and names that differ by a space are treated as different
+        # people by every search and every match. Content is never rejected
+        # for its casing ("mERCY" -> "Mercy"); only a wholly blank name is.
+        cleaned = normalize_person_name(v)
         if not cleaned:
             raise ValueError('Name cannot be empty')
         return cleaned
 
     @validator('employee_id')
-    def clean_employee_id(cls, v: str) -> str:
-        if not v or not v.strip():
-            raise ValueError('Employee ID cannot be empty')
-        # Allow any alphanumeric ID: C1165, PM365, EMP-042, etc. — but it must
-        # contain at least one letter or digit, so dot-only placeholders
-        # (".............") typed on the register are rejected, not stored.
-        cleaned = v.strip().upper()
+    def clean_employee_id(cls, v) -> str:
+        # Optional: blank collapses to '' (never NULL). A given number keeps
+        # the compact-text rule — it must contain at least one letter or
+        # digit, so dot-only placeholders (".............") typed on the
+        # register are rejected, not stored.
+        if v is None:
+            return ''
+        cleaned = v.strip().upper() if isinstance(v, str) else v
+        if not cleaned:
+            return ''
         if not re.search(r'[A-Z0-9]', cleaned):
             raise ValueError('Employee ID must contain at least one letter or digit')
         return cleaned
+
+    @validator('id_number')
+    def clean_id_number(cls, v) -> str:
+        # Optional and normalise-only: uppercase, dashes as the only
+        # separator ("21 - 275641 v21" -> "21-275641-V21"). Shape is never
+        # validated, nothing is ever rejected; blank collapses to ''.
+        return normalize_national_id(v)
+
+    @validator('phone')
+    def clean_phone(cls, v):
+        # Optional; a filled number is canonicalised (ZW mobiles collapse to
+        # +263 XX XXXX XXX) and over-long input is rejected, never truncated.
+        if v is None:
+            return None
+        text = v.strip() if isinstance(v, str) else v
+        if not text:
+            return None
+        return _canonical_single_phone(text)
 
     @validator('email')
     def clean_email(cls, v):
@@ -132,9 +264,12 @@ _RECORDS_BY_EMPLOYEE_ID = ("overtime", "leaves", "ppe_records")
 def _follow_changed_employee(old: dict, new: dict) -> None:
     """Carry a personnel edit into the copies overtime, leaves and PPE keep beside the id: a new number re-points the
     rows, and a changed name, designation, department or section rewrites that table's copied columns under the (new)
-    number. Values compare stripped (a whitespace tidy-up alone follows nothing) but write exactly as stored."""
+    number. Values compare stripped (a whitespace tidy-up alone follows nothing) but write exactly as stored.
+    Blank ids never re-point: rows keyed by '' cannot be attributed to one
+    person, so an id issued later does not adopt them (and a cleared id is
+    rejected with 422 before this runs)."""
     old_id, new_id = old.get("employee_id"), new.get("employee_id")
-    if new_id != old_id:
+    if new_id != old_id and old_id and new_id:
         for table in _RECORDS_BY_EMPLOYEE_ID:
             supabase.table(table).update({"employee_id": new_id}).eq("employee_id", old_id).execute()
     old_name = " ".join(f"{old.get('first_name') or ''} {old.get('last_name') or ''}".split())
@@ -152,7 +287,9 @@ def _follow_changed_employee(old: dict, new: dict) -> None:
     if (new.get("section") or "").strip() != (old.get("section") or "").strip():
         copies["ppe_records"]["mine_section"] = new.get("section")
     for table, payload in copies.items():
-        if payload:
+        # Copies are keyed by employee_id text: with a blank new id there is
+        # no single person to attribute them to, so nothing follows.
+        if payload and new_id:
             supabase.table(table).update(payload).eq("employee_id", new_id).execute()
 
 
@@ -363,21 +500,23 @@ async def get_employee(id: int, current_user: dict = Depends(get_current_user)):
 @router.post("")
 @router.post("/")
 async def create_employee(employee: Employee, current_user: dict = Depends(get_current_user)):
-    """Create a new employee. The employee_id must be unique."""
+    """Create a new employee. A given employee_id must be unique; a blank one
+    (not yet issued) never clashes and skips the check."""
     try:
-        # Reject duplicate employee_id
-        clash = _data(
-            supabase.table("employees")
-            .select("id")
-            .eq("employee_id", employee.employee_id)
-            .execute()
-        )
-        if clash:
-            raise HTTPException(
-                400,
-                detail=f"Employee ID '{employee.employee_id}' is already in use. "
-                       "Choose a different ID."
+        # Reject duplicate employee_id — but a blank id never clashes.
+        if employee.employee_id:
+            clash = _data(
+                supabase.table("employees")
+                .select("id")
+                .eq("employee_id", employee.employee_id)
+                .execute()
             )
+            if clash:
+                raise HTTPException(
+                    400,
+                    detail=f"Employee ID '{employee.employee_id}' is already in use. "
+                           "Choose a different ID."
+                )
 
         data = employee.model_dump()
         data.pop('expected_updated_at', None)  # creates cannot conflict; never stored
@@ -429,11 +568,21 @@ async def update_employee(id: int, updated: Employee, current_user: dict = Depen
                 raise HTTPException(404, detail=f"Employee #{id} not found")
         data = updated.model_dump()
         assert_unchanged(existing, data.pop('expected_updated_at', None))
-        old_emp_id = existing['employee_id']
-        new_emp_id = updated.employee_id
+        old_emp_id = existing.get('employee_id') or ''
+        new_emp_id = updated.employee_id or ''
 
-        # If employee_id is changing, make sure the new one isn't taken
-        if new_emp_id != old_emp_id:
+        # Clearing an issued id is rejected (422): overtime, leave and PPE
+        # history is linked by that id text, and a blank cannot carry it.
+        if old_emp_id and not new_emp_id:
+            raise HTTPException(
+                422,
+                detail=f"Employee ID '{old_emp_id}' is used by overtime, leave or PPE records and cannot be cleared. "
+                       "Issue a replacement ID instead."
+            )
+
+        # If employee_id is changing to a given (non-blank) value, make sure
+        # the new one isn't taken — a blank id never clashes.
+        if new_emp_id != old_emp_id and new_emp_id:
             clash = _data(
                 supabase.table("employees")
                 .select("id")
