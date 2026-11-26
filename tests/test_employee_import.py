@@ -136,7 +136,7 @@ def test_preview_wide_counts_and_actions():
     assert plan["counts"]["rows_ignored"] == 2
     people = {p["mine_number"]: p for p in plan["people"]}
     assert people["M0001"]["action"] == "fill"
-    assert people["M0001"]["fill"] == {"phone": "0712345678"}
+    assert people["M0001"]["fill"] == {"phone": "+263 71 2345 678"}
     assert people["M0001"]["diffs"] == []
     assert people["M0001"]["person_id"] == 2
     assert people["M0002"]["action"] == "unchanged"
@@ -189,6 +189,59 @@ def test_preview_unreadable_date_refused_with_plain_reason():
     assert "next week" in refused[0]["reason"] and "Hard hat" in refused[0]["reason"]
 
 
+def test_preview_names_and_ids_normalised_like_the_register():
+    db = FakeSupabase(_store(), [])
+    rows = [["M0004", "MOYO farai", "", "", "", "", "", "15/01/2024", "0712345678"]]
+    id_mapping = dict(WIDE_MAPPING)
+    id_mapping["7"] = "id_number"
+    rows[0][7] = "63 1234567 a63"
+    plan = plan_import(db, rows, id_mapping, "wide")
+    person = {p["mine_number"]: p for p in plan["people"]}["M0004"]
+    assert person["action"] == "create"
+    assert (person["first_name"], person["last_name"]) == ("Farai", "Moyo")
+    assert person["id_number"] == "63-1234567-A63"
+    assert person["phone"] == "+263 71 2345 678"
+
+
+def test_preview_malformed_phone_refused_as_a_value_person_proceeds():
+    db = FakeSupabase(_store(), [])
+    rows = [["M0004", "Rudo Moyo", "", "", "", "", "", "15/01/2024", "0777"]]
+    plan = plan_import(db, rows, WIDE_MAPPING, "wide")
+    person = {p["mine_number"]: p for p in plan["people"]}["M0004"]
+    assert person["action"] == "create"
+    assert "phone" not in person or person["phone"] == ""
+    reasons = [p["reason"] for p in plan["problems"]]
+    assert any("0777" in r and "not a valid phone number" in r for r in reasons)
+    # The short store code is refused the same way: M0002 stays put, flagged.
+    plan2 = _plan()
+    m0002 = {p["mine_number"]: p for p in plan2["people"]}["M0002"]
+    assert m0002["action"] == "unchanged"
+    assert m0002["fill"] == {}
+    assert any("0777" in p["reason"] for p in plan2["problems"])
+
+
+def test_mining_hidden_account_refused_import_preview_and_commit(imp_client):
+    hidden = {"user_id": "u-denied", "email": "abcjosphat@gmail.com",
+              "role": "admin", "scope": None}
+    imp_client.as_user(hidden)
+    assert imp_client.post("/api/employees/import/preview",
+                           json=_commit_body()).status_code == 403
+    assert imp_client.post("/api/employees/import/commit",
+                           json=_commit_body()).status_code == 403
+    # Refused up front: nothing written, nothing logged.
+    assert imp_client.scope_store["employee_imports"] == []
+    assert len(imp_client.scope_store["employees"]) == 3
+
+
+def test_commit_writes_the_canonical_phone(imp_client):
+    imp_client.as_user(ADMIN)
+    resp = imp_client.post("/api/employees/import/commit", json=_commit_body())
+    assert resp.status_code == 200, resp.text
+    store = imp_client.scope_store
+    m0001 = [e for e in store["employees"] if e["employee_id"] == "M0001"][0]
+    assert m0001["phone"] == "+263 71 2345 678"
+
+
 def test_preview_mapping_errors_are_422_plain():
     db = FakeSupabase(_store(), [])
     with pytest.raises(PlanError, match="mine number"):
@@ -220,7 +273,7 @@ def test_preview_long_layout_item_text_and_raw_unknowns():
     plan = plan_import(db, rows, LONG_MAPPING, "long")
     people = {p["mine_number"]: p for p in plan["people"]}
     assert people["M0004"]["action"] == "create"
-    assert (people["M0004"]["first_name"], people["M0004"]["last_name"]) == ("Tinashe", "SIBANDA")
+    assert (people["M0004"]["first_name"], people["M0004"]["last_name"]) == ("Tinashe", "Sibanda")
     adds = [e for e in plan["ppe"] if e["action"] == "add"]
     assert [(e["ppe_type"], e["size"]) for e in adds] == [("helmet", "58"), ("Dust mask", None)]
     unknown = [e for e in adds if e.get("unknown_item")]

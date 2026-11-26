@@ -339,6 +339,67 @@ def test_manager_department_param_sees_mining(emp_client):
     assert _nums(emp_client.get("/api/employees?department=Mining")) == ["M0001", "M0002"]
 
 
+# ─── Mining-hidden account: same rule as the frontend register switch ────────
+
+HIDDEN_ADMIN = {"user_id": "u-denied", "email": "abcjosphat@gmail.com",
+                "role": "admin", "scope": None}
+HIDDEN_ADMIN_UPPER = {"user_id": "u-denied", "email": "ABCJosphat@Gmail.Com",
+                      "role": "admin", "scope": None}
+EMAILLESS_ADMIN = {"user_id": "u-noemail", "role": "admin", "scope": None}
+
+
+def test_hidden_match_is_exact_and_case_insensitive():
+    from app.scope import assert_separate_allowed, mining_hidden_for
+
+    assert mining_hidden_for(HIDDEN_ADMIN)
+    assert mining_hidden_for(HIDDEN_ADMIN_UPPER)
+    assert not mining_hidden_for({"email": "abcjosphat@gmail.com.evil.com"})
+    assert not mining_hidden_for({"email": ""})
+    assert not mining_hidden_for({})
+    assert not mining_hidden_for(None)
+    with pytest.raises(HTTPException):
+        assert_separate_allowed(HIDDEN_ADMIN, "Mining")
+    # Everything else passes through untouched.
+    assert_separate_allowed(HIDDEN_ADMIN, "Engineering")
+    assert_separate_allowed(HIDDEN_ADMIN, None)
+    assert_separate_allowed(ENG_MGR, "Mining")
+    assert_separate_allowed(EMAILLESS_ADMIN, "Mining")
+
+
+def test_mining_hidden_account_refused_the_mining_slice(emp_client):
+    emp_client.as_user(HIDDEN_ADMIN)
+    resp = emp_client.get("/api/employees?department=Mining")
+    assert resp.status_code == 403
+    assert "Mining" in resp.json()["detail"]
+
+
+def test_mining_hidden_match_ignores_email_case(emp_client):
+    emp_client.as_user(HIDDEN_ADMIN_UPPER)
+    assert emp_client.get("/api/employees?department=Mining").status_code == 403
+    assert emp_client.get("/api/employees?department=mining").status_code == 403
+
+
+def test_mining_hidden_account_keeps_engineering(emp_client):
+    emp_client.as_user(HIDDEN_ADMIN)
+    assert _nums(emp_client.get("/api/employees")) == ["C1001", "C1002"]
+
+
+def test_account_without_email_keeps_the_mining_slice(emp_client):
+    emp_client.as_user(EMAILLESS_ADMIN)
+    assert _nums(emp_client.get("/api/employees?department=Mining")) == ["M0001", "M0002"]
+
+
+def test_mining_hidden_account_refused_ppe_slice(ppe_client):
+    ppe_client.as_user(HIDDEN_ADMIN)
+    assert ppe_client.get("/api/ppe?department=Mining").status_code == 403
+    assert sorted(r["id"] for r in ppe_client.get("/api/ppe").json()) == [11, 12]
+
+
+def test_mining_hidden_account_refused_order_slice(order_client):
+    order_client.as_user(HIDDEN_ADMIN)
+    assert order_client.get("/api/ppe-order-list?department=Mining").status_code == 403
+
+
 def test_mining_search_stays_inside_mining(emp_client):
     emp_client.as_user(MINING)
     assert _nums(emp_client.get("/api/employees/search/Moyo")) == ["M0001"]

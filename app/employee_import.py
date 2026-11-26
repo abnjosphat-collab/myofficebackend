@@ -277,22 +277,35 @@ def _row_blank(row: Any, mapped: dict[int, dict]) -> bool:
 def _person_fields(row: Any, mapped: dict[int, dict]) -> dict:
     """The mapped person values as plain strings (dates parsed): mine_number,
     first_name, last_name, job_title, section, date_engaged, id_number, phone.
-    full_name splits here, so one column feeds both names."""
+    full_name splits here, so one column feeds both names. Names and the
+    national ID go through the same canonical normalization the employee
+    create/update endpoints enforce (case fix, dash separators); the split
+    runs first so its all-caps surname heuristic still sees the raw tokens."""
+    from app.routers.employees import normalize_national_id, normalize_person_name
+
     fields: dict[str, str] = {}
     for col, m in mapped.items():
         target = m["target"]
         if target == "mine_number":
             fields["mine_number"] = _text(_cell(row, col))
-        elif target in ("first_name", "last_name", "job_title", "section", "id_number", "phone"):
+        elif target in ("first_name", "last_name"):
+            value = _text(_cell(row, col))
+            if value:
+                fields[target] = normalize_person_name(value)
+        elif target in ("job_title", "section", "phone"):
             value = _text(_cell(row, col))
             if value:
                 fields[target] = value
+        elif target == "id_number":
+            value = _text(_cell(row, col))
+            if value:
+                fields[target] = normalize_national_id(value)
         elif target == "full_name":
             first, last = split_full_name(_cell(row, col))
             if first:
-                fields.setdefault("first_name", first)
+                fields.setdefault("first_name", normalize_person_name(first))
             if last:
-                fields.setdefault("last_name", last)
+                fields.setdefault("last_name", normalize_person_name(last))
         elif target == "date_engaged":
             iso, _approx = parse_import_date(_cell(row, col))
             if iso:
@@ -447,6 +460,21 @@ def plan_import(db: Any, rows: Any, mapping: Any, layout: str = "wide",
                                     "reason": reason, **issue})
                 counts["ppe_refused"] += 1
             continue
+        raw_phone = (fields.get("phone") or "").strip()
+        if raw_phone:
+            # Same canonical rule the employee endpoints enforce: valid
+            # numbers are stored canonical so preview and commit agree; an
+            # unreadable one is refused as a value (row-level problem) while
+            # the person and their PPE proceed without it. Absent/blank stays
+            # absent (never a fill); imports never clear a stored number.
+            from app.routers.employees import PhoneError, _canonical_single_phone
+
+            try:
+                fields["phone"] = _canonical_single_phone(raw_phone)
+            except PhoneError as e:
+                reason = f"Row {row_no}: {e}"
+                problems.append({"row": row_no, "number": number, "reason": reason})
+                fields.pop("phone", None)
         pending_numbers.append(number)
         staged.append((row_no, number, fields, issues))
 
