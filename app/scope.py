@@ -113,6 +113,36 @@ TABLES: dict[str, dict[str, Any]] = {
 SEPARATE_DEPARTMENTS = ["Mining"]
 
 
+#: Accounts that never see the Mining register: mine-side working belongs to
+#: Darlington Kureva's accounts. Mirrors the frontend MINING_HIDDEN_FOR_ACCOUNTS
+#: in lib/useDepartmentSwitch.ts: exact sign-in email, case-insensitive.
+#: Everyone else keeps today's behavior unchanged.
+MINING_HIDDEN_FOR_ACCOUNTS = frozenset({"abcjosphat@gmail.com"})
+
+
+def mining_hidden_for(user: Optional[dict]) -> bool:
+    """True iff `user` signs in as a Mining-hidden account. Missing or blank
+    emails never match: only a positive match is denied, so nothing else can
+    lose access through a malformed session."""
+    if not isinstance(user, dict):
+        return False
+    email = user.get("email") or ""
+    return str(email).strip().lower() in MINING_HIDDEN_FOR_ACCOUNTS
+
+
+def assert_separate_allowed(user: Optional[dict], department: Optional[str]) -> None:
+    """403 iff `user` may never see `department`'s separate slice. The only
+    rule today is the Mining-hidden account above; every other account and
+    every non-separate department passes through untouched. Callers gate the
+    Mining slice (lists) and the Mining import preview/commit on this."""
+    if not department or not str(department).strip():
+        return
+    want = str(department).strip()
+    if want.lower() == "mining" and mining_hidden_for(user):
+        raise HTTPException(status_code=403,
+                            detail="The Mining register is not available to this account.")
+
+
 #: The one stored shape for a department limit (Admin writes this;
 #: sections stay plain strings, as the Projects accounts have them).
 #: Reads also tolerate {"kind", "value"} so nothing depends on which of the
@@ -566,6 +596,10 @@ def requested_department(user: Optional[dict], requested: Optional[str]) -> Opti
             from app.auth import role_at_least
             if not role_at_least((user or {}).get("role", "viewer"), "manager"):
                 raise HTTPException(status_code=403, detail=f"Only managers can view the {separate} department.")
+            # A Mining-hidden account passes the role check (it is an admin)
+            # but is still refused its slice: same rule as the frontend
+            # register switch, enforced for direct API calls too.
+            assert_separate_allowed(user, separate)
             return separate
     return None
 

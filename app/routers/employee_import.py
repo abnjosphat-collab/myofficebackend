@@ -14,6 +14,7 @@ from app.auth import require_role
 from app.cache import invalidate_namespace
 from app.employee_import import PlanError, commit_import, plan_import, undo_import
 from app.errors import server_error
+from app.scope import assert_separate_allowed
 from app.supabase_client import supabase
 import logging
 
@@ -36,6 +37,10 @@ def _actor(user: dict) -> str:
 @router.post("/preview")
 async def preview_import(body: ImportRequest, current_user: dict = Depends(require_role("admin"))):
     """Dry-run: what would happen, without writing. Same validation as commit."""
+    # A Mining-hidden account never sees the Mining register through the UI,
+    # so the import preview of that department is refused too (403, not 422:
+    # it is an access rule, not a mapping problem).
+    assert_separate_allowed(current_user, body.department)
     try:
         plan = await run_in_threadpool(
             lambda: plan_import(supabase, body.rows, body.mapping, body.layout, body.department))
@@ -52,6 +57,7 @@ async def commit_import_endpoint(body: ImportRequest,
                                 current_user: dict = Depends(require_role("admin"))):
     """Write the import and log it to employee_imports. Re-plans on fresh
     reads, so a preview from an hour ago cannot write stale decisions."""
+    assert_separate_allowed(current_user, body.department)
     try:
         result = await run_in_threadpool(
             lambda: commit_import(supabase, body.rows, body.mapping, body.layout,
