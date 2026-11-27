@@ -60,11 +60,12 @@ class PPEIssueCreate(BaseModel):
 
     # The person copies are optional because the server stamps them from the employee register on every create
 
-    # (client copies are ignored); only the mine number reference is required.
+    # (client copies are ignored). The stable Personnel ID is preferred; legacy clients can send a mine number.
 
     employee_name: Optional[str] = None
 
-    employee_id: str = Field(..., min_length=1)
+    employee_id: Optional[str] = None
+    employee_db_id: Optional[int] = Field(default=None, gt=0)
 
     department: Optional[str] = None
 
@@ -125,6 +126,7 @@ class PPEIssueCreate(BaseModel):
 
 
 class PPEIssueUpdate(BaseModel):
+    employee_db_id: Optional[int] = Field(default=None, gt=0)
 
     employee_name: Optional[str] = None
 
@@ -208,7 +210,7 @@ def _register_employee(employee_id: str):
 
     found = supabase.table("employees").select(
 
-        "employee_id,first_name,last_name,designation,department,section"
+        "id,employee_id,first_name,last_name,designation,department,section"
 
     ).ilike("employee_id", _like_literal(employee_id.strip())).execute()
 
@@ -228,7 +230,11 @@ def _stamp_person(data: dict, person: dict) -> dict:
 
     """Overwrite the person copies (and the id's spelling) from the register row."""
 
-    data["employee_id"] = person.get("employee_id")
+    data["employee_id"] = (person.get("employee_id") or "").strip() or None
+    if person.get("id") is not None:
+        data["employee_db_id"] = person["id"]
+    else:
+        data.pop("employee_db_id", None)
 
     data["employee_name"] = " ".join(f"{person.get('first_name') or ''} {person.get('last_name') or ''}".split())
 
@@ -268,17 +274,26 @@ def _settle_premature(patch: dict, existing: dict) -> None:
 
 
 
-def _resolve_person_or_422(employee_id: str) -> dict:
-
-    person = _register_employee(employee_id)
-
+def _resolve_person_or_422(employee_id: Optional[str], employee_db_id: Optional[int] = None) -> dict:
+    if employee_db_id is None:
+        person = _register_employee(employee_id or "")
+    else:
+        person = one_row(supabase.table("employees").select(
+            "id,employee_id,first_name,last_name,designation,department,section"
+        ).eq("id", employee_db_id).execute())
     if person is None:
-
-        raise HTTPException(status_code=422, detail="That mine number is not on the employee register.")
+        detail = "That person is not on the employee register." if employee_db_id else "That mine number is not on the employee register."
+        raise HTTPException(status_code=422, detail=detail)
 
     return person
 
 
+
+def _set_one_size(fields: dict, ppe_type: Optional[str]) -> None:
+    """Use the shared size label for new helmets and cap lamp belts."""
+    key = (ppe_type or "").strip().lower().replace(" ", "_")
+    if key in {"helmet", "cap_lamp_belt"}:
+        fields["size"] = "OSFA"
 
 # Helper function to convert dates in records
 
@@ -378,7 +393,7 @@ async def create_ppe_record(record: PPEIssueCreate, current_user: dict = Depends
 
         # The person must be on the register; the row keeps the register's copies and spelling, not the client's.
 
-        person = _resolve_person_or_422(record.employee_id)
+        person = _resolve_person_or_422(record.employee_id, record.employee_db_id)
 
         person_scope = viewer_scope(current_user)
 
@@ -391,12 +406,14 @@ async def create_ppe_record(record: PPEIssueCreate, current_user: dict = Depends
         # Convert Pydantic model to dict and handle date serialization
 
         data_to_insert = _stamp_person(record.model_dump(), person)
+        _set_one_size(data_to_insert, record.ppe_type)
 
 
 
         # The same item issued to the same person on the same day twice is refused here, not just in the browser.
 
-        clash = existing_duplicate(supabase, data_to_insert["employee_id"], record.ppe_type, record.issue_date)
+        clash = existing_duplicate(supabase, data_to_insert["employee_id"], record.ppe_type, record.issue_date,
+                                   employee_db_id=data_to_insert.get("employee_db_id"))
 
         if clash:
 
@@ -510,43 +527,38 @@ async def update_ppe_record(record_id: int, updated: PPEIssueUpdate, current_use
 
         # Moving the record to another person re-stamps the copies from the register; anything else leaves them alone.
 
-        if "employee_id" in data_to_update:
-
-            sent = data_to_update["employee_id"]
-
-            if sent is not None and (sent or "").strip().upper() == (existing.get("employee_id") or "").strip().upper():
-
-                # The same person (a re-pick that changed nothing, or only the id's case): keep the stored spelling.
-
-                data_to_update.pop("employee_id")
-
-            else:
-
-                new_person = _resolve_person_or_422(sent or "")
-
+        has_db_id = "employee_db_id" in data_to_update
+        db_id = data_to_update.pop("employee_db_id", None)
+        has_code = "employee_id" in data_to_update
+        sent = data_to_update.pop("employee_id", None)
+        if db_id is not None or has_code or has_db_id:
+            # A legacy edit sends the old code on every save. A linked issue
+            # always keeps its reference unless an explicit new person is picked.
+            same_db = db_id is not None and str(db_id) == str(existing.get("employee_db_id"))
+            same_code = (not has_db_id and sent is not None
+                         and sent.strip().upper() == (existing.get("employee_id") or "").strip().upper())
+            if not same_db and not same_code:
+                new_person = _resolve_person_or_422(sent, db_id)
                 move_scope = viewer_scope(current_user)
-
                 if move_scope is not None and not person_in_scope(new_person, move_scope):
-
                     raise HTTPException(status_code=404, detail="PPE record not found")
-
                 _stamp_person(data_to_update, new_person)
+            else:
+                for copy in ("employee_name", "department", "position", "mine_section"):
+                    data_to_update.pop(copy, None)
 
+        kind_changed = "ppe_type" in data_to_update and data_to_update["ppe_type"] != existing.get("ppe_type")
+        if kind_changed or ("size" in data_to_update and data_to_update["size"] != existing.get("size")):
+            _set_one_size(data_to_update, data_to_update.get("ppe_type", existing.get("ppe_type")))
 
-
-        # Moving the item, the date or the person must not make it a duplicate of another issue.
-
-        if any(k in data_to_update for k in ('employee_id', 'ppe_type', 'issue_date')):
-
+        # Moving the item, the date or the person must not duplicate another issue.
+        if any(k in data_to_update for k in ("employee_id", "employee_db_id", "ppe_type", "issue_date")):
             merged = {**existing, **data_to_update}
-
-            clash = existing_duplicate(supabase, merged.get('employee_id'), merged.get('ppe_type'), merged.get('issue_date'), ignore_id=record_id)
-
+            clash = existing_duplicate(supabase, merged.get("employee_id"), merged.get("ppe_type"),
+                                       merged.get("issue_date"), ignore_id=record_id,
+                                       employee_db_id=merged.get("employee_db_id"))
             if clash:
-
                 raise HTTPException(status_code=409, detail=duplicate_message(clash))
-
-
 
         # Convert dates to ISO format for database
 
@@ -696,7 +708,7 @@ async def get_ppe_stats(current_user: dict = Depends(get_current_user)):
 
                     supabase.table("ppe_records")
 
-                    .select("id, employee_id, status, condition, expiry_date, department")
+                    .select("id, employee_id, employee_db_id, status, condition, expiry_date, department")
 
                     .order("id"),
 
@@ -768,7 +780,10 @@ async def get_ppe_stats(current_user: dict = Depends(get_current_user)):
 
 
 
-        unique_employees = len({record.get('employee_id') for record in records_all if record.get('employee_id')})
+        unique_employees = len({
+            ("code", str(r["employee_id"]).strip().upper()) if r.get("employee_id") else ("db", r["employee_db_id"])
+            for r in records_all if r.get("employee_id") or r.get("employee_db_id")
+        })
 
         
 
@@ -1262,7 +1277,9 @@ class PPEEventIn(BaseModel):
 
     kind: str = Field(..., pattern="^(issue|return|correction)$")
 
-    employee_id: str = Field(..., min_length=1)
+    employee_id: Optional[str] = None
+    employee_db_id: Optional[int] = Field(default=None, gt=0)
+    size: Optional[str] = None
 
     ppe_type: str = Field(..., min_length=1)
 
@@ -1300,7 +1317,7 @@ def _event_actor(user: dict) -> str:
 
 async def _event_issue(entry: PPEEventIn, actor: str, current_user: dict) -> dict:
 
-    person = _resolve_person_or_422(entry.employee_id)
+    person = _resolve_person_or_422(entry.employee_id, entry.employee_db_id)
 
     scope = viewer_scope(current_user)
 
@@ -1312,7 +1329,8 @@ async def _event_issue(entry: PPEEventIn, actor: str, current_user: dict) -> dic
 
         raise HTTPException(status_code=400, detail="An issue needs an issue date.")
 
-    clash = existing_duplicate(supabase, person.get("employee_id"), entry.ppe_type, entry.issue_date.isoformat())
+    clash = existing_duplicate(supabase, person.get("employee_id"), entry.ppe_type,
+                               entry.issue_date.isoformat(), employee_db_id=person.get("id"))
 
     if clash:
 
@@ -1338,6 +1356,9 @@ async def _event_issue(entry: PPEEventIn, actor: str, current_user: dict) -> dic
 
     }, person)
 
+    if entry.size is not None:
+        data["size"] = entry.size
+    _set_one_size(data, entry.ppe_type)
     response = supabase.table("ppe_records").insert(data).execute()
 
     created = one_row(response)
@@ -1348,7 +1369,7 @@ async def _event_issue(entry: PPEEventIn, actor: str, current_user: dict) -> dic
 
     convert_dates_to_iso(created)
 
-    return {"record_id": created.get("id"), "employee_id": created.get("employee_id"),
+    return {"record_id": created.get("id"), "employee_id": created.get("employee_id"), "employee_db_id": created.get("employee_db_id"),
 
             "status": "active", "expiry_date": created.get("expiry_date"), "department": dept,
 
@@ -1390,7 +1411,7 @@ async def _event_return(entry: PPEEventIn, actor: str, current_user: dict) -> di
 
     return {"record_id": entry.record_id, "status": "returned",
 
-            "employee_id": existing.get("employee_id"), "department": existing.get("department") or "",
+            "employee_id": existing.get("employee_id"), "employee_db_id": existing.get("employee_db_id"), "department": existing.get("department") or "",
 
             "effective_date": today, "section": existing.get("mine_section") or ""}
 
@@ -1448,6 +1469,8 @@ async def _event_correction(entry: PPEEventIn, actor: str, current_user: dict) -
 
             "updated": sorted(patch.keys()), "employee_id": existing.get("employee_id"),
 
+            "employee_db_id": existing.get("employee_db_id"),
+
             "department": existing.get("department") or "",
 
             "effective_date": effective, "section": existing.get("mine_section") or ""}
@@ -1496,7 +1519,9 @@ async def record_ppe_event(entry: PPEEventIn, current_user: dict = Depends(requi
 
             "kind": entry.kind,
 
-            "employee_id": result.get("employee_id") or entry.employee_id.strip().upper(),
+            "employee_id": result.get("employee_id") or (
+                (entry.employee_id or "").strip().upper() or None if not result.get("employee_db_id") else None
+            ),
 
             "ppe_type": entry.ppe_type,
 
@@ -1524,6 +1549,8 @@ async def record_ppe_event(entry: PPEEventIn, current_user: dict = Depends(requi
 
         }
 
+        if result.get("employee_db_id") is not None:
+            event["employee_db_id"] = result["employee_db_id"]
         created = one_row(supabase.table("ppe_events").insert(event).execute())
 
         return {**result, "duplicate": False, "event_id": (created or {}).get("id")}

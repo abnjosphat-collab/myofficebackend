@@ -36,10 +36,15 @@ def _split_top(expr):
 
 
 def _apply_or(rows, expr):
-    """Honour PostgREST or_() filters: ilike search, in.(...) and not.in.(...) lists, is.null."""
+    """Apply the PostgREST logical groups and operators used by the scoped queries."""
     kept = []
     for part in _split_top(expr):
-        if ".ilike." in part:
+        if part.startswith("and(") and part.endswith(")"):
+            matches = rows
+            for condition in _split_top(part[4:-1]):
+                matches = _apply_or(matches, condition)
+            kept += matches
+        elif ".ilike." in part:
             col, pat = part.split(".ilike.", 1)
             # PostgREST value-quoting ("...") is stripped server-side before
             # the LIKE match; unquoted patterns pass through unchanged.

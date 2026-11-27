@@ -209,6 +209,19 @@ def test_ppe_scoped_create_for_registered_outsider_is_404_not_422(ppe_client):
     assert len(ppe_client.scope_store["ppe_records"]) == 2
 
 
+def test_ppe_scoped_list_uses_link_before_legacy_number(ppe_client):
+    ppe_client.scope_store["employees"].append(
+        {"id": 3, "employee_id": None, "section": "Projects", "department": "Engineering"}
+    )
+    ppe_client.scope_store["ppe_records"].extend([
+        {"id": 3, "employee_db_id": 3, "employee_id": None, "ppe_type": "helmet", "status": "active"},
+        {"id": 4, "employee_db_id": 2, "employee_id": "C1001", "ppe_type": "helmet", "status": "active"},
+    ])
+    ppe_client.as_user(SCOPED)
+    assert {r["id"] for r in ppe_client.get("/api/ppe").json()} == {1, 3}
+    assert ppe_client.get("/api/ppe/4").status_code == 404
+
+
 def test_ppe_scoped_move_writes_nothing(ppe_client):
     ppe_client.as_user(SCOPED)
     resp = ppe_client.patch("/api/ppe/1", json={"employee_id": "C2001"})

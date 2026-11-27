@@ -64,7 +64,8 @@ TABLES: dict[str, dict[str, Any]] = {
     "timesheets": {"rule": "person", "column": "employee_id", "id_kind": "db"},
     "artisan_timesheets": {"rule": "person", "column": "employee_db_id", "id_kind": "db",
                               "column2": "employee_id", "id_kind2": "register"},
-    "ppe_records": {"rule": "person", "column": "employee_id", "id_kind": "register"},
+    "ppe_records": {"rule": "person", "column": "employee_db_id", "id_kind": "db",
+                    "column2": "employee_id", "id_kind2": "register", "legacy_fallback": True},
     "ppe_order_list": {"rule": "person", "column": "employee_id", "id_kind": "register", "json": "entry"},
     "training_certifications": {"rule": "person", "column": "employee_id", "id_kind": "register"},
     "competency_matrix": {"rule": "person", "column": "employee_id", "id_kind": "register"},
@@ -352,6 +353,8 @@ def _person_match(rule: dict, row: dict, bank: dict) -> bool:
     """Either link in scope (a table with one link column just checks that)."""
     if _person_ref_match(rule["column"], rule.get("id_kind") == "db", row, bank):
         return True
+    if rule.get("legacy_fallback") and row.get(rule["column"]) is not None:
+        return False
     return "column2" in rule and _person_ref_match(
         rule["column2"], rule.get("id_kind2") == "db", row, bank)
 
@@ -367,10 +370,15 @@ def _in_or_empty_2(query: Any, rule: dict, bank: dict) -> Any:
     if o1 and o2:
         q1 = ",".join(str(v) if db1 else json.dumps(str(v)) for v in o1)
         q2 = ",".join(str(v) if db2 else json.dumps(str(v)) for v in o2)
-        return query.or_(f"{col1}.in.({q1}),{col2}.in.({q2})")
+        legacy = f"{col2}.in.({q2})"
+        if rule.get("legacy_fallback"):
+            legacy = f"and({col1}.is.null,{legacy})"
+        return query.or_(f"{col1}.in.({q1}),{legacy}")
     if o1:
         return query.in_(col1, o1)
     if o2:
+        if rule.get("legacy_fallback"):
+            query = query.is_(col1, "null")
         return query.in_(col2, o2)
     return query.eq(col1, -1 if db1 else "__scope_empty__")
 

@@ -251,6 +251,26 @@ async def test_list_pages_past_supabase_default_limit(patch_supabase):
 
 # ─── create_ppe_record ───────────────────────────────────────────────────────────────
 
+@pytest.mark.asyncio
+async def test_issues_to_distinct_numberless_people_and_rejects_a_repeat(patch_supabase):
+    patch_supabase(employees=[
+        {"id": 51, "first_name": "First", "last_name": "Rigger", "employee_id": None, "department": "Engineering"},
+        {"id": 52, "first_name": "Other", "last_name": "Rigger", "employee_id": None, "department": "Engineering"},
+    ])
+    first = PPEIssueCreate(employee_db_id=51, employee_name="Ignored", ppe_type="helmet",
+                           item_name="Hard hat", issue_date="2026-11-26")
+    saved = await create_ppe_record(first, current_user=_user())
+    assert saved["employee_name"] == "First Rigger"
+    assert saved["employee_id"] is None
+    assert saved["employee_db_id"] == 51
+    assert saved["size"] == "OSFA"
+    second = await create_ppe_record(first.model_copy(update={"employee_db_id": 52}), current_user=_user())
+    assert second["employee_db_id"] == 52
+    assert second["id"] != saved["id"]
+    with pytest.raises(HTTPException) as err:
+        await create_ppe_record(first, current_user=_user())
+    assert err.value.status_code == 409
+
 async def test_create_happy_path(patch_supabase):
     patch_supabase()
     record = PPEIssueCreate(
