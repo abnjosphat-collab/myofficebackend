@@ -28,18 +28,25 @@ def find_duplicate(candidates: Iterable[dict], ppe_type: object, issue_date: obj
     return None
 
 
-def existing_duplicate(client: Any, employee_id: Optional[str], ppe_type: object, issue_date: object, ignore_id: object = None) -> Optional[dict]:
-    """Look up the person's PPE issued on that day and return the duplicate, if any. `client` is the router's Supabase client."""
-    if not employee_id or not ppe_type or not issue_date:
+def existing_duplicate(client: Any, employee_id: Optional[str], ppe_type: object, issue_date: object,
+                       ignore_id: object = None, *, employee_db_id: Optional[int] = None) -> Optional[dict]:
+    """Find a duplicate by stable Personnel ID and check legacy numbered issues."""
+    if not (employee_id or employee_db_id) or not ppe_type or not issue_date:
         return None
-    response = (
-        client.table("ppe_records")
-        .select("id,employee_name,ppe_type,item_name,issue_date,status")
-        .eq("employee_id", employee_id)
-        .eq("issue_date", str(issue_date)[:10])
-        .execute()
-    )
-    return find_duplicate(response.data or [], ppe_type, issue_date, ignore_id)
+
+    def issued_on(column: str, value: Any, legacy_only: bool = False) -> Optional[dict]:
+        query = (client.table("ppe_records")
+                 .select("id,employee_name,ppe_type,item_name,issue_date,status")
+                 .eq(column, value).eq("issue_date", str(issue_date)[:10]))
+        if legacy_only:
+            query = query.is_("employee_db_id", "null")
+        return find_duplicate(query.execute().data or [], ppe_type, issue_date, ignore_id)
+
+    if employee_db_id is not None:
+        linked = issued_on("employee_db_id", employee_db_id)
+        if linked:
+            return linked
+    return issued_on("employee_id", employee_id, legacy_only=employee_db_id is not None) if employee_id else None
 
 
 def duplicate_message(row: dict) -> str:

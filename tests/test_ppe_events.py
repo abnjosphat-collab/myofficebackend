@@ -107,7 +107,9 @@ def ppe_events_env(monkeypatch):
     ]}
     monkeypatch.setattr(ppe_mod, "supabase", _FakeSupabase(state))
 
-    def _resolve(employee_id):
+    def _resolve(employee_id, employee_db_id=None):
+        if employee_db_id == 570:
+            return {**MINING_PERSON, "id": 570, "employee_id": None}
         eid = (employee_id or "").strip().upper()
         for person in (MINING_PERSON, ENG_PERSON):
             if person["employee_id"] == eid:
@@ -134,6 +136,15 @@ def _issue(employee_id="C1001", key="k-1", **kw):
             "quantity": 1, "issue_date": date(2026, 2, 2), "idempotency_key": key}
     args.update(kw)
     return PPEEventIn(**args)
+
+
+async def test_numberless_cap_lamp_belt_records_both_holding_and_event(ppe_events_env):
+    result = await record_ppe_event(_issue(employee_id=None, employee_db_id=570, ppe_type="Cap_lamp_belt"), _manager())
+    assert result["employee_db_id"] == 570
+    assert result["employee_id"] is None
+    assert ppe_events_env["records"][0]["size"] == "OSFA"
+    assert ppe_events_env["events"][0]["employee_db_id"] == 570
+    assert ppe_events_env["events"][0]["employee_id"] is None
 
 
 async def test_issue_creates_record_and_event_with_mining_expiry(ppe_events_env):

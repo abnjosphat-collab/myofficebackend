@@ -147,6 +147,13 @@ def test_dual_link_list_builds_one_or_of_two_in_lists(db):
     assert ("or", 'employee_db_id.in.(1,2),employee_id.in.("C1001","C1002")') in db.calls
 
 
+def test_ppe_scope_prefers_register_row_and_falls_back_for_legacy_records(db):
+    ids = {"db": {1}, "register": {"C1001"}, "names": set()}
+    assert row_visible(SCOPED, "ppe_records", {"employee_db_id": 1, "employee_id": None}, db, ids)
+    assert row_visible(SCOPED, "ppe_records", {"employee_db_id": None, "employee_id": "C1001"}, db, ids)
+    assert not row_visible(SCOPED, "ppe_records", {"employee_db_id": 99, "employee_id": "C1001"}, db, ids)
+
+
 def test_dual_link_row_visible_matches_either_link(db):
     ids = scope_person_ids(db, "Projects")
     assert row_visible(SCOPED, "artisan_timesheets", {"employee_db_id": 1, "employee_id": "CX"}, db, ids)
